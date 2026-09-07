@@ -43,3 +43,6 @@ data/*
 *.jpg
 *.srt
 recent_projects.json
+
+# Node / Frontend build
+node_modules/
