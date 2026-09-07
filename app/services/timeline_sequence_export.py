@@ -69,6 +69,10 @@ def export_timeline_sequence(
     mask_regions=None,
     logo_layers=None,
     text_image_layers=None,
+    export_preset: str = "balanced",
+    video_bitrate_kbps: int = 2000,
+    on_progress=None,
+    cancellation_check=None,
 ) -> str:
     """Render sequential V1 clips in one FFmpeg graph, without a merged source file."""
     from video_processor import (
@@ -77,9 +81,11 @@ def export_timeline_sequence(
         _build_mask_filter_chain,
         _build_video_color_chain,
         _build_video_lut_chain,
+        build_export_h264_encoder_args,
         _ffmpeg_path,
         _map_normalized_overlays_to_canvas,
         get_video_dimensions,
+        run_ffmpeg_with_progress,
     )
 
     valid = [dict(clip) for clip in clips or [] if os.path.isfile(str(clip.get("source", "") or ""))]
@@ -230,6 +236,9 @@ def export_timeline_sequence(
             filters.append(f"[acat]volume={float(original_audio_gain_db):.6f}dB[aout]")
             audio_map = "[aout]"
 
+    video_encoder_args = build_export_h264_encoder_args(
+        ffmpeg, export_preset, video_bitrate_kbps
+    )
     filter_string = ";".join(filters)
     if len(filter_string) > 8000:
         filter_script_path = os.path.join(tempfile.gettempdir(), f"timeline_export_{int(time.time())}.txt")
@@ -237,25 +246,45 @@ def export_timeline_sequence(
             f.write(filter_string)
         command += [
             "-filter_complex_script", filter_script_path, "-map", "[vout]", "-map", audio_map,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            *video_encoder_args,
             "-c:a", "aac", "-b:a", "192k",
             "-t", f"{total_duration:.6f}", "-movflags", "+faststart", output_path,
         ]
     else:
         command += [
             "-filter_complex", filter_string, "-map", "[vout]", "-map", audio_map,
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            *video_encoder_args,
             "-c:a", "aac", "-b:a", "192k",
             "-t", f"{total_duration:.6f}", "-movflags", "+faststart", output_path,
         ]
         
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    result = subprocess.run(
-        command, capture_output=True, check=False, timeout=86400,
-        **subprocess_text_kwargs(),
+    # Use FFmpeg's machine-readable progress output instead of waiting for a
+    # blocking subprocess.  This keeps timeline exports consistent with the
+    # regular subtitle export path and reports the actual ``out_time``.
+    ok, _stdout, stderr = run_ffmpeg_with_progress(
+        command,
+        total_duration_seconds=total_duration,
+        progress_callback=on_progress,
+        cancellation_check=cancellation_check,
+        output_path_to_clean=output_path,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg Timeline export failed: {sanitize_ffmpeg_diagnostics(result.stderr)[-1800:]}")
+    if not ok and "h264_nvenc" in command:
+        fallback_args = build_export_h264_encoder_args(
+            ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
+        )
+        video_arg_index = command.index("-c:v")
+        audio_arg_index = command.index("-c:a", video_arg_index)
+        command[video_arg_index:audio_arg_index] = fallback_args
+        ok, _stdout, stderr = run_ffmpeg_with_progress(
+            command,
+            total_duration_seconds=total_duration,
+            progress_callback=on_progress,
+            cancellation_check=cancellation_check,
+            output_path_to_clean=output_path,
+        )
+    if not ok:
+        raise RuntimeError(f"FFmpeg Timeline export failed: {sanitize_ffmpeg_diagnostics(stderr)[-1800:]}")
     if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
         raise RuntimeError("FFmpeg did not create the Timeline output file.")
     return output_path

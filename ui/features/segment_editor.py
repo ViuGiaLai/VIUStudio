@@ -1797,8 +1797,16 @@ class SegmentEditorMixin:
                 self.timeline._track_heights[text_track.id] = text_track.height or 80
             self.timeline._redraw()
             self.timeline._selected_layer_id = layer.id
-            self._show_text_inspector_for_track(text_track, layer)
-            self._refresh_text_layer_preview(layer.id)
+            if hasattr(self, "_sync_track_labels"):
+                self._sync_track_labels()
+            # A newly-created Text layer must enter the exact same selection
+            # path as a layer clicked in the timeline.  Updating only the
+            # inspector left `_preview_edit_layer_id` empty, so the native MPV
+            # text overlay was not activated consistently and the layer could
+            # appear to have been added only on the timeline.
+            self._timed_layer_preview_signature = None
+            self.on_timeline_layer_selected(layer.id)
+            self.schedule_timeline_project_persist()
 
         elif layer_type == "image":
             from app.layers.image import ImageLayer

@@ -1,12 +1,19 @@
 import os
-import time
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QProgressDialog, QTextEdit, QVBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTextEdit, QVBoxLayout
 
 from worker_adapters import RewriteTranslationWorker, TranscriptionWorker, TranslationWorker
 from translation import TranslationOrchestrator, load_prompt_options
 from utils.thread_lifecycle import release_thread_when_stopped
+
+# Keep progress events on the canonical application package.  The repository
+# also contains a ``models/`` data directory, which is not the Python module
+# that owns ProgressEvent.
+try:
+    from app.core.models.progress import ProgressEvent
+except ImportError:
+    from core.models.progress import ProgressEvent
 
 
 class SubtitleController:
@@ -44,7 +51,6 @@ class SubtitleController:
             self.gui.mini_status_bar.set_stopped()
 
     def _on_translation_progress(self, progress):
-        from models.progress import ProgressEvent
         dialog = getattr(self.gui, "_translation_progress_dialog", None)
         if isinstance(progress, ProgressEvent):
             percent = progress.percent

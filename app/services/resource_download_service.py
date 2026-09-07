@@ -76,19 +76,32 @@ class ResourceDownloadService:
         provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("/", os.sep)
         normalized = os.path.normpath(provider_voice)
         filename = os.path.basename(normalized)
-        candidate_nested = models_path("piper", "piper", filename)
-        if os.path.exists(candidate_nested):
-            return (candidate_nested, f"{candidate_nested}.json")
         if normalized.startswith(f"models{os.sep}"):
             relative = normalized[len("models" + os.sep):]
             model_path = models_path(*Path(relative).parts)
         else:
             model_path = models_path("piper", filename)
-        config_path = f"{model_path}.json"
-        return (
-            model_path,
-            config_path,
-        )
+        # Voice-pack archives commonly contain one wrapper directory with the
+        # same name as their destination (piper/piper or piper-en/piper-en).
+        # Resolve both layouts. The previous hard-coded Vietnamese-only
+        # fallback made a successfully extracted English pack fail verification
+        # and later made TTS unable to load the models it had just installed.
+        parent_dir = os.path.dirname(model_path)
+        parent_name = os.path.basename(parent_dir)
+        candidates = [model_path]
+        if parent_name:
+            candidates.append(os.path.join(parent_dir, parent_name, filename))
+        candidates.append(models_path("piper", "piper", filename))  # legacy bundle layout
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized_candidate = os.path.normcase(os.path.abspath(candidate))
+            if normalized_candidate in seen:
+                continue
+            seen.add(normalized_candidate)
+            config_path = f"{candidate}.json"
+            if os.path.isfile(candidate) or os.path.isfile(config_path):
+                return candidate, config_path
+        return model_path, f"{model_path}.json"
 
     def _voice_remote_paths(self, voice_entry: dict) -> tuple[str, str]:
         provider_voice = str(voice_entry.get("provider_voice", "")).strip().replace("\\", "/")
@@ -423,6 +436,22 @@ class ResourceDownloadService:
                     )
                 ]
             return []
+        if voice_id.startswith("kokoro:"):
+            from kokoro_support import config_path, english_g2p_available, model_path, runtime_available, voice_path
+
+            selected_voice = voice_id.split(":", 1)[1].strip() or "af_heart"
+            issues: list[tuple[str, str]] = []
+            if not runtime_available():
+                issues.append(("tts:kokoro", "Kokoro runtime is not installed. Install it from Manage Resources."))
+            if not english_g2p_available():
+                issues.append(("tts:kokoro:g2p", "Kokoro English pronunciation model is not installed."))
+            if not os.path.isfile(config_path()):
+                issues.append(("tts:kokoro:config", f"Kokoro config is missing: {config_path()}"))
+            if not os.path.isfile(model_path()):
+                issues.append(("tts:kokoro:model", f"Kokoro model is missing: {model_path()}"))
+            if not os.path.isfile(voice_path(selected_voice)):
+                issues.append((f"voice:{selected_voice}", f"Kokoro voice is missing: {voice_path(selected_voice)}"))
+            return issues
         return self.validate_piper_voice_runtime(voice_id)
 
     @staticmethod
@@ -546,6 +575,32 @@ class ResourceDownloadService:
 
     def list_resources(self) -> list[dict]:
         resources: list[dict] = [
+            {
+                "id": "preview:mpv",
+                "name": "Advanced Video Preview (MPV)",
+                "kind": "preview",
+                "status": "installed" if self.is_resource_installed("preview:mpv") else "missing",
+                "target_dir": bin_path("mpv"),
+                "expected_filename": "libmpv-2.dll (or mpv-2.dll) and its DLL dependencies",
+                "download_url": "https://mpv.io/installation/",
+                "auto_download_supported": False,
+                "description": (
+                    "Optional advanced preview runtime. Without it VIUStudio uses the compatible "
+                    "Qt preview; editing and export remain available. Extract a Windows libmpv "
+                    "build and its DLLs into the target folder, then click Refresh."
+                ),
+            },
+            {
+                "id": "separation:uvr_mdx",
+                "name": "Voice / Music Separation (UVR MDX)",
+                "kind": "separation",
+                "status": "installed" if self.is_resource_installed("separation:uvr_mdx") else "missing",
+                "target_dir": bin_path(),
+                "expected_filename": "UVR-MDX-NET-Inst_HQ_3.onnx",
+                "download_url": "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx?download=true",
+                "auto_download_supported": True,
+                "description": "Optional local model for separating Voice.wav and Music.wav.",
+            },
             {
                 "id": "sensevoice:model",
                 "name": "SenseVoice (Required)",
@@ -727,7 +782,7 @@ class ResourceDownloadService:
                 "kokoro",
                 "https://huggingface.co/hexgrad/Kokoro-82M",
                 models_path("kokoro"),
-                "Natural English TTS. Runtime integration is not yet available in VIUStudio.",
+                "Natural local English TTS. Install downloads and verifies the runtime and base model; local .pt voices are discovered automatically.",
             ),
         )
         for resource_id, name, module_name, download_url, target_dir, description in external_tts:
@@ -735,8 +790,14 @@ class ResourceDownloadService:
                 runtime_found = importlib.util.find_spec(module_name) is not None
             except (ImportError, ModuleNotFoundError, ValueError):
                 runtime_found = False
-            integrated = resource_id == "tts:zerotts"
-            model_ready = self._zerotts_model_ready() if integrated else False
+            integrated = resource_id in {"tts:zerotts", "tts:kokoro"}
+            if resource_id == "tts:zerotts":
+                model_ready = self._zerotts_model_ready()
+            elif resource_id == "tts:kokoro":
+                from kokoro_support import model_files_ready, discovered_voice_ids, english_g2p_available
+                model_ready = model_files_ready() and bool(discovered_voice_ids()) and english_g2p_available()
+            else:
+                model_ready = False
             resources.append(
                 {
                     "id": resource_id,
@@ -763,6 +824,40 @@ class ResourceDownloadService:
         return resources
 
     def is_resource_installed(self, resource_id: str) -> bool:
+        if resource_id == "preview:mpv":
+            mpv_dir = bin_path("mpv")
+            dll_path = next(
+                (
+                    path
+                    for path in (
+                        os.path.join(mpv_dir, "libmpv-2.dll"),
+                        os.path.join(mpv_dir, "mpv-2.dll"),
+                    )
+                    if os.path.isfile(path)
+                ),
+                "",
+            )
+            if not dll_path:
+                return False
+            try:
+                if importlib.util.find_spec("mpv") is None:
+                    return False
+                if os.name == "nt":
+                    import ctypes
+
+                    dll_directory = os.add_dll_directory(mpv_dir) if hasattr(os, "add_dll_directory") else None
+                    try:
+                        ctypes.WinDLL(dll_path)
+                    finally:
+                        if dll_directory is not None:
+                            dll_directory.close()
+                return True
+            except (ImportError, OSError, RuntimeError, ValueError):
+                # A DLL file by itself is not a usable runtime; missing VC
+                # runtime/codec dependencies must remain visible as missing.
+                return False
+        if resource_id == "separation:uvr_mdx":
+            return os.path.isfile(bin_path("UVR-MDX-NET-Inst_HQ_3.onnx"))
         if resource_id == "ocr:engine":
             return self.is_ocr_ready()
         if resource_id == "cuda:whisper":
@@ -790,9 +885,9 @@ class ResourceDownloadService:
                     continue
             return False
         if resource_id == "voice:pack":
-            return self._voice_pack_status("vi") == "installed"
+            return self._usable_piper_voice_count("vi") > 0
         if resource_id == "voice:pack-en":
-            return self._voice_pack_status("en") == "installed"
+            return self._usable_piper_voice_count("en") > 0
         if resource_id in {"tts:zerotts", "tts:korvatts", "tts:kokoro"}:
             module_name = {
                 "tts:zerotts": "zerotts",
@@ -805,6 +900,9 @@ class ResourceDownloadService:
                 return False
             if resource_id == "tts:zerotts":
                 return runtime_found and self._zerotts_model_ready()
+            if resource_id == "tts:kokoro":
+                from kokoro_support import installation_ready
+                return installation_ready()
             return runtime_found
         if resource_id.startswith("voice:"):
             voice_id = resource_id.split(":", 1)[1].strip()
@@ -829,6 +927,26 @@ class ResourceDownloadService:
         payload = self._read_catalog()
         for voice in payload.get("voices", []) or []:
             if isinstance(voice, dict) and str(voice.get("id", "")).strip() == voice_id:
+                return voice
+        # Downloadable packs and locally discovered voices intentionally use
+        # separate catalogs. A model added from the official Piper repository
+        # is written to the preview catalog by the UI, so runtime validation
+        # must consult it as well. Previously those voices appeared selectable
+        # but every Preview/Generate preflight rejected them as unavailable.
+        preview_catalog = app_path("voice_preview_catalog.json")
+        if os.path.normcase(os.path.abspath(preview_catalog)) == os.path.normcase(os.path.abspath(self._catalog_path())):
+            return None
+        try:
+            with open(preview_catalog, "r", encoding="utf-8-sig") as handle:
+                preview_payload = json.load(handle) or {}
+        except (OSError, ValueError, TypeError):
+            return None
+        for voice in preview_payload.get("voices", []) or []:
+            if (
+                isinstance(voice, dict)
+                and str(voice.get("provider", "")).strip().lower() == "piper"
+                and str(voice.get("id", "")).strip() == voice_id
+            ):
                 return voice
         return None
 
@@ -961,6 +1079,14 @@ class ResourceDownloadService:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
 
     def download_resource(self, resource_id: str, progress_cb=None) -> None:
+        if resource_id == "separation:uvr_mdx":
+            self._download_file(
+                "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx?download=true",
+                bin_path("UVR-MDX-NET-Inst_HQ_3.onnx"),
+                progress_cb,
+                label="Downloading Voice / Music Separation model",
+            )
+            return
         if resource_id == "tts:zerotts":
             self._install_zerotts_runtime(progress_cb)
             importlib.invalidate_caches()
@@ -972,6 +1098,24 @@ class ResourceDownloadService:
             self._install_zerotts_model(progress_cb)
             if progress_cb:
                 progress_cb(100, "ZeroTTS runtime and model installed and verified.")
+            return
+        if resource_id == "tts:kokoro":
+            self._install_kokoro_runtime(progress_cb)
+            importlib.invalidate_caches()
+            if not self._python_module_imports("kokoro"):
+                raise RuntimeError(
+                    "Kokoro installation command finished, but the runtime could not be imported. "
+                    "Use Retry; VIUStudio will repair pip automatically if necessary."
+                )
+            self._install_kokoro_english_g2p(progress_cb)
+            self._install_kokoro_model(progress_cb)
+            from kokoro_support import installation_ready
+            if not installation_ready():
+                raise RuntimeError(
+                    "Kokoro runtime/model was installed, but no local voice was found in models/kokoro/voices."
+                )
+            if progress_cb:
+                progress_cb(100, "Kokoro runtime, model, and voices installed and verified.")
             return
 
         if resource_id == "sensevoice:model":
@@ -1206,6 +1350,102 @@ class ResourceDownloadService:
         if return_code != 0:
             details = "\n".join(output_lines[-30:]) or "Unknown pip error"
             raise RuntimeError("ZeroTTS installation failed:\n" + details)
+
+    def _install_kokoro_runtime(self, progress_cb=None) -> None:
+        if progress_cb:
+            progress_cb(2, "Checking Python package installer...")
+        if not self._pip_runtime_usable():
+            self._repair_pip_runtime(progress_cb)
+        if not self._pip_runtime_usable():
+            raise RuntimeError("pip is still unavailable after automatic repair.")
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "kokoro==0.9.4",
+            "--disable-pip-version-check",
+            "--progress-bar",
+            "off",
+        ]
+        if progress_cb:
+            progress_cb(8, "Resolving Kokoro dependencies...")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            **subprocess_text_kwargs(),
+        )
+        output_lines: list[str] = []
+        for raw_line in process.stdout or ():
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            output_lines.append(line)
+            lower = line.lower()
+            if progress_cb and lower.startswith("downloading"):
+                progress_cb(12, "Downloading Kokoro runtime...")
+            elif progress_cb and "installing collected packages" in lower:
+                progress_cb(17, "Installing Kokoro runtime...")
+            elif progress_cb and ("successfully installed" in lower or "requirement already satisfied: kokoro" in lower):
+                progress_cb(20, "Verifying Kokoro runtime...")
+        return_code = process.wait(timeout=1800)
+        if return_code != 0:
+            details = "\n".join(output_lines[-30:]) or "Unknown pip error"
+            raise RuntimeError("Kokoro installation failed:\n" + details)
+
+    def _install_kokoro_model(self, progress_cb=None) -> None:
+        from kokoro_support import CONFIG_FILENAME, MODEL_FILENAME, model_files_ready, model_root
+
+        if model_files_ready():
+            if progress_cb:
+                progress_cb(100, "Kokoro model is already available.")
+            return
+        try:
+            from huggingface_hub import hf_hub_download, hf_hub_url
+            from huggingface_hub.file_download import get_hf_file_metadata
+        except Exception as exc:
+            raise RuntimeError(f"Kokoro model downloader is unavailable: {exc}") from exc
+        target_dir = model_root()
+        os.makedirs(target_dir, exist_ok=True)
+        for filename, start, end in (
+            (CONFIG_FILENAME, 20, 25),
+            (MODEL_FILENAME, 25, 99),
+        ):
+            self._download_hf_file(
+                repo_id="hexgrad/Kokoro-82M",
+                revision="main",
+                filename=filename,
+                local_dir=target_dir,
+                hf_hub_download=hf_hub_download,
+                hf_hub_url=hf_hub_url,
+                get_hf_file_metadata=get_hf_file_metadata,
+                progress_cb=progress_cb,
+                start_percent=start,
+                end_percent=end,
+                label=f"Downloading Kokoro {filename}",
+            )
+        if not model_files_ready():
+            raise RuntimeError("Kokoro model download completed but required files are missing.")
+
+    def _install_kokoro_english_g2p(self, progress_cb=None) -> None:
+        from kokoro_support import english_g2p_available
+
+        if english_g2p_available():
+            return
+        if progress_cb:
+            progress_cb(20, "Installing Kokoro English pronunciation data...")
+        process = subprocess.run(
+            [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
+            capture_output=True,
+            timeout=900,
+            **subprocess_text_kwargs(),
+        )
+        importlib.invalidate_caches()
+        if process.returncode != 0 or not english_g2p_available():
+            details = str(process.stderr or process.stdout or "Unknown spaCy model error")
+            raise RuntimeError("Kokoro English pronunciation data installation failed:\n" + details[-4000:])
 
     def _install_zerotts_model(self, progress_cb=None) -> None:
         if self._zerotts_model_ready():

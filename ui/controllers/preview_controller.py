@@ -26,50 +26,10 @@ class PreviewController:
         self.gui = gui
 
     def _extract_fast_preview_blur_regions(self, start_seconds: float, duration_seconds: float) -> list[dict]:
-        """Return visible B1 layers rebased to a trimmed Fast Preview clip.
-
-        Fast Preview first creates a new clip starting at zero, whereas B1
-        timings are stored in project/video time.  Rebase overlapping layers
-        so FFmpeg's ``between(t, start, end)`` gates remain correct.
-        """
-        result: list[dict] = []
-        timeline = getattr(getattr(self.gui, "timeline", None), "_timeline", None)
-        clip_start = max(0.0, float(start_seconds or 0.0))
-        clip_end = clip_start + max(0.1, float(duration_seconds or 0.0))
-        if timeline is None:
-            return result
-        for track in list(getattr(timeline, "tracks", []) or []):
-            track_type = getattr(getattr(track, "type", None), "value", getattr(track, "type", ""))
-            if str(track_type).lower() != "blur" or not bool(getattr(track, "visible", True)):
-                continue
-            for layer in list(getattr(track, "layers", []) or []):
-                if not bool(getattr(layer, "visible", True)):
-                    continue
-                try:
-                    layer_start = max(0.0, float(getattr(layer, "start", 0.0) or 0.0))
-                    layer_end = float(getattr(layer, "end", 0.0) or 0.0)
-                    # Legacy layers with no end are treated as active for the
-                    # whole source video, matching the preview player.
-                    if layer_end <= layer_start:
-                        layer_end = clip_end
-                    overlap_start = max(layer_start, clip_start)
-                    overlap_end = min(layer_end, clip_end)
-                    if overlap_end <= overlap_start:
-                        continue
-                    result.append({
-                        "x": float(getattr(layer, "position_x", 0.0) or 0.0),
-                        "y": float(getattr(layer, "position_y", 0.0) or 0.0),
-                        "width": float(getattr(layer, "width", 0.0) or 0.0),
-                        "height": float(getattr(layer, "height", 0.0) or 0.0),
-                        "blur_strength": float(getattr(layer, "blur_strength", 20.0) or 20.0),
-                        "blur_opacity": float(getattr(layer, "blur_opacity", 1.0) or 1.0),
-                        "pixelate": bool(getattr(layer, "pixelate", False)),
-                        "pixelate_size": int(getattr(layer, "pixelate_size", 12) or 12),
-                        "start": overlap_start - clip_start,
-                        "end": overlap_end - clip_start,
-                    })
-                except (TypeError, ValueError):
-                    continue
+        """Compatibility helper using the same canonical visual-layer path."""
+        result = self._rebase_timed_layers(
+            self._extract_blur_layers(), start_seconds, duration_seconds
+        )
         print(f"[Preview] Fast Preview extracted {len(result)} active blur layer(s).")
         return result
 
@@ -78,34 +38,19 @@ class PreviewController:
         logo_layers = []
         text_layers = []
         try:
-            if hasattr(self.gui, "_current_mask_regions_payload"):
-                raw_masks = self.gui._current_mask_regions_payload()
-                print(f"[Preview] Found {len(raw_masks)} mask region(s) from M1 track")
-                for region in raw_masks:
-                    mask_regions.append({
-                        "x": float(region.get("x", 0.3)),
-                        "y": float(region.get("y", 0.4)),
-                        "width": float(region.get("width", 0.4)),
-                        "height": float(region.get("height", 0.2)),
-                        "mode": str(region.get("mode", "solid")),
-                        "color": str(region.get("color", "#000000")),
-                        "opacity": float(region.get("opacity", 1.0)),
-                        "pixelate_size": int(region.get("pixelate_size", 12)),
-                        "blur_strength": int(region.get("blur_strength", 20)),
-                    })
-        except Exception as e:
-            print(f"Warning: Failed to extract mask regions: {e}")
-
-        try:
             if hasattr(self.gui, "timeline") and hasattr(self.gui.timeline, "_timeline"):
                 timeline_obj = self.gui.timeline._timeline
                 if timeline_obj:
                     for tr in timeline_obj.tracks:
                         track_type = tr.type.value if hasattr(tr.type, "value") else str(tr.type)
                         print(f"[Preview] Checking track: name={tr.name} type={track_type}")
+                        if not bool(getattr(tr, "visible", True)):
+                            continue
                         if track_type == "mask":
                             for layer in tr.layers:
                                 try:
+                                    if not bool(getattr(layer, "visible", True)):
+                                        continue
                                     mask_regions.append({
                                         "x": float(getattr(layer, "position_x", 0.3)),
                                         "y": float(getattr(layer, "position_y", 0.4)),
@@ -116,6 +61,8 @@ class PreviewController:
                                         "opacity": float(getattr(layer, "opacity", 1.0)),
                                         "pixelate_size": int(getattr(layer, "pixelate_size", 12)),
                                         "blur_strength": int(getattr(layer, "blur_strength", 20)),
+                                        "start": float(getattr(layer, "start", 0.0) or 0.0),
+                                        "end": float(getattr(layer, "end", 0.0) or 0.0),
                                     })
                                 except (TypeError, ValueError):
                                     continue
@@ -180,6 +127,7 @@ class PreviewController:
                                         "font_color": str(getattr(layer, "font_color", "#FFFFFF") or "#FFFFFF"),
                                         "background_color": str(getattr(layer, "background_color", "") or ""),
                                         "background_opacity": max(0.0, min(1.0, float(getattr(layer, "background_opacity", 0.5) or 0.0))),
+                                        "opacity": max(0.0, min(1.0, float(getattr(layer, "opacity", 1.0) or 1.0))),
                                         "font_bold": bool(getattr(layer, "font_bold", False)),
                                         "font_italic": bool(getattr(layer, "font_italic", False)),
                                         "font_underline": bool(getattr(layer, "font_underline", False)),
@@ -195,6 +143,67 @@ class PreviewController:
 
         print(f"[Preview] Final overlay extraction: {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s)")
         return mask_regions, logo_layers, text_layers
+
+    def _extract_blur_layers(self) -> list[dict]:
+        """Read every visible B1 layer from the live timeline model."""
+        result = []
+        timeline = getattr(getattr(self.gui, "timeline", None), "_timeline", None)
+        for track in list(getattr(timeline, "tracks", []) or []):
+            track_type = getattr(getattr(track, "type", None), "value", getattr(track, "type", ""))
+            if str(track_type).lower() != "blur" or not bool(getattr(track, "visible", True)):
+                continue
+            for layer in list(getattr(track, "layers", []) or []):
+                if not bool(getattr(layer, "visible", True)):
+                    continue
+                try:
+                    result.append({
+                        "x": float(getattr(layer, "position_x", 0.0) or 0.0),
+                        "y": float(getattr(layer, "position_y", 0.0) or 0.0),
+                        "width": float(getattr(layer, "width", 0.0) or 0.0),
+                        "height": float(getattr(layer, "height", 0.0) or 0.0),
+                        "blur_strength": float(getattr(layer, "blur_strength", 20.0) or 20.0),
+                        "blur_opacity": float(getattr(layer, "blur_opacity", 1.0) or 1.0),
+                        "pixelate": bool(getattr(layer, "pixelate", False)),
+                        "pixelate_size": int(getattr(layer, "pixelate_size", 12) or 12),
+                        "start": float(getattr(layer, "start", 0.0) or 0.0),
+                        "end": float(getattr(layer, "end", 0.0) or 0.0),
+                    })
+                except (TypeError, ValueError):
+                    continue
+        return result
+
+    @staticmethod
+    def _rebase_timed_layers(layers, start_seconds: float, duration_seconds: float) -> list[dict]:
+        """Clip project-time visual layers and rebase them to a preview clip."""
+        clip_start = max(0.0, float(start_seconds or 0.0))
+        duration = max(0.0, float(duration_seconds or 0.0))
+        clip_end = clip_start + duration
+        result = []
+        for raw in list(layers or []):
+            layer = dict(raw)
+            try:
+                start = max(0.0, float(layer.get("start", 0.0) or 0.0))
+                end = float(layer.get("end", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                if start > clip_end:
+                    continue
+                layer["start"], layer["end"] = 0.0, 0.0
+                result.append(layer)
+                continue
+            overlap_start = max(start, clip_start)
+            overlap_end = min(end, clip_end)
+            if overlap_end <= overlap_start:
+                continue
+            layer["start"] = overlap_start - clip_start
+            layer["end"] = overlap_end - clip_start
+            result.append(layer)
+        return result
+
+    def _extract_render_layers(self):
+        masks, logos, texts = self._extract_overlay_layers()
+        return masks, self._extract_blur_layers(), logos, texts
 
     @staticmethod
     def _ass_timestamp(seconds: float) -> str:
@@ -651,6 +660,9 @@ class PreviewController:
             or getattr(self.gui, "last_translated_srt_path", "")
         )
         filters_on = bool(self.gui.has_active_video_filters()) if hasattr(self.gui, "has_active_video_filters") else False
+        export_preset = self.gui.get_export_preset() if hasattr(self.gui, "get_export_preset") else "balanced"
+        preset_label = {"fast": "Fast", "balanced": "Balanced", "max": "Maximum quality"}.get(export_preset, str(export_preset))
+        bitrate_kbps = self.gui.get_output_bitrate_kbps() if hasattr(self.gui, "get_output_bitrate_kbps") else 2000
 
         summary_lines = [
             f"Name: {os.path.basename(output_path)}",
@@ -666,6 +678,8 @@ class PreviewController:
             f"Canvas: {canvas_label}",
             f"Framing: {int(round(focus_x * 100))}% x / {int(round(focus_y * 100))}% y" if self.gui.get_output_scale_mode_key() == "fill" else "Framing: Center",
             f"Video Filters: {'On' if filters_on else 'Off'}",
+            f"Encoder Preset: {preset_label}",
+            f"Target Bitrate: {int(bitrate_kbps)} kbps",
             "",
             "AUDIO & LANGUAGE",
             f"Language: {language_label}",
@@ -981,12 +995,13 @@ class PreviewController:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _build_styled_preview_signature(self, *, video_path: str, audio_path: str, mode: str, srt_path: str, subtitle_style: dict, mask_regions=None, logo_layers=None) -> str:
+    def _build_styled_preview_signature(self, *, video_path: str, audio_path: str, mode: str, srt_path: str, subtitle_style: dict, mask_regions=None, blur_regions=None, logo_layers=None, text_layers=None) -> str:
         payload = {
             "kind": "styled_preview_v2",
             "mode": mode,
             "video": self._file_signature(video_path),
             "audio": self._file_signature(audio_path),
+            "original_audio_gain_db": self._original_audio_gain_db_for_render(mode),
             "subtitle_path": os.path.abspath(srt_path) if srt_path and os.path.exists(srt_path) else "",
             "subtitle_hash": self._text_file_hash(srt_path),
             "subtitle_style": subtitle_style or {},
@@ -997,7 +1012,9 @@ class PreviewController:
             "output_fps": self.gui.get_output_fps_key(),
             "video_filter": self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
             "mask_regions": mask_regions or [],
+            "blur_regions": blur_regions or [],
             "logo_layers": logo_layers or [],
+            "text_layers": text_layers or [],
         }
         return hashlib.sha1(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -1033,8 +1050,8 @@ class PreviewController:
         return mode
 
     def _original_audio_gain_db_for_render(self, mode: str) -> float:
-        """Return A1 gain for subtitle-only renders (which retain source audio)."""
-        if str(mode or "").strip().lower() != "subtitle":
+        """Return A1 gain for render modes that retain the source audio."""
+        if str(mode or "").strip().lower() not in {"original", "subtitle"}:
             return 0.0
         try:
             a1_muted = False
@@ -1257,8 +1274,12 @@ class PreviewController:
                 # C++ object was already deleted by Qt; safe to proceed
                 self.gui.export_thread = None
 
-        # Persist timeline data before export so mask/logo layers are available
-        if hasattr(self.gui, "persist_current_timeline_project_data"):
+        # Flush the coalesced editor transaction before the worker reads the
+        # project file. This guarantees that a Text/Blur value changed just
+        # before clicking Export is rendered with the same state as preview.
+        if hasattr(self.gui, "_flush_pending_timeline_persist"):
+            self.gui._flush_pending_timeline_persist()
+        elif hasattr(self.gui, "persist_current_timeline_project_data"):
             self.gui.persist_current_timeline_project_data()
 
         self.gui.export_btn.setEnabled(False)
@@ -1294,6 +1315,8 @@ class PreviewController:
                 self.gui.get_timeline_video_clips(existing_only=True)
                 if hasattr(self.gui, "get_timeline_video_clips") else []
             ),
+            export_preset=self.gui.get_export_preset(),
+            video_bitrate_kbps=self.gui.get_output_bitrate_kbps(),
         )
         self.gui.export_thread.progress.connect(self.gui.on_export_progress)
         self.gui.export_thread.finished.connect(self.gui.on_export_finished)
@@ -1334,24 +1357,34 @@ class PreviewController:
 
         start_seconds = max(0.0, self.gui.media_player.position() / 1000.0)
         duration_seconds = 5.0
-        mode = self.gui.get_output_mode_key()
+        mode = self._effective_render_mode_without_tts(self.gui.get_output_mode_key())
         preview_output = os.path.join(self.gui.get_project_temp_dir("preview"), f"preview_5s_{int(start_seconds)}.mp4")
 
-        chosen_audio = self.gui.get_final_dub_audio_path()
-        if mode in ("audio", "both") and not chosen_audio:
+        chosen_audio = ""
+        if mode in ("voice", "both"):
+            chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
+            if not chosen_audio:
+                chosen_audio = self.gui.resolve_selected_audio_path()
+        if mode in ("voice", "both") and not chosen_audio:
             QMessageBox.warning(self.gui, "Error", "Please generate dubbed voice or choose existing audio first.")
             return
 
         preview_srt_path = ""
         preview_segments = []
         preview_ass_path = ""
+        mask_regions, blur_regions, logo_layers, text_layers = self._extract_render_layers()
+        has_visual_layers = bool(mask_regions or blur_regions or logo_layers or text_layers)
+        has_active_video_filters = bool(
+            hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters()
+        )
 
         if mode in ("subtitle", "both"):
             preview_srt_path, preview_segments = self.build_subtitle_preview_srt(start_seconds, duration_seconds)
-            if not preview_srt_path:
+            if not preview_srt_path and not has_visual_layers and not has_active_video_filters:
                 QMessageBox.warning(self.gui, "Error", "Could not build the 5-second subtitle preview clip.")
                 return
-            preview_ass_path = self._build_fast_preview_subtitle_ass(start_seconds, duration_seconds)
+            if preview_srt_path:
+                preview_ass_path = self._build_fast_preview_subtitle_ass(start_seconds, duration_seconds)
 
         self.gui.preview_5s_btn.setEnabled(False)
         self.gui.preview_5s_btn.setText("Rendering...")
@@ -1365,10 +1398,13 @@ class PreviewController:
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         original_audio_gain_db = self.gui.get_effective_original_audio_gain_db()
-        mask_regions = self.gui.get_mask_filter_regions() if hasattr(self.gui, "get_mask_filter_regions") else []
-        blur_regions = self.gui.get_blur_filter_regions() if hasattr(self.gui, "get_blur_filter_regions") else []
-        logo_layers = self.gui.get_logo_filter_layers() if hasattr(self.gui, "get_logo_filter_layers") else []
-        text_image_layers = self.gui.get_text_image_filter_layers() if hasattr(self.gui, "get_text_image_filter_layers") else []
+        mask_regions = self._rebase_timed_layers(mask_regions, start_seconds, duration_seconds)
+        blur_regions = self._rebase_timed_layers(blur_regions, start_seconds, duration_seconds)
+        logo_layers = self._rebase_timed_layers(logo_layers, start_seconds, duration_seconds)
+        text_image_layers = self._build_fast_preview_text_images(
+            text_layers, start_seconds, duration_seconds, target_width, target_height,
+            self.gui.get_project_temp_dir("preview"),
+        )
 
         self.gui.quick_preview_thread = QuickPreviewWorker(
             video_path=video_path,
@@ -1649,8 +1685,6 @@ class PreviewController:
             audio_path = self._regenerate_mixed_audio_with_current_volumes()
             if not audio_path:
                 audio_path = self.gui.resolve_selected_audio_path()
-        else:
-            audio_path = self.gui.resolve_selected_audio_path()
         if not video_path or not os.path.exists(video_path):
             self.gui.log("[Preview] Video file not found, showing error")
             QMessageBox.warning(self.gui, "Error", "Video file not found. Please select a video first.")
@@ -1666,9 +1700,11 @@ class PreviewController:
 
         has_active_video_filters = bool(hasattr(self.gui, "has_active_video_filters") and self.gui.has_active_video_filters())
         self.gui.log(f"[Preview] has_active_video_filters={has_active_video_filters}")
-        mask_regions, logo_layers, _text_layers = self._extract_overlay_layers()
-        has_overlays = bool(mask_regions or logo_layers)
-        self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and (has_active_video_filters or has_overlays))
+        mask_regions, blur_regions, logo_layers, text_layers = self._extract_render_layers()
+        has_overlays = bool(mask_regions or blur_regions or logo_layers or text_layers)
+        self.gui._preview_video_has_burned_subtitles = bool(
+            mode in ("subtitle", "both") and (has_active_video_filters or has_overlays)
+        )
 
         # Subtitle-only preview can stay live when no canvas/filter/overlay processing is needed.
         if mode == "subtitle" and not has_active_video_filters and not has_overlays:
@@ -1695,10 +1731,10 @@ class PreviewController:
         cached_preview = ""
         if mode in ("subtitle", "both"):
             preview_srt_path, preview_segments = self.build_full_active_subtitle_srt()
-            if not preview_srt_path:
+            if not preview_srt_path and not has_overlays and not has_active_video_filters:
                 QMessageBox.warning(self.gui, "Error", "No active subtitle track is available for video preview.")
                 return
-            subtitle_style = self.gui.get_subtitle_export_style(segments=preview_segments)
+            subtitle_style = self.gui.get_subtitle_export_style(segments=preview_segments) if preview_srt_path else {}
             styled_signature = self._build_styled_preview_signature(
                 video_path=video_path,
                 audio_path=audio_path,
@@ -1706,7 +1742,9 @@ class PreviewController:
                 srt_path=preview_srt_path,
                 subtitle_style=subtitle_style,
                 mask_regions=mask_regions,
+                blur_regions=blur_regions,
                 logo_layers=logo_layers,
+                text_layers=text_layers,
             )
             cached_preview = str(getattr(self.gui, "last_styled_preview_path", "") or "").strip()
             cached_signature = str(getattr(self.gui, "last_styled_preview_signature", "") or "").strip()
@@ -1743,13 +1781,28 @@ class PreviewController:
         if styled_signature:
             self.gui.log(f"[Preview] styled cache miss: {styled_signature[:10]}")
         self.gui._styled_preview_running = True
-        self.gui._preview_video_has_burned_subtitles = bool(mode == "subtitle" and has_active_video_filters)
+        self.gui._preview_video_has_burned_subtitles = bool(
+            mode in ("subtitle", "both") and preview_srt_path
+        )
         if hasattr(self.gui, "preview_btn"):
             self.gui.preview_btn.setEnabled(False)
         self.gui.progress_bar.setValue(95)
         self.gui.refresh_ui_state()
         target_width, target_height = self._resolve_output_canvas_dimensions(video_path)
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
+        timeline_duration_ms = getattr(getattr(self.gui, "timeline", None), "duration", 0)
+        if callable(timeline_duration_ms):
+            timeline_duration_ms = timeline_duration_ms()
+        project_duration = max(
+            0.1,
+            float(getattr(self.gui, "video_duration_ms", 0) or 0) / 1000.0,
+            float(timeline_duration_ms or 0) / 1000.0,
+            max((float(layer.get("end", 0.0) or 0.0) for layer in text_layers), default=0.0),
+        )
+        text_image_layers = self._build_fast_preview_text_images(
+            text_layers, 0.0, project_duration, target_width, target_height,
+            self.gui.get_project_temp_dir("preview"),
+        )
 
         self.gui.preview_thread = PreviewMuxWorker(
             video_path,
@@ -1758,7 +1811,7 @@ class PreviewController:
             mode=mode,
             srt_path=preview_srt_path,
             subtitle_style=subtitle_style,
-            render_subtitles=bool(mode == "subtitle" and (has_active_video_filters or has_overlays)),
+            render_subtitles=bool(mode in ("subtitle", "both") and preview_srt_path),
             target_width=target_width,
             target_height=target_height,
             output_scale_mode=self.gui.get_output_scale_mode_key(),
@@ -1766,7 +1819,10 @@ class PreviewController:
             output_fill_focus_y=fill_focus_y,
             video_filter_state=self.gui.get_video_filter_state() if hasattr(self.gui, "get_video_filter_state") else {},
             mask_regions=mask_regions,
+            blur_regions=blur_regions,
             logo_layers=logo_layers,
+            text_image_layers=text_image_layers,
+            original_audio_gain_db=self._original_audio_gain_db_for_render(mode),
             temp_dir=self.gui.get_project_temp_dir("preview"),
         )
         self.gui.preview_thread.finished.connect(

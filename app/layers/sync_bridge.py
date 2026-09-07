@@ -270,24 +270,27 @@ def sync_blur_regions_to_layers(
     # Keep B1 rows the same compact height as M1/L1 in the editor.
     blur_track = find_or_create_track(timeline, "B1", LayerType.BLUR, 60)
     blur_track.height = 60
-    blur_track.layers.clear()
-
+    existing_layers = list(blur_track.layers)
+    synchronized_layers: list[BlurLayer] = []
     for i, br in enumerate(blur_regions):
-        layer = BlurLayer(
-            name=f"Blur {i + 1}",
-            start=float(br.get("start", 0)),
-            end=float(br.get("end", timeline.duration)),
-            position_x=float(br.get("x", br.get("position_x", 0))),
-            position_y=float(br.get("y", br.get("position_y", 0))),
-            width=float(br.get("width", 200)),
-            height=float(br.get("height", 80)),
-            blur_strength=float(br.get("blur_strength", br.get("intensity", 20))),
-            blur_opacity=float(br.get("blur_opacity", 1.0)),
-            pixelate=bool(br.get("pixelate", False)),
-            pixelate_size=int(br.get("pixelate_size", 12)),
-        )
+        # Preview drag events are geometry updates, not destructive imports.
+        # Reuse the existing object so timeline selection, the inspector and
+        # any signal handler keep pointing at the authoritative B1 layer.
+        layer = existing_layers[i] if i < len(existing_layers) and isinstance(existing_layers[i], BlurLayer) else BlurLayer(name=f"Blur {i + 1}")
+        layer.name = str(br.get("name", layer.name or f"Blur {i + 1}"))
+        layer.start = float(br.get("start", getattr(layer, "start", 0.0)))
+        layer.end = float(br.get("end", getattr(layer, "end", 0.0) or timeline.duration))
+        layer.position_x = float(br.get("x", br.get("position_x", getattr(layer, "position_x", 0.0))))
+        layer.position_y = float(br.get("y", br.get("position_y", getattr(layer, "position_y", 0.0))))
+        layer.width = float(br.get("width", getattr(layer, "width", 0.2)))
+        layer.height = float(br.get("height", getattr(layer, "height", 0.1)))
+        layer.blur_strength = float(br.get("blur_strength", br.get("intensity", getattr(layer, "blur_strength", 20.0))))
+        layer.blur_opacity = float(br.get("blur_opacity", getattr(layer, "blur_opacity", 1.0)))
+        layer.pixelate = bool(br.get("pixelate", getattr(layer, "pixelate", False)))
+        layer.pixelate_size = int(br.get("pixelate_size", getattr(layer, "pixelate_size", 12)))
         layer.z_index = i
-        blur_track.layers.append(layer)
+        synchronized_layers.append(layer)
+    blur_track.layers[:] = synchronized_layers
 
 
 def ensure_v1_a1_tracks(timeline: Timeline, video_path: str, duration: float) -> None:

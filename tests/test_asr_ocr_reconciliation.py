@@ -41,7 +41,10 @@ class AsrOcrReconciliationTests(unittest.TestCase):
         repaired, count = AsrOcrReconciliationService.reconcile(asr, ocr)
 
         self.assertEqual(count, 0)
-        self.assertEqual(repaired, asr)
+        self.assertEqual(repaired[0]["text"], "等一下")
+        self.assertEqual(repaired[0]["ocr_text"], "等一下")
+        self.assertEqual(repaired[0]["text_source"], "ocr_verified")
+        self.assertEqual(repaired[0]["ocr_consensus_frames"], 2)
 
     def test_does_not_copy_unrelated_title_or_non_overlapping_text(self):
         asr = [{"start": 10.0, "end": 10.7, "text": "下"}]
@@ -179,6 +182,25 @@ class AsrOcrReconciliationTests(unittest.TestCase):
         ], source_language="zh")
         self.assertEqual([item["scan_mode"] for item in requests], ["authoritative", "sequence"])
         self.assertEqual((requests[1]["start"], requests[1]["end"]), (33.446, 36.5))
+
+    def test_long_project_does_not_stop_ocr_verification_after_512_cues(self):
+        source = [
+            {
+                "start": float(index),
+                "end": float(index) + 0.6,
+                "text": "需要核对字幕",
+                "speech_detected": True,
+            }
+            for index in range(600)
+        ]
+
+        requests = AsrOcrReconciliationService.suspicious_cue_requests(
+            source, source_language="zh"
+        )
+
+        self.assertEqual(len(requests), 600)
+        self.assertAlmostEqual(requests[-1]["start"], 598.85)
+        self.assertAlmostEqual(requests[-1]["end"], 599.75)
 
     def test_normal_length_hardsub_dialogue_is_verified_for_names_and_timing(self):
         requests = AsrOcrReconciliationService.suspicious_cue_requests([

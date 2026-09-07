@@ -393,6 +393,18 @@ class PreviewConfigurationMixin:
             return str(value).strip().lower()
         return str(self.output_quality_combo.currentText() or "source").strip().lower() or "source"
 
+    def get_export_preset(self) -> str:
+        combo = getattr(self, "output_preset_combo", None)
+        value = str(combo.currentData() if combo is not None else "balanced").strip().lower()
+        return value if value in {"fast", "balanced", "max"} else "balanced"
+
+    def get_output_bitrate_kbps(self) -> int:
+        spin = getattr(self, "output_bitrate_spin", None)
+        try:
+            return max(500, int(spin.value())) if spin is not None else 2000
+        except (TypeError, ValueError):
+            return 2000
+
     def get_output_fps_key(self):
         if not hasattr(self, "output_fps_combo"):
             return "source"
@@ -992,7 +1004,7 @@ class PreviewConfigurationMixin:
             self._generate_translate_action.setEnabled(transcript and not self._pipeline_active)
             self._generate_translate_action.setText("Re-translate" if translated else "Auto Translate")
         if hasattr(self, "_generate_import_translated_srt_action"):
-            self._generate_import_translated_srt_action.setEnabled(transcript and not self._pipeline_active)
+            self._generate_import_translated_srt_action.setEnabled(has_video and not self._pipeline_active)
         if hasattr(self, "_generate_tts_action"):
             self._generate_tts_action.setEnabled(
                 # TTS is intentionally repeatable: subtitle/voice edits may

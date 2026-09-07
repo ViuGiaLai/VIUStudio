@@ -20,6 +20,8 @@ _PIPER_VOICE_CACHE = {}
 _PIPER_VOICE_CACHE_LOCK = threading.Lock()
 _ZEROTTS_MODEL = None
 _ZEROTTS_MODEL_LOCK = threading.Lock()
+_KOKORO_PIPELINE = None
+_KOKORO_PIPELINE_LOCK = threading.RLock()
 _VIETNAMESE_NORMALIZER = None
 _VIETNAMESE_NORMALIZER_DATA_DIR = ""
 
@@ -46,17 +48,22 @@ def _resolve_piper_model_path(provider_voice: str) -> str:
     if os.path.exists(candidate3):
         return candidate3
     filename = os.path.basename(normalized)
-    candidate_nested = models_path("piper", "piper", filename)
-    if os.path.exists(candidate_nested):
-        return candidate_nested
-    candidate_flat = models_path("piper", filename)
-    if os.path.exists(candidate_flat):
-        return candidate_flat
-    piper_root = models_path("piper")
-    if os.path.isdir(piper_root):
-        for root, _dirs, files in os.walk(piper_root):
-            if filename in files:
-                return os.path.join(root, filename)
+    # Search both supported language roots and tolerate a single archive
+    # wrapper directory. This also lets release catalogs keep their canonical
+    # flat provider_voice path regardless of how the ZIP was authored.
+    for folder_name in ("piper", "piper-en"):
+        candidates = (
+            models_path(folder_name, filename),
+            models_path(folder_name, folder_name, filename),
+        )
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        piper_root = models_path(folder_name)
+        if os.path.isdir(piper_root):
+            for root, _dirs, files in os.walk(piper_root):
+                if filename in files:
+                    return os.path.join(root, filename)
     return candidate3
 
 
@@ -100,6 +107,42 @@ def _get_cached_zerotts(*, on_progress: callable = None):
         model_source = local_model_dir if os.path.isfile(os.path.join(local_model_dir, "config.json")) else "zeroweight-ai/ZeroTTS"
         _ZEROTTS_MODEL = ZeroTTS.from_pretrained(model_source)
         return _ZEROTTS_MODEL
+
+
+def _get_cached_kokoro_pipeline(*, on_progress: callable = None):
+    """Load one local Kokoro model and reuse it across all English voices."""
+    global _KOKORO_PIPELINE
+    with _KOKORO_PIPELINE_LOCK:
+        if _KOKORO_PIPELINE is not None:
+            return _KOKORO_PIPELINE
+        try:
+            from kokoro import KModel, KPipeline
+        except Exception as exc:
+            raise ImportError(
+                "Kokoro is not installed. Open Voice → Install / Manage Voice Engines "
+                "and install Kokoro-82M first."
+            ) from exc
+        from kokoro_support import config_path, model_path, model_files_ready
+
+        if not model_files_ready():
+            raise FileNotFoundError(
+                "Kokoro model files are incomplete. Install config.json and "
+                f"kokoro-v1_0.pth in {models_path('kokoro')}."
+            )
+        if on_progress:
+            on_progress("Loading Kokoro-82M model...")
+        model = KModel(
+            repo_id="hexgrad/Kokoro-82M",
+            config=config_path(),
+            model=model_path(),
+        ).to("cpu").eval()
+        _KOKORO_PIPELINE = KPipeline(
+            lang_code="a",
+            repo_id="hexgrad/Kokoro-82M",
+            model=model,
+            device="cpu",
+        )
+        return _KOKORO_PIPELINE
 
 
 def _ffmpeg_path():
@@ -340,6 +383,74 @@ def zerotts_tts_to_wav_16k_mono(
     return wav_path
 
 
+def kokoro_tts_to_wav_16k_mono(
+    *,
+    text: str,
+    wav_path: str,
+    voice: str = "af_heart",
+    speed: float = 1.0,
+    tmp_dir: str | None = None,
+    on_progress: callable = None,
+) -> str:
+    """Synthesize a local Kokoro voice and normalize it to editor WAV format."""
+    import numpy as np
+    from kokoro_support import voice_path
+
+    if tmp_dir is None:
+        tmp_dir = temp_path()
+    os.makedirs(os.path.dirname(wav_path) or ".", exist_ok=True)
+    os.makedirs(tmp_dir, exist_ok=True)
+    normalized_text = " ".join(str(text or "").replace("\n", " ").split()).strip()
+    if not normalized_text:
+        raise ValueError("TTS text is empty.")
+    safe_speed = max(0.5, min(2.0, _speed_to_float(speed)))
+    selected_voice = str(voice or "af_heart").strip() or "af_heart"
+    selected_path = voice_path(selected_voice)
+    if not os.path.isfile(selected_path):
+        raise FileNotFoundError(f"Kokoro voice is missing: {selected_path}")
+
+    base = _sanitize_filename(os.path.splitext(os.path.basename(wav_path))[0] or "kokoro")
+    source_path = os.path.join(tmp_dir, f"{base}_kokoro_24k.wav")
+    pipeline = _get_cached_kokoro_pipeline(on_progress=on_progress)
+    if on_progress:
+        on_progress(f"Synthesizing Kokoro voice: {selected_voice}...")
+    wrote_frames = False
+    # KPipeline keeps a mutable voice cache. Serialize calls so background
+    # synthesis workers cannot race while loading/changing the selected voice.
+    with _KOKORO_PIPELINE_LOCK, wave.open(source_path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(24000)
+        for result in pipeline(normalized_text, voice=selected_path, speed=safe_speed):
+            audio = getattr(result, "audio", None)
+            if audio is None:
+                continue
+            samples = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
+            samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+            if samples.size <= 0:
+                continue
+            pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+            wav_file.writeframes(pcm.tobytes())
+            wrote_frames = True
+    if not wrote_frames:
+        raise RuntimeError("Kokoro generated no audio frames.")
+    _validate_generated_wav(source_path)
+
+    ffmpeg = _ffmpeg_path()
+    if not os.path.exists(ffmpeg):
+        raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
+    proc = subprocess.run(
+        [ffmpeg, "-y", "-i", source_path, "-ar", "16000", "-ac", "1", wav_path],
+        capture_output=True,
+        timeout=180,
+        **subprocess_text_kwargs(),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"Kokoro audio conversion failed:\n{proc.stderr or proc.stdout}")
+    _validate_generated_wav(wav_path)
+    return wav_path
+
+
 async def _edge_tts_to_mp3_async(text: str, mp3_path: str, voice: str, rate: str, volume: str):
     try:
         import edge_tts
@@ -449,6 +560,11 @@ def preload_tts_voice(voice: str, on_progress: callable = None) -> bool:
             "provider": "zerotts",
             "provider_voice": voice_to_search.split(":", 1)[1].strip() or "maichi",
         }
+    if not voice_entry and voice_to_search.lower().startswith("kokoro:"):
+        voice_entry = {
+            "provider": "kokoro",
+            "provider_voice": voice_to_search.split(":", 1)[1].strip() or "af_heart",
+        }
     if not voice_entry:
         return False
 
@@ -459,6 +575,12 @@ def preload_tts_voice(voice: str, on_progress: callable = None) -> bool:
         load_voice = getattr(model, "load_voice", None)
         if callable(load_voice):
             load_voice(provider_voice or "maichi")
+        return True
+    if provider == "kokoro":
+        from kokoro_support import voice_path
+        if not os.path.isfile(voice_path(provider_voice)):
+            raise FileNotFoundError(f"Kokoro voice is missing: {voice_path(provider_voice)}")
+        _get_cached_kokoro_pipeline(on_progress=on_progress)
         return True
     if provider != "piper":
         return False
@@ -512,6 +634,13 @@ def synthesize_text_to_wav_16k_mono(
             "provider_voice": voice_to_search.split(":", 1)[1].strip() or "maichi",
             "language": "vi",
         }
+    if not voice_entry and voice_to_search.lower().startswith("kokoro:"):
+        voice_entry = {
+            "id": voice_to_search,
+            "provider": "kokoro",
+            "provider_voice": voice_to_search.split(":", 1)[1].strip() or "af_heart",
+            "language": "en",
+        }
 
     # Fallback: use the first available voice
     if not voice_entry:
@@ -563,8 +692,17 @@ def synthesize_text_to_wav_16k_mono(
             tmp_dir=tmp_dir,
             on_progress=on_progress,
         )
+    elif provider == "kokoro":
+        return kokoro_tts_to_wav_16k_mono(
+            text=text,
+            wav_path=wav_path,
+            voice=provider_voice or "af_heart",
+            speed=speed,
+            tmp_dir=tmp_dir,
+            on_progress=on_progress,
+        )
     else:
         raise ValueError(
-            f"Unsupported TTS provider: {provider}. Supported providers are 'piper', 'edge', and 'zerotts'."
+            f"Unsupported TTS provider: {provider}. Supported providers are 'piper', 'edge', 'zerotts', and 'kokoro'."
         )
 

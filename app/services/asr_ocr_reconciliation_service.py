@@ -50,10 +50,9 @@ class AsrOcrReconciliationService:
     the spoken transcript.
     """
 
-    VERSION = "multilingual-fast-adaptive-dialogue-segmentation-v14"
+    VERSION = "multilingual-fast-adaptive-dialogue-segmentation-v16"
     MAX_TIME_SLOP_SECONDS = 0.45
     MAX_OCR_LENGTH = 80
-    MAX_SCAN_RANGES = 512
     MERGE_RISK_DURATION_SECONDS = 2.5
     AUTHORITATIVE_SHORT_LENGTH = {
         "han": 4, "japanese": 4, "korean": 5, "latin": 8,
@@ -220,7 +219,10 @@ class AsrOcrReconciliationService:
                 ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
             else:
                 ranges.append((start, end))
-        return ranges[:cls.MAX_SCAN_RANGES]
+        # Do not truncate long projects. A fixed 512-cue cap silently left the
+        # second half of long videos without OCR verification, making quality
+        # depend on where a line appeared in the timeline.
+        return ranges
 
     @classmethod
     def suspicious_cue_ranges(
@@ -272,8 +274,6 @@ class AsrOcrReconciliationService:
                 "text": str(segment.get("text", "") or "").strip(),
                 "scan_mode": scan_mode,
             })
-            if len(requests) >= cls.MAX_SCAN_RANGES:
-                break
         return requests
 
     @staticmethod
@@ -670,6 +670,17 @@ class AsrOcrReconciliationService:
                         item["words"] = []
                         replacement_count += 1
                         timing_aligned = True
+
+                if ocr_normalized == asr_normalized:
+                    # Persist exact two-frame agreement even when OCR timing is
+                    # already close enough that no alignment was necessary.
+                    # Downstream hallucination filtering needs this evidence to
+                    # preserve a genuine visible one-character interjection.
+                    item["ocr_text"] = ocr_text
+                    item["ocr_consensus_frames"] = max(
+                        2, int(best.get("ocr_consensus_frames", 0) or 0)
+                    )
+                    item.setdefault("text_source", "ocr_verified")
 
                 if ocr_normalized != asr_normalized:
                     is_safe_replacement = (

@@ -153,6 +153,201 @@ class ExportWorkflow:
         os.makedirs(tmp_dir, exist_ok=True)
         return os.path.join(tmp_dir, f"final_mux_{int(time.time())}.mp4")
 
+    def _export_single_clip_stream_copy(
+        self,
+        *,
+        clip: dict,
+        output_path: str,
+        mode: str,
+        audio_path: str = "",
+        on_progress=None,
+        cancellation_check=None,
+    ) -> str:
+        """Trim one clip while copying H.264 video and replacing only audio.
+
+        This is the common voice-only recap path. It avoids decoding and
+        re-encoding tens of thousands of unchanged video frames.
+        """
+        from runtime_paths import bin_path
+        from video_processor import run_ffmpeg_with_progress
+
+        source = os.path.abspath(str(clip.get("source", "") or ""))
+        if not os.path.isfile(source):
+            raise FileNotFoundError(f"Timeline source video not found: {source}")
+        start = max(0.0, float(clip.get("source_start", 0.0) or 0.0))
+        duration = max(0.001, float(clip.get("source_duration", 0.0) or 0.0))
+        output_abs = os.path.abspath(output_path)
+        partial = os.path.join(
+            os.path.dirname(output_abs),
+            f".{os.path.basename(output_abs)}.{os.getpid()}.partial.mp4",
+        )
+        try:
+            if os.path.exists(partial):
+                os.remove(partial)
+        except OSError:
+            pass
+
+        ffmpeg = str(bin_path("ffmpeg", "ffmpeg.exe"))
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{start:.6f}", "-i", source,
+        ]
+        if mode == "voice":
+            if not audio_path or not os.path.isfile(audio_path):
+                raise FileNotFoundError("The selected voice audio is not ready for export.")
+            command += ["-i", os.path.abspath(audio_path), "-map", "0:v:0", "-map", "1:a:0"]
+            audio_args = ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            command += ["-map", "0:v:0", "-map", "0:a?"]
+            audio_args = ["-c:a", "copy"]
+        command += [
+            "-c:v", "copy", *audio_args,
+            "-t", f"{duration:.6f}",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            partial,
+        ]
+
+        def _progress(event):
+            pct = int(getattr(event, "percent", 0) or 0)
+            self._emit_progress(
+                on_progress,
+                min(99, 10 + int(pct * 0.89)),
+                f"Fast export · copying video ({pct}%)",
+                substage="stream_copy",
+            )
+
+        ok, _stdout, stderr = run_ffmpeg_with_progress(
+            command,
+            total_duration_seconds=duration,
+            progress_callback=_progress,
+            cancellation_check=cancellation_check,
+            output_path_to_clean=partial,
+        )
+        if not ok:
+            raise RuntimeError(f"Fast stream-copy export failed: {stderr[-1800:]}")
+        if not os.path.isfile(partial) or os.path.getsize(partial) <= 0:
+            raise RuntimeError("Fast export did not create a valid output file.")
+        os.replace(partial, output_abs)
+        return output_abs
+
+    def _is_stream_copy_seek_safe(self, source: str, start_seconds: float) -> bool:
+        """Return true when a trim starts on a nearby video keyframe."""
+        start = max(0.0, float(start_seconds or 0.0))
+        if start <= 0.05:
+            return True
+        try:
+            import subprocess
+            from runtime_paths import bin_path, subprocess_text_kwargs
+
+            window_start = max(0.0, start - 1.0)
+            probe = subprocess.run(
+                [
+                    str(bin_path("ffmpeg", "ffprobe.exe")),
+                    "-v", "error",
+                    "-read_intervals", f"{window_start:.6f}%+2",
+                    "-select_streams", "v:0",
+                    "-skip_frame", "nokey",
+                    "-show_entries", "frame=best_effort_timestamp_time",
+                    "-of", "csv=p=0",
+                    str(source),
+                ],
+                capture_output=True,
+                check=False,
+                timeout=20,
+                **subprocess_text_kwargs(),
+            )
+            for line in str(probe.stdout or "").splitlines():
+                raw = line.split(",", 1)[0].strip()
+                if raw and abs(float(raw) - start) <= 0.05:
+                    return True
+        except (OSError, TypeError, ValueError):
+            pass
+        return False
+
+    def _export_single_clip_exact_render(
+        self,
+        *,
+        clip: dict,
+        output_path: str,
+        mode: str,
+        audio_path: str = "",
+        export_preset: str = "fast",
+        video_bitrate_kbps: int = 0,
+        on_progress=None,
+        cancellation_check=None,
+    ) -> str:
+        """Frame-accurate trim without the heavyweight timeline filter graph."""
+        from runtime_paths import bin_path
+        from video_processor import build_export_h264_encoder_args, run_ffmpeg_with_progress
+
+        source = os.path.abspath(str(clip.get("source", "") or ""))
+        start = max(0.0, float(clip.get("source_start", 0.0) or 0.0))
+        duration = max(0.001, float(clip.get("source_duration", 0.0) or 0.0))
+        output_abs = os.path.abspath(output_path)
+        partial = os.path.join(
+            os.path.dirname(output_abs),
+            f".{os.path.basename(output_abs)}.{os.getpid()}.partial.mp4",
+        )
+        ffmpeg = str(bin_path("ffmpeg", "ffmpeg.exe"))
+        encoder_args = build_export_h264_encoder_args(
+            ffmpeg, export_preset, video_bitrate_kbps
+        )
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{start:.6f}", "-i", source,
+        ]
+        if mode == "voice":
+            if not audio_path or not os.path.isfile(audio_path):
+                raise FileNotFoundError("The selected voice audio is not ready for export.")
+            command += ["-i", os.path.abspath(audio_path), "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            command += ["-map", "0:v:0", "-map", "0:a?"]
+        command += [
+            *encoder_args,
+            "-c:a", "aac", "-b:a", "192k",
+            "-t", f"{duration:.6f}",
+            "-movflags", "+faststart",
+            partial,
+        ]
+
+        def _progress(event):
+            pct = int(getattr(event, "percent", 0) or 0)
+            self._emit_progress(
+                on_progress,
+                min(99, 10 + int(pct * 0.89)),
+                f"Fast accurate render ({pct}%)",
+                substage="fast_exact_render",
+            )
+
+        ok, _stdout, stderr = run_ffmpeg_with_progress(
+            command,
+            total_duration_seconds=duration,
+            progress_callback=_progress,
+            cancellation_check=cancellation_check,
+            output_path_to_clean=partial,
+        )
+        if not ok and "h264_nvenc" in command:
+            fallback_args = build_export_h264_encoder_args(
+                ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
+            )
+            video_arg_index = command.index("-c:v")
+            audio_arg_index = command.index("-c:a", video_arg_index)
+            command[video_arg_index:audio_arg_index] = fallback_args
+            ok, _stdout, stderr = run_ffmpeg_with_progress(
+                command,
+                total_duration_seconds=duration,
+                progress_callback=_progress,
+                cancellation_check=cancellation_check,
+                output_path_to_clean=partial,
+            )
+        if not ok:
+            raise RuntimeError(f"Fast accurate export failed: {stderr[-1800:]}")
+        if not os.path.isfile(partial) or os.path.getsize(partial) <= 0:
+            raise RuntimeError("Fast accurate export did not create a valid output file.")
+        os.replace(partial, output_abs)
+        return output_abs
+
     def _export_subtitle_video(
         self,
         *,
@@ -174,6 +369,8 @@ class ExportWorkflow:
         text_ass_path="",
         text_image_layers=None,
         original_audio_gain_db=0.0,
+        export_preset="balanced",
+        video_bitrate_kbps=0,
         progress_callback=None,
         cancellation_check=None,
     ):
@@ -199,6 +396,8 @@ class ExportWorkflow:
                 output_fps=output_fps,
                 video_filter_state=video_filter_state,
                 audio_gain_db=original_audio_gain_db,
+                export_preset=export_preset,
+                video_bitrate_kbps=video_bitrate_kbps,
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check,
             )
@@ -219,6 +418,8 @@ class ExportWorkflow:
                 output_fps=output_fps,
                 video_filter_state=video_filter_state,
                 audio_gain_db=original_audio_gain_db,
+                export_preset=export_preset,
+                video_bitrate_kbps=video_bitrate_kbps,
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check,
             )
@@ -687,6 +888,8 @@ class ExportWorkflow:
         on_progress=None,
         cancellation_check: callable = None,
         timeline_clips=None,
+        export_preset: str = "balanced",
+        video_bitrate_kbps: int = 2000,
     ) -> str:
         subtitle_style = subtitle_style or {}
         target_w, target_h = self._resolve_target_dimensions(video_path, output_quality, output_ratio)
@@ -734,6 +937,11 @@ class ExportWorkflow:
         render_w, render_h = target_w, target_h
         if not render_w or not render_h:
             render_w, render_h = self.engine_runtime.get_video_dimensions(video_path)
+        filter_state_active = bool((video_filter_state or {}).get("active", False))
+        requires_video_render = bool(
+            has_visible_overlays or filter_state_active or target_w or target_h or target_fps
+            or abs(float(original_audio_gain_db or 0.0)) > 0.001
+        )
         # Text layers are rendered to target-canvas PNGs.  Their stored
         # normalized positions are source-video coordinates, so use the same
         # Fit/Fill transform as the preview before Qt renders the bitmap.
@@ -761,7 +969,7 @@ class ExportWorkflow:
                 width=render_w or 1920,
                 height=render_h or 1080,
             )
-        elif has_visible_overlays and not ass_path:
+        elif requires_video_render and not ass_path:
             visual_ass_path = self._ensure_visual_overlay_ass(
                 os.path.join(project_temp_dir or self.workspace_root, "temp", "visual_overlay.ass"),
                 [],
@@ -790,6 +998,58 @@ class ExportWorkflow:
                     timeline_edit_required = abs(media_duration - float(clip.get("source_duration", 0.0) or 0.0)) > 0.15
                 except Exception:
                     timeline_edit_required = False
+        single_clip_simple_export = bool(
+            len(timeline_clips) == 1
+            and (timeline_edit_required or mode == "voice")
+            and mode in {"original", "voice"}
+            and not has_visible_overlays
+            and not filter_state_active
+            and not target_w
+            and not target_h
+            and not target_fps
+            and abs(float(timeline_clips[0].get("speed", 1.0) or 1.0) - 1.0) < 0.0001
+            and (mode != "original" or abs(float(original_audio_gain_db or 0.0)) < 0.001)
+        )
+        if single_clip_simple_export:
+            try:
+                source = str(timeline_clips[0].get("source", "") or "")
+                source_start = float(timeline_clips[0].get("source_start", 0.0) or 0.0)
+                if self._is_stream_copy_seek_safe(source, source_start):
+                    self._emit_progress(on_progress, 10, "Fast export · copying unchanged video stream...")
+                    result = self._export_single_clip_stream_copy(
+                        clip=timeline_clips[0],
+                        output_path=output_path,
+                        mode=mode,
+                        audio_path=audio_path,
+                        on_progress=on_progress,
+                        cancellation_check=cancellation_check,
+                    )
+                else:
+                    self._emit_progress(on_progress, 10, "Fast export · frame-accurate trim...")
+                    result = self._export_single_clip_exact_render(
+                        clip=timeline_clips[0],
+                        output_path=output_path,
+                        mode=mode,
+                        audio_path=audio_path,
+                        export_preset=export_preset,
+                        video_bitrate_kbps=video_bitrate_kbps,
+                        on_progress=on_progress,
+                        cancellation_check=cancellation_check,
+                    )
+                self._mark_completed(state, result)
+                self._emit_progress(on_progress, 100, "Fast export complete.")
+                return result
+            except InterruptedError:
+                self._mark_failed(state)
+                raise
+            except Exception as exc:
+                # A codec/container edge case must not make the export
+                # unusable. Fall back to the normal full-render path.
+                self._emit_progress(
+                    on_progress, 12,
+                    f"Fast copy unavailable; using compatible render ({exc})",
+                    substage="stream_copy_fallback",
+                )
         if timeline_edit_required:
             try:
                 self._emit_progress(on_progress, 20, "Rendering V1 Timeline sequence in one pass...")
@@ -813,6 +1073,15 @@ class ExportWorkflow:
                     mask_regions=mask_regions,
                     logo_layers=logo_layers,
                     text_image_layers=text_image_layers,
+                    export_preset=export_preset,
+                    video_bitrate_kbps=video_bitrate_kbps,
+                    on_progress=lambda event: self._emit_progress(
+                        on_progress,
+                        min(99, 20 + int(getattr(event, "percent", 0) * 0.79)),
+                        getattr(event, "message", "Rendering timeline…"),
+                        substage="ffmpeg_encode",
+                    ),
+                    cancellation_check=cancellation_check,
                 )
                 self._mark_completed(state, result)
                 self._emit_progress(on_progress, 100, "Timeline export complete.")
@@ -831,12 +1100,12 @@ class ExportWorkflow:
         try:
             if cancellation_check and cancellation_check():
                 raise InterruptedError("Export cancelled by user")
-            if mode == "original" and not has_visible_overlays:
+            if mode == "original" and not requires_video_render:
                 self._emit_progress(on_progress, 30, "Copying source video...")
                 if os.path.abspath(video_path) == os.path.abspath(output_path):
                     raise ValueError("Choose a different output filename from the source video.")
                 shutil.copy2(video_path, output_path)
-            elif mode == "subtitle" or (mode == "original" and has_visible_overlays):
+            elif mode == "subtitle" or (mode == "original" and requires_video_render):
                 self._emit_progress(on_progress, 20, "Burning subtitles into the video...")
                 if abs(float(original_audio_gain_db or 0.0)) > 0.001:
                     print(f"[Export] Applying A1 Original audio gain: {float(original_audio_gain_db):.2f} dB")
@@ -858,6 +1127,8 @@ class ExportWorkflow:
                     blur_regions=blur_regions,
                     text_image_layers=text_image_layers,
                     original_audio_gain_db=original_audio_gain_db,
+                    export_preset=export_preset,
+                    video_bitrate_kbps=video_bitrate_kbps,
                     progress_callback=_make_ffmpeg_progress_cb(20, 95, "Burning subtitles into video"),
                     cancellation_check=cancellation_check,
                 )
@@ -907,6 +1178,8 @@ class ExportWorkflow:
                         logo_layers=logo_layers,
                         blur_regions=blur_regions,
                         text_image_layers=text_image_layers,
+                        export_preset=export_preset,
+                        video_bitrate_kbps=video_bitrate_kbps,
                         progress_callback=_make_ffmpeg_progress_cb(40, 95, "Rendering visual overlays"),
                         cancellation_check=cancellation_check,
                     )
@@ -943,6 +1216,8 @@ class ExportWorkflow:
                     logo_layers=logo_layers,
                     blur_regions=blur_regions,
                     text_image_layers=text_image_layers,
+                    export_preset=export_preset,
+                    video_bitrate_kbps=video_bitrate_kbps,
                     progress_callback=_make_ffmpeg_progress_cb(40, 95, "Burning styled subtitles into final video"),
                     cancellation_check=cancellation_check,
                 )

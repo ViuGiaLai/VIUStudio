@@ -50,17 +50,42 @@ except ImportError:
 
 class VocalSeparationWorker(QThread):
     finished = Signal(str, str, str)
+    progress = Signal(int, str)
 
-    def __init__(self, audio_path, output_dir):
+    def __init__(self, audio_path, output_dir, video_path=None):
         super().__init__()
         self.audio_path = audio_path
         self.output_dir = output_dir
+        self.video_path = video_path
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
 
     def run(self):
         try:
             engine = EngineRuntime()
-            vocal_path, music_path = engine.separate_vocals(self.audio_path, self.output_dir)
-            if vocal_path and music_path:
+            if (not self.audio_path or not os.path.exists(self.audio_path)) and self.video_path and os.path.exists(self.video_path):
+                self.progress.emit(1, "Extracting audio from video...")
+                if self.audio_path:
+                    os.makedirs(os.path.dirname(self.audio_path), exist_ok=True)
+                extract_ok = engine.extract_audio(self.video_path, self.audio_path)
+                if not extract_ok or not os.path.exists(self.audio_path):
+                    self.finished.emit("", "", f"Failed to extract audio from {os.path.basename(self.video_path)}")
+                    return
+                if self._stop_requested:
+                    self.finished.emit("", "", "Vocal separation was stopped by user.")
+                    return
+
+            vocal_path, music_path = engine.separate_vocals(
+                self.audio_path,
+                self.output_dir,
+                progress_callback=self.progress.emit,
+                is_cancelled=lambda: self._stop_requested,
+            )
+            if self._stop_requested:
+                self.finished.emit("", "", "Vocal separation was stopped by user.")
+            elif vocal_path and music_path:
                 self.finished.emit(vocal_path, music_path, "")
             else:
                 self.finished.emit("", "", "Failed to separate audio stems.")
@@ -765,9 +790,6 @@ class VoiceOverWorker(QThread):
     def run(self):
         try:
             from runtime_profile import is_remote_profile
-            print(f"[VoiceOverWorker DEBUG] Starting with voice_name='{self.voice_name}'")
-            self.progress.emit(f"[VoiceOverWorker DEBUG] voice_name='{self.voice_name}'")
-
             if is_remote_profile():
                 from remote_api import remote_api_post
                 response = remote_api_post(
@@ -954,7 +976,7 @@ class FinalExportWorker(QThread):
     finished = Signal(str, str)
     progress = Signal(int, str)
 
-    def __init__(self, workspace_root, video_path, output_path, mode, srt_path="", ass_path="", audio_path="", subtitle_style=None, output_quality="source", output_fps="source", output_ratio="source", output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, project_state_path="", project_temp_dir="", timeline_clips=None):
+    def __init__(self, workspace_root, video_path, output_path, mode, srt_path="", ass_path="", audio_path="", subtitle_style=None, output_quality="source", output_fps="source", output_ratio="source", output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, project_state_path="", project_temp_dir="", timeline_clips=None, export_preset="balanced", video_bitrate_kbps=2000):
         super().__init__()
         self.workspace_root = workspace_root
         self.video_path = video_path
@@ -975,6 +997,8 @@ class FinalExportWorker(QThread):
         self.project_state_path = project_state_path
         self.project_temp_dir = project_temp_dir
         self.timeline_clips = [dict(clip) for clip in (timeline_clips or [])]
+        self.export_preset = str(export_preset or "balanced")
+        self.video_bitrate_kbps = int(video_bitrate_kbps or 2000)
 
     def run(self):
         try:
@@ -1004,6 +1028,8 @@ class FinalExportWorker(QThread):
                         "project_state_path": self.project_state_path,
                         "project_temp_dir": self.project_temp_dir,
                         "timeline_clips": self.timeline_clips,
+                        "export_preset": self.export_preset,
+                        "video_bitrate_kbps": self.video_bitrate_kbps,
                     },
                     timeout=3600,
                 )
@@ -1033,6 +1059,8 @@ class FinalExportWorker(QThread):
                     on_progress=self.progress.emit,
                     cancellation_check=self.isInterruptionRequested,
                     timeline_clips=self.timeline_clips,
+                    export_preset=self.export_preset,
+                    video_bitrate_kbps=self.video_bitrate_kbps,
                 )
                 self.finished.emit(output_path, "")
         except InterruptedError:

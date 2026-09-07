@@ -1035,6 +1035,10 @@ class PipelineLifecycleMixin:
         else:
             self.log(f"[Voiceover] Generated Vietnamese voice track: {voice_track} (No background mix created.)")
 
+        # One concise completion record replaces the per-cue TTS spam.
+        completed_tts = len(voice_segments or self._get_voiceover_segments() or [])
+        self.log(f"✓ TTS completed — {completed_tts}/{completed_tts}")
+
         self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
         self.refresh_ui_state()
         self.sync_preview_audio_track_to_output()

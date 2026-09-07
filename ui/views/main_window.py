@@ -278,6 +278,10 @@ def _build_header_bar(gui):
     more_menu = QMenu(gui.more_actions_btn)
     more_menu.setObjectName("headerMoreMenu")
 
+    gui.import_subtitle_action = more_menu.addAction("Import Translated SRT…")
+    gui.import_subtitle_action.triggered.connect(gui.import_translated_srt)
+    gui.import_original_action = more_menu.addAction("Import Source SRT…")
+    gui.import_original_action.triggered.connect(gui.import_original_srt)
     gui.download_subtitle_action = more_menu.addAction("Export Translated SRT…")
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
     gui.download_original_action = more_menu.addAction("Export Source SRT…")
@@ -423,6 +427,16 @@ def _build_left_panel(gui):
 def _connect_ui_signals(gui):
     gui.extract_btn.clicked.connect(gui.run_extraction)
     gui.vocal_sep_btn.clicked.connect(gui.run_vocal_separation)
+    if hasattr(gui, "audio_separation_btn"):
+        gui.audio_separation_btn.clicked.connect(gui.run_vocal_separation)
+    if hasattr(gui, "add_music_stem_btn"):
+        gui.add_music_stem_btn.clicked.connect(gui.add_music_stem_to_timeline)
+    if hasattr(gui, "add_voice_stem_btn"):
+        gui.add_voice_stem_btn.clicked.connect(gui.add_voice_stem_to_timeline)
+    if hasattr(gui, "audio_music_volume_slider"):
+        gui.audio_music_volume_slider.valueChanged.connect(gui.on_audio_music_volume_changed)
+    if hasattr(gui, "audio_voice_volume_slider"):
+        gui.audio_voice_volume_slider.valueChanged.connect(gui.on_audio_voice_volume_changed)
     gui.transcribe_btn.clicked.connect(gui.run_transcription)
     gui.import_original_srt_btn.clicked.connect(gui.import_original_srt)
     gui.translate_btn.clicked.connect(gui.run_translation)
@@ -609,6 +623,12 @@ def _connect_ui_signals(gui):
             pc = getattr(gui, "pipeline_controller", None)
             if pc and hasattr(pc, "_on_pipeline_stop"):
                 pc._on_pipeline_stop()
+            vocal_thread = getattr(gui, "vocal_thread", None)
+            if vocal_thread and getattr(vocal_thread, "isRunning", lambda: False)():
+                try:
+                    vocal_thread.stop()
+                except Exception:
+                    pass
 
         gui.mini_status_bar.show_dialog_requested.connect(_on_mini_show_dialog)
         gui.mini_status_bar.stop_requested.connect(_on_mini_stop_requested)

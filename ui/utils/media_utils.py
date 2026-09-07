@@ -19,19 +19,18 @@ def setup_media_player(gui):
             if hasattr(gui, "log"):
                 gui.log(f"[Preview] Advanced Video Preview unavailable ({stage}): {technical or summary}")
 
-            def _show_preview_warning():
-                # The fallback is intentional and safe, but advanced MPV-only
-                # preview features are unavailable. Keep the dialog concise;
-                # the detailed loader error is preserved in the runtime log.
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(
-                    gui,
-                    "Advanced Video Preview Unavailable",
-                    f"Advanced Video Preview is unavailable.\n\nReason: {summary}\n\n"
-                    "VIUStudio will use the compatible preview instead. See Logs for technical details.",
-                )
-
-            QTimer.singleShot(0, _show_preview_warning)
+            # The Qt backend is a valid compatibility path.  A modal dialog
+            # here blocked every project open (and felt like a freeze). Keep
+            # the actionable diagnostic in Logs/status while editing remains
+            # immediately available; Manage Resources exposes the MPV setup.
+            if hasattr(gui, "statusBar"):
+                try:
+                    gui.statusBar().showMessage(
+                        f"Compatible preview active: {summary} (install MPV in Manage Resources for advanced preview)",
+                        12000,
+                    )
+                except Exception:
+                    pass
 
     gui.play_btn.clicked.connect(gui.toggle_play)
     gui.stop_btn.clicked.connect(gui.stop_video)

@@ -1,6 +1,6 @@
 import os
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QUrl, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
@@ -62,7 +62,8 @@ def _open_folder_dialog(gui_parent, path: str) -> None:
 
 
 def open_resource_manager(workspace_root: str = None, parent=None,
-                          on_finished=None):
+                          on_finished=None, focus_resource_id: str | None = None,
+                          auto_start: bool = False, show: bool = True):
     if workspace_root is None:
         workspace_root = default_workspace_root()
 
@@ -84,6 +85,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         QWidget#resourceContent { background-color: transparent; }
         QScrollArea { border: none; background-color: transparent; }
         QFrame#resourceCard { background-color: #141824; border: 1px solid #23293a; border-radius: 10px; }
+        QFrame#resourceCardFocused { background-color: #162035; border: 2px solid #3b82f6; border-radius: 10px; }
         QPushButton {
             background-color: #1c2230; color: #e2e8f0; border: 1px solid #2b354a;
             border-radius: 6px; padding: 6px 14px; font-weight: 600; min-width: 80px; font-size: 11px;
@@ -366,6 +368,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
         target_layout.addWidget(card)
         dialog._resource_rows[item["id"]] = {
+            "card": card,
             "item": item,
             "name_label": name_label,
             "status_pill": status_pill,
@@ -406,7 +409,7 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         ))
         wrapper_layout.addWidget(btn)
         wrapper_layout.addWidget(inner)
-        return wrapper, inner_layout
+        return wrapper, inner_layout, btn
 
     def _refresh():
         resources = {item["id"]: item for item in service.list_resources()}
@@ -430,32 +433,95 @@ def open_resource_manager(workspace_root: str = None, parent=None,
         dialog._resource_rows = {}
 
         resources = service.list_resources()
+        preview_items = [r for r in resources if r.get("kind") == "preview"]
         cpu_items = [r for r in resources if r.get("kind") in {"sensevoice", "whisper_cpu"}]
+        audio_items = [r for r in resources if r.get("kind") in {"separation", "diarization"}]
         gpu_kinds = {"ai", "whisper", "cuda"}
         gpu_items = [r for r in resources if r.get("kind") in gpu_kinds]
+        llama_items = [r for r in resources if r.get("kind") == "llama"]
         voice_items = [r for r in resources if r.get("kind") == "voice"]
 
+        seen_ids = {r.get("id") for r in (preview_items + cpu_items + audio_items + gpu_items + llama_items + voice_items)}
+        other_items = [r for r in resources if r.get("id") not in seen_ids]
+
+        if preview_items:
+            preview_expand = any(
+                r.get("id") == focus_resource_id or r.get("status") != "installed"
+                for r in preview_items
+            )
+            preview_card, preview_layout, _ = _make_section(
+                "Preview Runtime",
+                expanded=preview_expand,
+            )
+            for item in preview_items:
+                _add_card(item, preview_layout)
+            content_layout.addWidget(preview_card)
+
         if cpu_items:
-            cpu_card, cpu_layout = _make_section("CPU Resource", expanded=True)
+            cpu_card, cpu_layout, _ = _make_section("CPU Speech & Transcription Models", expanded=True)
             for item in cpu_items:
                 _add_card(item, cpu_layout)
             content_layout.addWidget(cpu_card)
 
+        if audio_items:
+            audio_expand = True
+            audio_card, audio_layout, _ = _make_section(
+                "Audio & Separation Models (Tách Nhạc / Giọng & Diarization)",
+                expanded=audio_expand,
+            )
+            for item in audio_items:
+                _add_card(item, audio_layout)
+            content_layout.addWidget(audio_card)
+
         if gpu_items:
-            # GPU resources remain relevant in CPU Mode: users need a clear
-            # place to find the GPU Acceleration Pack before switching modes.
-            # Previously this header was conditionally removed based on the
-            # process environment, which made "GPU Resource" appear to vanish
-            # after launcher/device-state refreshes.
-            gpu_card, gpu_layout = _make_section("GPU Resource", expanded=False)
+            gpu_expand = any(r.get("id") == focus_resource_id for r in gpu_items)
+            gpu_card, gpu_layout, _ = _make_section("GPU Acceleration Resource", expanded=gpu_expand)
             for item in gpu_items:
                 _add_card(item, gpu_layout)
             content_layout.addWidget(gpu_card)
 
-        for item in voice_items:
-            _add_card(item, content_layout)
+        if llama_items:
+            llama_expand = any(r.get("id") == focus_resource_id for r in llama_items)
+            llama_card, llama_layout, _ = _make_section(
+                "LLM & Language Models (AI Viết Kịch Bản / Llama)",
+                expanded=llama_expand,
+            )
+            for item in llama_items:
+                _add_card(item, llama_layout)
+            content_layout.addWidget(llama_card)
+
+        if voice_items:
+            voice_card, voice_layout, _ = _make_section(
+                "Voice & TTS Models (Giọng Đọc - Piper & ZeroTTS)",
+                expanded=True,
+            )
+            for item in voice_items:
+                _add_card(item, voice_layout)
+            content_layout.addWidget(voice_card)
+
+        if other_items:
+            other_card, other_layout, _ = _make_section("Other Resources", expanded=True)
+            for item in other_items:
+                _add_card(item, other_layout)
+            content_layout.addWidget(other_card)
 
         content_layout.addStretch()
+
+        if focus_resource_id and focus_resource_id in dialog._resource_rows:
+            row = dialog._resource_rows[focus_resource_id]
+            card = row.get("card")
+            if card is not None:
+                card.setObjectName("resourceCardFocused")
+                card.setStyleSheet(
+                    "QFrame#resourceCard, QFrame#resourceCardFocused { "
+                    "background-color: #172338; "
+                    "border: 2px solid #3b82f6; "
+                    "border-radius: 10px; "
+                    "}"
+                )
+                QTimer.singleShot(120, lambda c=card: scroll.ensureWidgetVisible(c, 50, 50))
+            if auto_start:
+                QTimer.singleShot(250, lambda rid=focus_resource_id: _start_resource_install(rid))
 
     _populate()
 
@@ -489,4 +555,6 @@ def open_resource_manager(workspace_root: str = None, parent=None,
 
     dialog.accepted.connect(_on_dialog_closed)
     dialog.rejected.connect(_on_dialog_closed)
-    dialog.exec()
+    if show:
+        dialog.exec()
+    return dialog

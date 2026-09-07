@@ -6,6 +6,7 @@ import os
 from runtime_paths import app_path, models_path
 from runtime_profile import is_remote_profile
 from zerotts_support import catalog_entries as zerotts_catalog_entries
+from kokoro_support import catalog_entries as kokoro_catalog_entries
 
 
 class VoiceCatalogService:
@@ -68,6 +69,15 @@ class VoiceCatalogService:
                 voice for voice in zerotts_catalog_entries()
                 if str(voice.get("id", "")).strip() not in existing_ids
             )
+            existing_ids.update(
+                str(voice.get("id", "")).strip()
+                for voice in voices
+                if isinstance(voice, dict)
+            )
+            voices.extend(
+                voice for voice in kokoro_catalog_entries()
+                if str(voice.get("id", "")).strip() not in existing_ids
+            )
             piper_model_ids = self._iter_piper_model_ids()
             is_remote = is_remote_profile()
             normalized_voices: list[dict] = []
@@ -77,7 +87,7 @@ class VoiceCatalogService:
                 if not voice.get("enabled", True):
                     continue
                 provider = str(voice.get("provider", "")).strip().lower()
-                if provider not in {"piper", "edge", "zerotts"}:
+                if provider not in {"piper", "edge", "zerotts", "kokoro"}:
                     continue
                 voice_id = str(voice.get("id", "")).strip()
                 # In remote mode the backend API owns the models, so skip the local file check.

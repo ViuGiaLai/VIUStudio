@@ -252,6 +252,114 @@
         "local",
         "piper"
       ]
+    },
+    {
+      "id": "en_US-amy-medium",
+      "name": "en_US-amy-medium (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/piper-en/en_US-amy-medium.onnx",
+      "language": "en",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "en_US-arctic-medium",
+      "name": "en_US-arctic-medium (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/piper-en/en_US-arctic-medium.onnx",
+      "language": "en",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "en_US-hfc_female-medium",
+      "name": "en_US-hfc_female-medium (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/en_US-hfc_female-medium.onnx",
+      "language": "en",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "en_US-hfc_male-medium",
+      "name": "en_US-hfc_male-medium (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/en_US-hfc_male-medium.onnx",
+      "language": "en",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "en_US-joe-medium",
+      "name": "en_US-joe-medium (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/en_US-joe-medium.onnx",
+      "language": "en",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "en_US-lessac-medium",
+      "name": "en_US-lessac-medium (Local)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/en_US-lessac-medium.onnx",
+      "language": "en",
+      "gender": "",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
     }
   ]
 }

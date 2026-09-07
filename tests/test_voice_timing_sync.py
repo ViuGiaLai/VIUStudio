@@ -42,6 +42,55 @@ def _make_tone_wav(path: str, duration: float, sample_rate: int = 16000) -> None
 
 
 class VoiceTimingSyncTests(unittest.TestCase):
+    def test_dense_english_run_is_uniformly_sped_up_before_queueing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            wavs = []
+            for index in range(3):
+                path = os.path.join(folder, f"dense_{index}.wav")
+                _make_tone_wav(path, 2.0)
+                wavs.append(path)
+            segments = [
+                {"start": 0.0, "end": 1.5, "text": "First English sentence."},
+                {"start": 1.5, "end": 3.0, "text": "Second English sentence."},
+                {"start": 3.0, "end": 4.5, "text": "Third English sentence."},
+            ]
+            workflow = VoiceWorkflow(str(ROOT))
+
+            fitted = workflow._fit_dense_english_voice_runs(
+                segments=segments,
+                wavs=wavs,
+                tmp_dir=folder,
+                sync_mode="Smart",
+                voice_name="en_US-lessac-medium",
+                requested_speed=1.0,
+            )
+
+            durations = [ffprobe_wav_duration(path) for path in fitted]
+            self.assertTrue(all(duration < 1.55 for duration in durations))
+            self.assertTrue(all(duration > 1.40 for duration in durations))
+            self.assertTrue(all("dense_run_fit" in segment.get("action_taken", "") for segment in segments))
+            self.assertTrue(all(segment.get("tts_duration", 0.0) < 1.55 for segment in segments))
+            self.assertTrue(all("dense_run_speed_ratio" in segment.get("_tts_metrics", {}) for segment in segments))
+
+    def test_dense_fit_does_not_change_non_english_voice(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "vietnamese.wav")
+            _make_tone_wav(source, 2.0)
+            segment = {"start": 0.0, "end": 1.0, "text": "Xin chào"}
+            workflow = VoiceWorkflow(str(ROOT))
+
+            fitted = workflow._fit_dense_english_voice_runs(
+                segments=[segment],
+                wavs=[source],
+                tmp_dir=folder,
+                sync_mode="Smart",
+                voice_name="ngochuyen",
+                requested_speed=1.0,
+            )
+
+            self.assertEqual(fitted, [source])
+            self.assertNotIn("dense_run_fit", segment.get("action_taken", ""))
+
     def test_hard_duration_cap_uses_a_short_fade_and_hits_deadline(self):
         with tempfile.TemporaryDirectory() as folder:
             source = os.path.join(folder, "long.wav")

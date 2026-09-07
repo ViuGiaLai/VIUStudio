@@ -7,7 +7,7 @@ import shutil
 import re
 import tempfile
 
-from PySide6.QtCore import QMetaObject, QSettings, Qt, QTimer, QThread, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -801,26 +801,14 @@ class LauncherWindow(QDialog):
         self._is_accepting = True
         self._set_selected_device(self.selected_device)
         self.loading_label.show()
-        self.loading_label.setText("Preparing thumbnails and waveform...\nLarge videos may continue preparing in the editor.")
+        self.loading_label.setText("Opening project...\nTimeline visuals will load in the background.")
         self.new_btn.setEnabled(False)
-        self._extraction_done = False
-        self._preprocess_started_at = time.monotonic()
-        self._preprocess_continued_in_background = False
-        import threading
-        def _preprocess():
-            try:
-                from runtime_paths import workspace_root
-                temp_root = os.path.join(workspace_root(), "temp")
-                _prepare_timeline_visual_cache(self.selected_video, temp_root)
-            except Exception as exc:
-                print(f"[Launcher] Background cache preparation note: {exc}")
-            finally:
-                self._extraction_done = True
-        threading.Thread(target=_preprocess, daemon=True).start()
-        self._stop_loader_timer()
-        self._loader_timer = QTimer(self)
-        self._loader_timer.timeout.connect(self._on_loader_tick)
-        self._loader_timer.start(200)
+        # Do not run a second FFmpeg thumbnail/waveform pipeline here.  The
+        # editor already owns cancellable background workers and persistent
+        # caches for both assets.  The launcher used to wait up to 12 seconds
+        # while also allowing those workers to be duplicated after timeout.
+        self._extraction_done = True
+        QTimer.singleShot(0, self._finish_accept)
 
     def _stop_loader_timer(self):
         timer = getattr(self, "_loader_timer", None)
@@ -834,16 +822,6 @@ class LauncherWindow(QDialog):
 
     def _on_loader_tick(self):
         if not getattr(self, "_extraction_done", False):
-            # Do not hold the launcher hostage while a long video is being
-            # sampled.  The cache worker is filesystem-only and can safely
-            # finish after the editor opens; the editor has its own cache
-            # consumers/fallback workers for any assets not ready yet.
-            started = float(getattr(self, "_preprocess_started_at", 0.0) or 0.0)
-            if started and time.monotonic() - started >= 12.0:
-                self._preprocess_continued_in_background = True
-                print("[Launcher] Timeline visual cache is still preparing; continuing in background.")
-                self._stop_loader_timer()
-                self._finish_accept()
             return
         self._stop_loader_timer()
         self._finish_accept()
@@ -1332,7 +1310,7 @@ class LauncherWindow(QDialog):
         dialog.exec()
 
     def _on_split_video(self):
-        from PySide6.QtWidgets import QMessageBox, QProgressDialog, QInputDialog
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Long Video to Split", "",
             "Video Files (*.mp4 *.mkv *.avi *.mov *.webm);;All Files (*)"

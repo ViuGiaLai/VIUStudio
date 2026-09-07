@@ -81,8 +81,13 @@ class EngineRuntime:
     def extract_audio(self, video_path: str, audio_output_path: str) -> bool:
         return self.ffmpeg.extract_audio(video_path, audio_output_path)
 
-    def separate_vocals(self, audio_path: str, output_dir: str):
-        return self.demucs.separate(audio_path, output_dir)
+    def separate_vocals(self, audio_path: str, output_dir: str, progress_callback=None, is_cancelled=None):
+        return self.demucs.separate(
+            audio_path,
+            output_dir,
+            progress_callback=progress_callback,
+            is_cancelled=is_cancelled,
+        )
 
     def transcribe_audio(self, audio_path: str, model_path: str, *, language: str):
         return self.whisper.transcribe(audio_path, model_path, language=language)

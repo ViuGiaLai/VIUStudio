@@ -31,6 +31,7 @@ TRACK_ICONS: dict[str, str] = {
     "A1": "\u266b",
     "A2": "\u266b",
     "TS1": "T",
+    "T1": "Aa",
     "S1": "T",
     "M1": "\u25a0",
 }

@@ -88,6 +88,8 @@ class VoiceCatalogMixin:
             return f"edge:{provider_voice or 'vi-VN-HoaiMyNeural'}"
         if provider == "zerotts":
             return f"zerotts:{provider_voice or 'maichi'}"
+        if provider == "kokoro":
+            return f"kokoro:{provider_voice or entry_id}"
         return ""
 
     def _voice_provider_label(self, provider: str) -> str:
@@ -98,6 +100,8 @@ class VoiceCatalogMixin:
             return "Edge"
         if provider_key == "zerotts":
             return "ZeroTTS"
+        if provider_key == "kokoro":
+            return "Kokoro"
         return str(provider or "Other").strip().title() or "Other"
 
     def _current_voice_tier(self) -> str:
@@ -209,10 +213,10 @@ class VoiceCatalogMixin:
         button.setToolTip("Transcribe the Selection Range with custom Whisper or OCR settings")
 
     def _resolve_active_voice_name(self, *, persist_new_clone: bool = False) -> str:
-        if self._current_voice_engine_key() not in {"piper", "edge", "zerotts"}:
+        if self._current_voice_engine_key() not in {"piper", "edge", "zerotts", "kokoro"}:
             return ""
         free_value = str(self.free_voice_combo.currentData() or "").strip() if hasattr(self, "free_voice_combo") else ""
-        if free_value and free_value.startswith(("edge:", "zerotts:")):
+        if free_value and free_value.startswith(("edge:", "zerotts:", "kokoro:")):
             return free_value
         if free_value and free_value in getattr(self, "voice_catalog_map", {}):
             return free_value
@@ -250,6 +254,7 @@ class VoiceCatalogMixin:
                     "piper": "Piper voice",
                     "zerotts": "ZeroTTS voice",
                     "edge": "Edge voice",
+                    "kokoro": "Kokoro voice",
                 }.get(engine_key, "Voice")
             )
         combo = getattr(self, "voice_engine_combo", None)
@@ -264,9 +269,22 @@ class VoiceCatalogMixin:
                     zero_index,
                     f"ZeroTTS [VI] · Natural · {'Installed' if zero_ready else 'Not installed'}",
                 )
-        if engine_key in {"korvatts", "kokoro"}:
+        if engine_key == "korvatts":
             label.setText(
                 "This engine is listed for planning only; its runtime is not integrated in this build."
+            )
+            return
+        if engine_key == "kokoro":
+            try:
+                ready = self._resource_service().is_resource_installed("tts:kokoro")
+            except Exception:
+                ready = False
+            if combo is not None:
+                index = combo.findData("kokoro")
+                if index >= 0:
+                    combo.setItemText(index, f"Kokoro-82M [EN] · Natural · {'Installed' if ready else 'Not installed'}")
+            label.setText(
+                "Output language: English · Kokoro runs locally. Install its runtime/model in Manage Resources if preview is unavailable."
             )
             return
         if engine_key == "zerotts":
@@ -441,14 +459,19 @@ class VoiceCatalogMixin:
             voice_id = os.path.splitext(os.path.basename(model_path))[0]
             model_ids.add(voice_id)
             pv = rel_pv
-            lang = language_from_piper_config(model_path) or "vi"
+            # The storage root is an authoritative fallback. Older catalogs
+            # defaulted every newly discovered model to Vietnamese when the
+            # config could not be parsed, which made English voices leak into
+            # the Vietnamese list and disappear from the English list.
+            storage_lang = "en" if rel_pv.replace("\\", "/").startswith("models/piper-en/") else "vi"
+            lang = language_from_piper_config(model_path) or storage_lang
 
             existing = by_id.get(voice_id)
             if isinstance(existing, dict) and str(existing.get("provider", "")).strip().lower() == "piper":
                 if str(existing.get("provider_voice", "")).strip() != pv:
                     existing["provider_voice"] = pv
                     changed = True
-                if not str(existing.get("language", "")).strip():
+                if str(existing.get("language", "")).strip().lower().split("-", 1)[0] != lang:
                     existing["language"] = lang
                     changed = True
                 for key in ("preview_audio_url", "preview_audio_path", "preview_video_url", "preview_video_path"):
@@ -527,11 +550,11 @@ class VoiceCatalogMixin:
             if not entry.get("enabled", True):
                 continue
             provider = str(entry.get("provider", "")).strip().lower()
-            if provider not in {"piper", "edge", "zerotts"}:
+            if provider not in {"piper", "edge", "zerotts", "kokoro"}:
                 continue
-            if engine_key in {"piper", "edge", "zerotts"} and provider != engine_key:
+            if engine_key in {"piper", "edge", "zerotts", "kokoro"} and provider != engine_key:
                 continue
-            if engine_key not in {"piper", "edge", "zerotts"}:
+            if engine_key not in {"piper", "edge", "zerotts", "kokoro"}:
                 # Planned engines do not have runtime-backed catalog entries.
                 continue
             entry_language = str(entry.get("language", "")).strip().lower().split("-", 1)[0]
@@ -566,6 +589,11 @@ class VoiceCatalogMixin:
             self.set_voice_combo_value(self.free_voice_combo, "ngochuyen")
         elif target_language == "vi" and "vi_VN-vais1000-medium" in self.voice_catalog_map:
             self.set_voice_combo_value(self.free_voice_combo, "vi_VN-vais1000-medium")
+        elif target_language == "en" and "en_US-lessac-medium" in self.voice_catalog_map:
+            # Lessac is the clear, general-purpose US English default. Keep a
+            # user's explicit/saved selection above, but prefer Lessac for a
+            # new English setup instead of whichever item sorts first.
+            self.set_voice_combo_value(self.free_voice_combo, "en_US-lessac-medium")
         if not self._voice_signals_bound:
             self._voice_signals_bound = True
         self.on_voice_tier_changed()

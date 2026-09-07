@@ -99,9 +99,12 @@ class _STFT:
         return result
 
 
-def separate_vocals(audio_path, output_dir):
+def separate_vocals(audio_path, output_dir, progress_callback=None, is_cancelled=None):
     if not os.path.exists(audio_path):
         return None, None
+
+    if progress_callback:
+        progress_callback(2, "Đang mở file âm thanh và nạp mô hình AI...")
 
     os.makedirs(output_dir, exist_ok=True)
     session = _get_session()
@@ -144,8 +147,15 @@ def separate_vocals(audio_path, output_dir):
         if end == samples:
             break
 
+    total_segments = max(1, len(segments))
+    if progress_callback:
+        progress_callback(5, f"Bắt đầu tách giọng & nhạc (0/{total_segments} đoạn)...")
+
     chunked_sources = []
-    for mix_start in segments:
+    for chunk_idx, mix_start in enumerate(segments):
+        if is_cancelled and is_cancelled():
+            return None, None
+
         cmix = segments[mix_start]
         sources = []
         n_sample = cmix.shape[1]
@@ -193,8 +203,18 @@ def separate_vocals(audio_path, output_dir):
         sources.append(tar_signal[:, start:end])
         chunked_sources.append(sources)
 
+        if progress_callback:
+            chunk_pct = 5 + int(((chunk_idx + 1) / total_segments) * 87)
+            progress_callback(
+                chunk_pct,
+                f"Đang tách âm thanh AI: {chunk_idx + 1}/{total_segments} đoạn ({chunk_pct}%)"
+            )
+
     if not chunked_sources:
         return None, None
+
+    if progress_callback:
+        progress_callback(93, "Đang hòa trộn các dải âm...")
 
     vocals_441 = np.concatenate([s[0] for s in chunked_sources], axis=-1)[:, :samples]
 
@@ -225,9 +245,29 @@ def separate_vocals(audio_path, output_dir):
     result_dir = os.path.join(output_dir, "onnx_separated", base_name)
     os.makedirs(result_dir, exist_ok=True)
 
-    vocal_out = os.path.join(result_dir, "vocals.wav")
-    music_out = os.path.join(result_dir, "no_vocals.wav")
+    if progress_callback:
+        progress_callback(96, "Đang lưu Voice.wav và Music.wav...")
+
+    vocal_out = os.path.join(result_dir, "Voice.wav")
+    music_out = os.path.join(result_dir, "Music.wav")
     sf.write(vocal_out, vocals_final, orig_sr)
     sf.write(music_out, instrumental, orig_sr)
+
+    # Legacy aliases
+    legacy_vocal = os.path.join(result_dir, "vocals.wav")
+    legacy_music = os.path.join(result_dir, "no_vocals.wav")
+    if not os.path.exists(legacy_vocal):
+        try:
+            os.link(vocal_out, legacy_vocal)
+        except Exception:
+            sf.write(legacy_vocal, vocals_final, orig_sr)
+    if not os.path.exists(legacy_music):
+        try:
+            os.link(music_out, legacy_music)
+        except Exception:
+            sf.write(legacy_music, instrumental, orig_sr)
+
+    if progress_callback:
+        progress_callback(100, "Hoàn tất tách Voice.wav & Music.wav")
 
     return vocal_out, music_out

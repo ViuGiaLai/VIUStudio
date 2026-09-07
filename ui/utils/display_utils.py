@@ -23,7 +23,10 @@ def log_message(gui, message: str):
             stream.flush()
         except (AttributeError, OSError, ValueError):
             pass
-    if hasattr(gui, "runtime_log_received"):
+    # ``ui.gui`` wraps stdout in _LogTee, which already forwards complete
+    # lines to runtime_log_received.  Emitting again here duplicated every
+    # gui.log() entry in the in-app Logs panel.
+    if hasattr(gui, "runtime_log_received") and not hasattr(stream, "_collector"):
         gui.runtime_log_received.emit(text)
 
 

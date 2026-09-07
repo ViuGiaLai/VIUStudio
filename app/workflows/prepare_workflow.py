@@ -12,6 +12,7 @@ from runtime_profile import is_remote_profile
 from services import (
     AsrMergeService,
     AsrOcrReconciliationService,
+    AsrVocalizationFilterService,
     ChunkingService,
     EngineRuntime,
     ProjectService,
@@ -50,6 +51,45 @@ class PrepareWorkflow:
         self.chunking_service = ChunkingService(workspace_root)
         self.segment_regroup_service = SegmentRegroupService()
         self.engine_runtime = EngineRuntime()
+
+    @staticmethod
+    def _invalidate_downstream_after_original_transcript(project_state) -> None:
+        """Detach output that no longer matches a regenerated source transcript.
+
+        ``Run to Original Transcript`` is a real workflow boundary.  Translation,
+        synthesized speech, rendered previews and exports are all derived from
+        the previous transcript, so retaining their artifact paths or completed
+        statuses makes the UI offer stale output after a successful rerun.
+        Per-cue TTS cache files are intentionally left on disk; the next full
+        pipeline run can safely reuse entries whose text/signature still match.
+        """
+        for artifact_name in (
+            "translation_raw",
+            "translation_refined",
+            "translation_final",
+            "subtitle_translated_srt",
+            "srt_translated",
+            "voice_vi",
+            "voice_segments",
+            "mixed_vi",
+            "preview_video",
+            "preview_video_5s",
+            "preview_frame",
+            "final_video",
+        ):
+            project_state.artifacts.pop(artifact_name, None)
+        for setting_name in (
+            "translation_signature",
+            "voice_signature",
+            "export_signature",
+        ):
+            project_state.settings.pop(setting_name, None)
+        project_state.set_setting("voice_track_partial", False)
+        project_state.set_step_status("translate_raw", "skipped")
+        project_state.set_step_status("refine_translation", "skipped")
+        project_state.set_step_status("generate_tts", "pending")
+        project_state.set_step_status("mix_audio", "pending")
+        project_state.set_step_status("export", "pending")
 
     @staticmethod
     def _emit_step(step_callback, step_id: str, message: str = "") -> None:
@@ -1041,15 +1081,23 @@ class PrepareWorkflow:
                 cached_separation_signature = str(project_state.settings.get("separation_signature", "") or "").strip()
                 cached_vocal_path = project_state.artifacts.get("vocals", "")
                 cached_music_path = project_state.artifacts.get("music", "")
+                cached_separation_fallback = bool(
+                    project_state.settings.get("separation_fallback_to_source", False)
+                )
                 if (
                     cached_separation_signature == separation_signature
                     and cached_vocal_path
-                    and cached_music_path
                     and os.path.exists(cached_vocal_path)
-                    and os.path.exists(cached_music_path)
+                    and (
+                        cached_separation_fallback
+                        or (cached_music_path and os.path.exists(cached_music_path))
+                    )
                 ):
                     vocal_path, music_path = cached_vocal_path, cached_music_path
-                    print("[Prepare Workflow] Reusing cached separated stems.")
+                    if cached_separation_fallback:
+                        print("[Prepare Workflow] Reusing cached source-audio fallback; separator is unavailable.")
+                    else:
+                        print("[Prepare Workflow] Reusing cached separated stems.")
                 else:
                     try:
                         vocal_path, music_path = self.engine_runtime.separate_vocals(audio_output_path, separated_root)
@@ -1061,28 +1109,60 @@ class PrepareWorkflow:
                         vocal_path, music_path = audio_output_path, ""
                     else:
                         project_state.set_setting("separation_signature", separation_signature)
+                    project_state.set_setting(
+                        "separation_fallback_to_source",
+                        bool(
+                            os.path.abspath(str(vocal_path or "")) == os.path.abspath(audio_output_path)
+                            and not str(music_path or "").strip()
+                        ),
+                    )
                 separation_elapsed = time.perf_counter() - separation_started
                 working_audio_path = vocal_path
                 print(f"[Audio Handling] Using separated vocals for Whisper: {working_audio_path}")
                 print(f"[Audio Handling] Background music stem ready: {music_path}")
-                # Post-process vocals: denoise + loudness normalize for better transcription
+                # Post-process vocals once. Rewriting this deterministic file on
+                # every Generate changes its mtime and therefore invalidates an
+                # otherwise valid transcription cache.
                 processed_vocal_path = os.path.join(
                     os.path.dirname(vocal_path), "vocals_enhanced.wav"
                 )
+                enhancement_filter = "afftdn,loudnorm=I=-16:LRA=11:TP=-1.5"
+                enhancement_signature = self.project_service.build_audio_enhancement_signature(
+                    vocal_path,
+                    filter_chain=enhancement_filter,
+                )
+                cached_enhancement_signature = str(
+                    project_state.settings.get("vocal_enhancement_signature", "") or ""
+                ).strip()
+                cached_enhancement_path = str(
+                    project_state.artifacts.get("vocals_enhanced", "") or ""
+                ).strip()
                 try:
-                    ffmpeg_cmd = [
-                        str(bin_path("ffmpeg", "ffmpeg.exe")),
-                        "-i", vocal_path,
-                        "-af", "afftdn,loudnorm=I=-16:LRA=11:TP=-1.5",
-                        "-ar", "16000",
-                        "-ac", "1",
-                        "-y",
-                        processed_vocal_path,
-                    ]
-                    subprocess.run(
-                        ffmpeg_cmd, check=True, capture_output=True, timeout=86400,
-                        **subprocess_hidden_kwargs(),
-                    )
+                    if (
+                        cached_enhancement_signature == enhancement_signature
+                        and cached_enhancement_path
+                        and os.path.isfile(cached_enhancement_path)
+                    ):
+                        processed_vocal_path = cached_enhancement_path
+                        print("[Prepare Workflow] Reusing cached enhanced ASR audio.")
+                    else:
+                        ffmpeg_cmd = [
+                            str(bin_path("ffmpeg", "ffmpeg.exe")),
+                            "-i", vocal_path,
+                            "-af", enhancement_filter,
+                            "-ar", "16000",
+                            "-ac", "1",
+                            "-y",
+                            processed_vocal_path,
+                        ]
+                        subprocess.run(
+                            ffmpeg_cmd, check=True, capture_output=True, timeout=86400,
+                            **subprocess_hidden_kwargs(),
+                        )
+                        project_state.set_setting(
+                            "vocal_enhancement_signature", enhancement_signature
+                        )
+                        project_state.set_artifact("vocals_enhanced", processed_vocal_path)
                     working_audio_path = processed_vocal_path
                     print(f"[Audio Handling] Enhanced vocals (denoise + loudnorm): {processed_vocal_path}")
                 except Exception as e:
@@ -1223,6 +1303,7 @@ class PrepareWorkflow:
                     f"{audio_mode_key}|{AsrMergeService.VERSION}|"
                     f"{SegmentRegroupService.VERSION}|"
                     f"{AsrOcrReconciliationService.VERSION}|"
+                    f"{AsrVocalizationFilterService.VERSION}|"
                     f"ocr-repair={int(bool(repair_asr_with_ocr))}|"
                     f"ocr-quality={_ocr_quality_key()}"
                 ),
@@ -1393,6 +1474,39 @@ class PrepareWorkflow:
                     streamed_translation_executor = None
                     streamed_translation_futures = []
                     streamed_translation_enabled = False
+                raw_segments, removed_vocalization_count, rejected_vocalizations = (
+                    AsrVocalizationFilterService.filter_generated_segments_with_report(
+                        raw_segments,
+                        source_language=source_language,
+                    )
+                )
+                self.project_service.save_json_artifact(
+                    project_state,
+                    "asr_quality_rejections",
+                    os.path.join("analysis", "asr_quality_rejections.json"),
+                    rejected_vocalizations,
+                )
+                if removed_vocalization_count:
+                    print(
+                        "[ASR Accuracy] Removed "
+                        f"{removed_vocalization_count} unsupported filler-only cue(s) "
+                        "before translation and TTS."
+                    )
+                    if streamed_translation_executor is not None:
+                        # Streaming batches were queued before final ASR QA and
+                        # may still contain the removed cues. Translate the
+                        # clean final transcript once instead.
+                        streamed_translation_executor.shutdown(wait=True)
+                        streamed_translation_executor = None
+                        streamed_translation_futures = []
+                        streamed_translation_enabled = False
+                if not raw_segments:
+                    project_state.set_step_status("transcribe", "failed")
+                    self.project_service.save_project(project_state)
+                    raise RuntimeError(
+                        "No translatable speech remained after recognition quality checks. "
+                        "Only unsupported breaths, effects, or filler sounds were detected."
+                    )
                 raw_segments = self.segment_regroup_service.deduplicate_and_clamp_timeline(raw_segments)
                 segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
                 project_state.set_setting("transcription_signature", transcription_signature)
@@ -1469,20 +1583,7 @@ class PrepareWorkflow:
 
         if skip_translation:
             print("\n--- Step 4: Translation skipped (keep original text) ---")
-            # Transcript-only is a real stage boundary.  Do not leave an old
-            # translated artifact attached to the freshly generated source
-            # transcript or load_project_context() will restore it into TS1.
-            for artifact_name in (
-                "translation_raw",
-                "translation_refined",
-                "translation_final",
-                "subtitle_translated_srt",
-                "srt_translated",
-            ):
-                project_state.artifacts.pop(artifact_name, None)
-            project_state.settings.pop("translation_signature", None)
-            project_state.set_step_status("translate_raw", "skipped")
-            project_state.set_step_status("refine_translation", "skipped")
+            self._invalidate_downstream_after_original_transcript(project_state)
             self.project_service.save_project(project_state)
         else:
             print(f"\n--- Step 4: Translating to {target_language} ---")

@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -14,8 +13,8 @@ for p in [ROOT_DIR, APP_DIR, UI_DIR]:
 
 from app.core.models.progress import ProgressEvent, MonotonicProgressTracker
 from app.runtime_paths import sanitize_ffmpeg_diagnostics
-from app.video_processor import run_ffmpeg_with_progress, get_video_duration
-from ui.utils.progress_protocol import format_duration_clock, parse_progress_update
+from app.video_processor import build_export_h264_encoder_args, run_ffmpeg_with_progress
+from ui.utils.progress_protocol import format_duration_clock
 
 
 class TestProgressCore:
@@ -74,6 +73,18 @@ class TestProgressCore:
 
 
 class TestFFmpegProgressAndCancellation:
+    @patch("app.video_processor._ffmpeg_supports_encoder", return_value=False)
+    def test_export_profiles_use_speed_and_requested_bitrate(self, _mock_encoder):
+        fast = build_export_h264_encoder_args("ffmpeg", "fast", 4000)
+        balanced = build_export_h264_encoder_args("ffmpeg", "balanced", 2000)
+        maximum = build_export_h264_encoder_args("ffmpeg", "max", 0)
+
+        assert fast[:4] == ["-c:v", "libx264", "-preset", "ultrafast"]
+        assert ["-b:v", "4000k"] == fast[4:6]
+        assert "veryfast" in balanced
+        assert "medium" in maximum
+        assert ["-crf", "18"] == maximum[4:6]
+
     @patch("subprocess.Popen")
     def test_ffmpeg_progress_parsing(self, mock_popen):
         # Simulate FFmpeg -progress output
@@ -172,7 +183,7 @@ def qapp():
 
 class TestUIProgressComponents:
     def test_pipeline_progress_dialog_features(self, qapp):
-        from ui.widgets.progress_dialog import PipelineProgressDialog, StepWidget
+        from ui.widgets.progress_dialog import PipelineProgressDialog
 
         dialog = PipelineProgressDialog()
         dialog.show()

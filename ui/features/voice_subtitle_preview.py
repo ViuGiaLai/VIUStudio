@@ -210,6 +210,13 @@ class VoiceSubtitlePreviewMixin:
                     "ZeroTTS voices could not be loaded. Use Install / Manage Voice Engines, then reopen the Voice section.",
                 )
                 return
+            if engine_key == "kokoro":
+                QMessageBox.information(
+                    self,
+                    "Preview voice",
+                    "No Kokoro voices were found. Put .pt voice files in models/kokoro/voices, then reopen the Voice section.",
+                )
+                return
             folder = "models/piper-en" if target_language.startswith("en") else "models/piper"
             QMessageBox.information(
                 self,
@@ -230,7 +237,14 @@ class VoiceSubtitlePreviewMixin:
             QMessageBox.warning(self, "Preview voice", "Choose a voice first.")
             return
         voice_speed = self._parse_voice_speed_value()
-        text = "Chào bạn, đây là bản xem trước giọng nói của mẫu được chọn."  # "Hello, this is a preview of the selected voice sample." in Vietnamese
+        target_language = str(
+            self.get_target_language_code() if hasattr(self, "get_target_language_code") else "vi"
+        ).strip().lower()
+        text = (
+            "Hello, this is a preview of the selected voice."
+            if target_language.startswith("en")
+            else "Chào bạn, đây là bản xem trước giọng nói của mẫu được chọn."
+        )
 
         if hasattr(self, "preview_voice_btn"):
             self.preview_voice_btn.setEnabled(False)

@@ -120,6 +120,8 @@ class WorkflowRuntime:
         project_temp_dir: str = "",
         on_progress: callable = None,
         timeline_clips=None,
+        export_preset: str = "balanced",
+        video_bitrate_kbps: int = 2000,
     ) -> str:
         return self.export_workflow.run(
             video_path=video_path,
@@ -141,6 +143,8 @@ class WorkflowRuntime:
             project_temp_dir=project_temp_dir,
             on_progress=on_progress,
             timeline_clips=timeline_clips,
+            export_preset=export_preset,
+            video_bitrate_kbps=video_bitrate_kbps,
         )
 
     def project_state_path(self, state) -> str:

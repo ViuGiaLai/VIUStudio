@@ -62,7 +62,7 @@ def voice_provider(voice_name: str) -> str:
 
 
 def provider_native_speed(*, provider: str, requested_speed: float) -> float:
-    if provider in {"edge", "f5", "zerotts"}:
+    if provider in {"edge", "f5", "zerotts", "kokoro"}:
         return float(requested_speed)
     return 1.0
 

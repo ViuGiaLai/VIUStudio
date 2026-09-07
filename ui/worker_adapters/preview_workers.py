@@ -16,7 +16,7 @@ class PreviewMuxWorker(QThread):
     finished = Signal(str, str)
     progress = Signal(int, str)
 
-    def __init__(self, video_path, audio_path, output_path, mode="voice", srt_path="", subtitle_style=None, render_subtitles=True, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, logo_layers=None, temp_dir=""):
+    def __init__(self, video_path, audio_path, output_path, mode="voice", srt_path="", subtitle_style=None, render_subtitles=True, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, mask_regions=None, blur_regions=None, logo_layers=None, text_image_layers=None, original_audio_gain_db=0.0, temp_dir=""):
         super().__init__()
         self.video_path = video_path
         self.audio_path = audio_path
@@ -32,7 +32,10 @@ class PreviewMuxWorker(QThread):
         self.output_fill_focus_y = output_fill_focus_y
         self.video_filter_state = video_filter_state or {}
         self.mask_regions = mask_regions or []
+        self.blur_regions = blur_regions or []
         self.logo_layers = logo_layers or []
+        self.text_image_layers = text_image_layers or []
+        self.original_audio_gain_db = float(original_audio_gain_db or 0.0)
         self.temp_dir = temp_dir
 
     def run(self):
@@ -45,11 +48,14 @@ class PreviewMuxWorker(QThread):
             # The subtitle render pass owns the final canvas and grade.  Do
             # not apply them while muxing audio as that would re-filter the
             # same frames in Subtitle/Both preview workflows.
+            has_visual_layers = bool(
+                self.mask_regions or self.blur_regions or self.logo_layers or self.text_image_layers
+                or self.video_filter_state or abs(self.original_audio_gain_db) > 0.001
+            )
             final_render_applies_filters = bool(
-                self.render_subtitles
-                and self.mode in ("subtitle", "both")
-                and self.srt_path
-                and os.path.exists(self.srt_path)
+                (self.render_subtitles and self.mode in ("subtitle", "both")
+                 and self.srt_path and os.path.exists(self.srt_path))
+                or has_visual_layers
             )
             if self.audio_path and os.path.exists(self.audio_path):
                 self.progress.emit(15, "Combining generated voice with video…")
@@ -72,32 +78,76 @@ class PreviewMuxWorker(QThread):
             if self.isInterruptionRequested():
                 raise InterruptedError("Preview generation cancelled by user")
 
-            if self.render_subtitles and self.mode in ("subtitle", "both") and self.srt_path and os.path.exists(self.srt_path):
+            render_subtitle_pass = bool(
+                self.render_subtitles and self.mode in ("subtitle", "both")
+                and self.srt_path and os.path.exists(self.srt_path)
+            )
+            if render_subtitle_pass:
                 self.progress.emit(60, "Rendering subtitles and visual layers…")
                 engine = EngineRuntime()
                 def _on_sub_prog(cur, tot, pct):
                     scaled = int(60 + (pct / 100.0) * 38)
                     self.progress.emit(scaled, f"Rendering preview subtitles ({pct}%)")
 
+                subtitle_style = dict(self.subtitle_style)
+                subtitle_style["blur_region"] = self.blur_regions
                 ok = engine.embed_subtitles(
                     current_video,
                     self.srt_path,
                     self.output_path,
-                    subtitle_style=self.subtitle_style,
+                    subtitle_style=subtitle_style,
                     mask_regions=self.mask_regions,
                     logo_layers=self.logo_layers,
+                    text_image_layers=self.text_image_layers,
                     target_width=self.target_width,
                     target_height=self.target_height,
                     output_scale_mode=self.output_scale_mode,
                     output_fill_focus_x=self.output_fill_focus_x,
                     output_fill_focus_y=self.output_fill_focus_y,
                     video_filter_state=self.video_filter_state,
+                    audio_gain_db=self.original_audio_gain_db,
                     fast=True,
                     progress_callback=_on_sub_prog,
                     cancellation_check=self.isInterruptionRequested,
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview video.")
+                output = self.output_path
+            elif has_visual_layers:
+                self.progress.emit(60, "Rendering visual layers…")
+                temp_dir = self.temp_dir or os.path.join(os.getcwd(), "temp")
+                os.makedirs(temp_dir, exist_ok=True)
+                empty_ass = os.path.join(temp_dir, f"preview_empty_{int(time.time() * 1000)}.ass")
+                temp_mux_path_to_remove = empty_ass
+                with open(empty_ass, "w", encoding="utf-8") as handle:
+                    handle.write(
+                        "[Script Info]\nPlayResX: 1920\nPlayResY: 1080\n\n"
+                        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,10,10,10,1\n\n"
+                        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                    )
+                engine = EngineRuntime()
+                ok = engine.embed_ass_subtitles(
+                    current_video, empty_ass, self.output_path,
+                    blur_region=self.blur_regions,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
+                    text_image_layers=self.text_image_layers,
+                    target_width=self.target_width,
+                    target_height=self.target_height,
+                    output_scale_mode=self.output_scale_mode,
+                    output_fill_focus_x=self.output_fill_focus_x,
+                    output_fill_focus_y=self.output_fill_focus_y,
+                    video_filter_state=self.video_filter_state,
+                    audio_gain_db=self.original_audio_gain_db,
+                    fast=True,
+                )
+                try:
+                    os.remove(temp_mux_path_to_remove)
+                except OSError:
+                    pass
+                if not ok:
+                    raise RuntimeError("Failed to render visual-layer preview video.")
                 output = self.output_path
             else:
                 self.progress.emit(80, "Finalizing preview file…")
@@ -187,6 +237,11 @@ class QuickPreviewWorker(QThread):
                 )
                 current_video = voice_clip
 
+            has_visual_layers = bool(
+                self.mask_regions or self.blur_regions or self.logo_layers or self.text_image_layers
+                or self.video_filter_state or abs(self.original_audio_gain_db) > 0.001
+            )
+
             if self.mode in ("subtitle", "both") and self.ass_path and os.path.exists(self.ass_path):
                 engine = EngineRuntime()
                 ok = engine.embed_ass_subtitles(
@@ -233,6 +288,34 @@ class QuickPreviewWorker(QThread):
                 )
                 if not ok:
                     raise RuntimeError("Failed to render subtitle preview clip.")
+            elif has_visual_layers:
+                engine = EngineRuntime()
+                empty_ass = os.path.join(temp_dir, f"preview_empty_{int(time.time() * 1000)}.ass")
+                temp_paths.append(empty_ass)
+                with open(empty_ass, "w", encoding="utf-8") as handle:
+                    handle.write(
+                        "[Script Info]\nPlayResX: 1920\nPlayResY: 1080\n\n"
+                        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,10,10,10,1\n\n"
+                        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                    )
+                ok = engine.embed_ass_subtitles(
+                    current_video, empty_ass, self.output_path,
+                    blur_region=self.blur_regions,
+                    mask_regions=self.mask_regions,
+                    logo_layers=self.logo_layers,
+                    text_image_layers=self.text_image_layers,
+                    target_width=self.target_width,
+                    target_height=self.target_height,
+                    output_scale_mode=self.output_scale_mode,
+                    output_fill_focus_x=self.output_fill_focus_x,
+                    output_fill_focus_y=self.output_fill_focus_y,
+                    video_filter_state=self.video_filter_state,
+                    audio_gain_db=self.original_audio_gain_db,
+                    fast=True,
+                )
+                if not ok:
+                    raise RuntimeError("Failed to render visual-layer preview clip.")
             else:
                 shutil.copyfile(current_video, self.output_path)
 

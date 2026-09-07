@@ -31,6 +31,25 @@ class _FakeZeroTTS:
 
 
 class ZeroTTSIntegrationTests(unittest.TestCase):
+    def test_piper_runtime_finds_nested_english_voice_pack(self):
+        with tempfile.TemporaryDirectory() as folder:
+            models_root = Path(folder) / "models"
+            nested_root = models_root / "piper-en" / "piper-en"
+            nested_root.mkdir(parents=True)
+            model_path = nested_root / "en_US-amy-medium.onnx"
+            model_path.write_bytes(b"onnx")
+
+            def fake_models_path(*parts):
+                return str(models_root.joinpath(*parts))
+
+            with patch.object(tts_processor, "models_path", side_effect=fake_models_path), \
+                 patch.object(tts_processor, "bundle_root", return_value=str(Path(folder) / "bundle")):
+                resolved = tts_processor._resolve_piper_model_path(
+                    "models/piper-en/en_US-amy-medium.onnx"
+                )
+
+            self.assertEqual(Path(resolved), model_path)
+
     def test_catalog_exposes_all_builtin_vietnamese_voices(self):
         voices = VoiceCatalogService(workspace_root()).load_catalog()
         zero_voices = [voice for voice in voices if voice.get("provider") == "zerotts"]

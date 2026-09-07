@@ -151,6 +151,46 @@ def _preferred_h264_encoder_args(ffmpeg_path: str, fast: bool = False) -> list[s
     return ['-c:v', 'libx264', '-preset', preset, '-crf', '18', '-pix_fmt', 'yuv420p']
 
 
+def build_export_h264_encoder_args(
+    ffmpeg_path: str,
+    export_preset: str = "balanced",
+    video_bitrate_kbps: int = 0,
+    *,
+    allow_hardware: bool = True,
+) -> list[str]:
+    """Return one consistent H.264 profile for every final-export path.
+
+    The preset controls encoding effort while bitrate remains an explicit user
+    choice. NVENC is selected only after a real runtime encode probe succeeds;
+    otherwise the CPU presets favor practical export speed.
+    """
+    profile = str(export_preset or "balanced").strip().lower()
+    if profile not in {"fast", "balanced", "max"}:
+        profile = "balanced"
+    try:
+        bitrate = max(0, int(video_bitrate_kbps or 0))
+    except (TypeError, ValueError):
+        bitrate = 0
+
+    rate_args = []
+    if bitrate > 0:
+        bitrate = max(500, min(50000, bitrate))
+        rate_args = [
+            "-b:v", f"{bitrate}k",
+            "-maxrate", f"{bitrate}k",
+            "-bufsize", f"{bitrate * 2}k",
+        ]
+
+    if allow_hardware and _ffmpeg_supports_encoder(ffmpeg_path, "h264_nvenc") and _ffmpeg_nvenc_works(ffmpeg_path):
+        nvenc_preset = {"fast": "p1", "balanced": "p4", "max": "p7"}[profile]
+        quality_args = rate_args or ["-cq", {"fast": "25", "balanced": "22", "max": "19"}[profile]]
+        return ["-c:v", "h264_nvenc", "-preset", nvenc_preset, *quality_args, "-pix_fmt", "yuv420p"]
+
+    cpu_preset = {"fast": "ultrafast", "balanced": "veryfast", "max": "medium"}[profile]
+    quality_args = rate_args or ["-crf", {"fast": "24", "balanced": "21", "max": "18"}[profile]]
+    return ["-c:v", "libx264", "-preset", cpu_preset, *quality_args, "-pix_fmt", "yuv420p"]
+
+
 def _escape_path_for_filter(path):
     """Escape a file path for use inside an FFmpeg -vf filter value."""
     clean = path.replace("\\", "/")
@@ -513,6 +553,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             color = str(region.get("color", "#000000")).strip()
             pixelate_size = int(region.get("pixelate_size", 12))
             blur_strength = int(region.get("blur_strength", 20))
+            opacity = max(0.0, min(1.0, float(region.get("opacity", 1.0) or 0.0)))
         except (TypeError, ValueError):
             continue
         if w_norm <= 0 or h_norm <= 0:
@@ -527,7 +568,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             end = float(region.get("end", 0.0) or 0.0)
         except (TypeError, ValueError):
             start, end = 0.0, 0.0
-        regions.append((x, y, w, h, mode, color, pixelate_size, blur_strength, start, end))
+        regions.append((x, y, w, h, mode, color, pixelate_size, blur_strength, opacity, start, end))
     
     if not regions:
         return ""
@@ -535,7 +576,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
     filter_statements = []
     current_input = "[0:v]"
 
-    for index, (x, y, w, h, mode, color, pixelate_size, blur_strength, start, end) in enumerate(regions):
+    for index, (x, y, w, h, mode, color, pixelate_size, blur_strength, opacity, start, end) in enumerate(regions):
         output_label = f"[m{index}]"
         timing = f":enable='between(t,{start:.3f},{end:.3f})'" if end > start else ""
 
@@ -544,7 +585,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             if len(color_clean) != 6:
                 color_clean = "000000"
             filter_statements.append(
-                f"color=c=0x{color_clean}:s={w}x{h}:d=1[solid{index}]"
+                f"color=c=0x{color_clean}@{opacity:.3f}:s={w}x{h}:d=1,format=rgba[solid{index}]"
             )
             filter_statements.append(f"{current_input}[solid{index}]overlay={x}:{y}{timing}{output_label}")
 
@@ -553,18 +594,20 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             scale_factor = 1.0 / pixel_size
             small_w = max(1, int(w * scale_factor))
             small_h = max(1, int(h * scale_factor))
+            alpha_chain = f",format=rgba,colorchannelmixer=aa={opacity:.3f}" if opacity < 0.999 else ""
             filter_statements.append(
                 f"{current_input}split=2[main{index}][tmp{index}];"
                 f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},"
-                f"scale={small_w}:{small_h},scale={w}:{h}[pix{index}];"
+                f"scale={small_w}:{small_h},scale={w}:{h}{alpha_chain}[pix{index}];"
                 f"[main{index}][pix{index}]overlay={x}:{y}{timing}{output_label}"
             )
 
         elif mode == "blur":
             sigma = max(1.0, min(200.0, float(blur_strength)))
+            alpha_chain = f",format=rgba,colorchannelmixer=aa={opacity:.3f}" if opacity < 0.999 else ""
             filter_statements.append(
                 f"{current_input}split=2[main{index}][tmp{index}];"
-                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},gblur=sigma={sigma}:steps=3[blur{index}];"
+                f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},gblur=sigma={sigma}:steps=3{alpha_chain}[blur{index}];"
                 f"[main{index}][blur{index}]overlay={x}:{y}{timing}{output_label}"
             )
 
@@ -1895,7 +1938,7 @@ def _append_text_image_filter_parts(filter_parts, current_label, text_image_laye
     return current_label
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, progress_callback=None, cancellation_check=None):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, export_preset="balanced", video_bitrate_kbps=0, progress_callback=None, cancellation_check=None):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1951,6 +1994,8 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             output_fps, video_filter_state, text_ass_path, text_image_layers,
             source_width=source_w, source_height=source_h,
             audio_gain_db=audio_gain_db,
+            export_preset=("fast" if fast else export_preset),
+            video_bitrate_kbps=video_bitrate_kbps,
         )
     else:
         # Simple filter chain (no logos)
@@ -1994,7 +2039,10 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         filter_parts.append(f"[{current_label}]null[out]")
         filter_complex = ";".join(part for part in filter_parts if part)
         
-        video_encoder_args = _preferred_h264_encoder_args(ffmpeg, fast=fast)
+        effective_preset = "fast" if fast else export_preset
+        video_encoder_args = build_export_h264_encoder_args(
+            ffmpeg, effective_preset, video_bitrate_kbps
+        )
 
         command = [
             ffmpeg,
@@ -2058,17 +2106,17 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         return True
     else:
         if encoder_name != 'libx264':
-            # Retry with libx264
-            command = [c if c != 'h264_nvenc' else 'libx264' for c in command]
-            if '-preset' in command:
-                idx = command.index('-preset')
-                if idx + 1 < len(command):
-                    command[idx + 1] = 'medium'
-            if '-cq' in command:
-                idx = command.index('-cq')
-                command[idx] = '-crf'
-                if idx + 1 < len(command):
-                    command[idx + 1] = '18'
+            # Retry with a complete CPU profile. Replacing only the codec name
+            # left NVENC-only options such as p1/p4/p7 in the command.
+            fallback_args = build_export_h264_encoder_args(
+                ffmpeg,
+                ("fast" if fast else export_preset),
+                video_bitrate_kbps,
+                allow_hardware=False,
+            )
+            video_arg_index = command.index('-c:v')
+            audio_arg_index = command.index('-c:a', video_arg_index)
+            command[video_arg_index:audio_arg_index] = fallback_args
             
             print(f"NVENC failed, retrying with libx264. Error:\n{stderr_txt}")
             fb_ok, fb_stdout, fb_stderr = run_ffmpeg_with_progress(
@@ -2095,7 +2143,8 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
                                  blur_region, mask_regions, video_w, video_h,
                                  scale_chain, blur_chain, mask_chain,
                                  output_fps, video_filter_state, text_ass_path="", text_image_layers=None,
-                                 source_width=None, source_height=None, audio_gain_db=0.0):
+                                 source_width=None, source_height=None, audio_gain_db=0.0,
+                                 export_preset="balanced", video_bitrate_kbps=0):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -2219,7 +2268,9 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     filter_complex = ";".join(filter_parts)
     
     # Complete the command
-    video_encoder_args = _preferred_h264_encoder_args(ffmpeg)
+    video_encoder_args = build_export_h264_encoder_args(
+        ffmpeg, export_preset, video_bitrate_kbps
+    )
     command += [
         '-filter_complex', filter_complex,
         '-map', '[final]',
@@ -2315,6 +2366,8 @@ def embed_subtitles(video_path, srt_path, output_path,
                     video_filter_state=None,
                     audio_gain_db=0.0,
                     fast=False,
+                    export_preset="balanced",
+                    video_bitrate_kbps=0,
                     progress_callback=None,
                     cancellation_check=None):
     """Burn subtitles into video using a properly-styled ASS file.
@@ -2384,6 +2437,8 @@ def embed_subtitles(video_path, srt_path, output_path,
         video_filter_state=video_filter_state,
         audio_gain_db=audio_gain_db,
         fast=fast,
+        export_preset=export_preset,
+        video_bitrate_kbps=video_bitrate_kbps,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )

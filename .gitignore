@@ -46,3 +46,9 @@ recent_projects.json
 
 # Node / Frontend build
 node_modules/
+
+# Local scratch and temporary assets
+scratch/
+tmp/
+.tmp_kokoro_pkg/
+media/

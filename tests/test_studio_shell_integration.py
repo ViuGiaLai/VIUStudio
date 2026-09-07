@@ -14,6 +14,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from app.layers.base import LayerType
 from app.layers.blur import BlurLayer
+from app.layers.text import TextLayer
 from app.layers.timeline import Timeline, Track
 from app.core.state import ProjectState
 from app.services.timeline_video_sequence import append_video, timeline_video_clips
@@ -91,6 +92,80 @@ class TestStudioShellIntegration(unittest.TestCase):
         self.assertIsInstance(regions, list)
         self.assertEqual(len(regions), 2)
 
+    def test_blur_slider_recovers_when_preview_overlay_has_no_regions(self):
+        timeline = Timeline(duration=10.0)
+        track = Track(name="B1", type=LayerType.BLUR, height=60)
+        layer = BlurLayer(name="Blur 1", start=0.0, end=10.0,
+                          position_x=0.2, position_y=0.7, width=0.6, height=0.15)
+        track.layers.append(layer)
+        timeline.tracks.append(track)
+        self.window.timeline._timeline = timeline
+        self.window.timeline._duration = timeline.duration
+        self.window.timeline._selected_layer_id = layer.id
+        self.window._blur_inspector_layer_id = layer.id
+        self.window.video_view.set_blur_regions_normalized([])
+        applied = []
+        self.window.apply_preview_blur_region = (
+            lambda *, regions=None, force=False: applied.append((regions, force))
+        )
+
+        self.window._show_blur_inspector_for_track(track, layer)
+        self.window.blur_inspector_radius_slider.setValue(61)
+        QTest.qWait(1)
+
+        regions = self.window.video_view.get_blur_region_normalized()
+        self.assertEqual(layer.blur_strength, 61)
+        self.assertIsInstance(regions, dict)
+        self.assertEqual(int(applied[-1][0][0]["blur_strength"]), 61)
+        self.assertTrue(applied[-1][1])
+
+    def test_blur_drag_keeps_selected_layer_identity_for_followup_slider_edit(self):
+        timeline = Timeline(duration=10.0)
+        track = Track(name="B1", type=LayerType.BLUR, height=60)
+        layer = BlurLayer(name="Blur 1", start=1.0, end=8.0,
+                          position_x=0.1, position_y=0.7, width=0.5, height=0.15)
+        track.layers.append(layer)
+        timeline.tracks.append(track)
+        self.window.timeline._timeline = timeline
+        self.window.timeline._duration = timeline.duration
+        self.window.timeline._selected_layer_id = layer.id
+        self.window._blur_inspector_layer_id = layer.id
+        self.window.video_view.set_blur_regions_normalized([{
+            "x": 0.2, "y": 0.75, "width": 0.6, "height": 0.12,
+            "blur_strength": 36, "blur_opacity": 1.0,
+        }])
+
+        self.window.on_preview_blur_region_changed()
+
+        self.assertIs(track.layers[0], layer)
+        self.assertEqual(track.layers[0].id, self.window.timeline._selected_layer_id)
+        self.assertAlmostEqual(layer.position_x, 0.2)
+        self.assertAlmostEqual(layer.start, 1.0)
+        self.assertAlmostEqual(layer.end, 8.0)
+
+    def test_add_text_enters_preview_edit_path_and_is_rendered(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video_path = Path(folder) / "source.mp4"
+            video_path.touch()
+            timeline = Timeline(duration=10.0)
+            self.window.timeline._timeline = timeline
+            self.window.timeline._duration = timeline.duration
+
+            with patch.object(self.window, "resolve_canonical_video_path", return_value=str(video_path)):
+                self.window.on_add_timeline_layer("text")
+            QTest.qWait(1)
+
+            text_tracks = [track for track in timeline.tracks if track.type == LayerType.TEXT]
+            self.assertEqual(len(text_tracks), 1)
+            self.assertEqual(len(text_tracks[0].layers), 1)
+            layer = text_tracks[0].layers[0]
+            self.assertIsInstance(layer, TextLayer)
+            self.assertEqual(self.window.timeline._selected_layer_id, layer.id)
+            self.assertEqual(self.window._preview_edit_layer_id, layer.id)
+            self.assertIsNotNone(self.window.video_view.text_overlay)
+            self.assertEqual(self.window.video_view.text_overlay._items[0]["text"], "New text layer")
+            self.assertEqual(self.window.video_view.text_overlay._active_id, layer.id)
+
     def test_open_blur_inspector_keeps_editing_region_after_timeline_selection_changes(self):
         timeline = Timeline(duration=10.0)
         track = Track(name="B1", type=LayerType.BLUR, height=60)
@@ -149,6 +224,42 @@ class TestStudioShellIntegration(unittest.TestCase):
 
             self.assertTrue(self.window.add_layer_btn.isEnabled())
             self.assertTrue(self.window.timeline_layers_btn.isEnabled())
+
+    def test_more_menu_imports_srt_without_existing_subtitles(self):
+        with tempfile.TemporaryDirectory() as folder:
+            video_path = Path(folder) / "source.mp4"
+            video_path.touch()
+            srt_path = Path(folder) / "imported_vi.srt"
+            srt_path.write_text(
+                "1\n00:00:01,000 --> 00:00:02,500\nXin chào\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\nTạm biệt\n",
+                encoding="utf-8",
+            )
+            timeline = Timeline(duration=10.0)
+            self.window.timeline._timeline = timeline
+            self.window.timeline._duration = timeline.duration
+            self.window.current_segments = []
+            self.window.current_translated_segments = []
+
+            with patch.object(self.window, "resolve_canonical_video_path", return_value=str(video_path)), \
+                 patch("features.voice_subtitle_preview.QFileDialog.getOpenFileName", return_value=(str(srt_path), "Subtitle Files (*.srt)")), \
+                 patch("features.voice_subtitle_preview.QMessageBox.information"), \
+                 patch.object(self.window, "schedule_timeline_visual_refresh"), \
+                 patch.object(self.window, "sync_live_subtitle_preview"), \
+                 patch.object(self.window, "schedule_live_subtitle_preview_refresh"):
+                self.window.refresh_ui_state()
+                self.assertTrue(self.window.import_subtitle_action.isEnabled())
+                self.window.import_subtitle_action.trigger()
+                QTest.qWait(1)
+
+            self.assertEqual(
+                [segment["text"] for segment in self.window.current_translated_segments],
+                ["Xin chào", "Tạm biệt"],
+            )
+            subtitle_tracks = [track for track in timeline.tracks if track.type == LayerType.DUB_SUBTITLE]
+            self.assertEqual(len(subtitle_tracks), 1)
+            self.assertEqual(len(subtitle_tracks[0].layers), 2)
+            self.assertEqual(subtitle_tracks[0].layers[0].text, "Xin chào")
 
     def test_original_transcript_enables_translation_exchange_editor(self):
         self.window.current_segments = [
@@ -375,6 +486,29 @@ class TestStudioShellIntegration(unittest.TestCase):
             self.assertIs(state, expected)
             requested = self.window.project_bridge.ensure_project.call_args.kwargs["video_path"]
             self.assertEqual(os.path.abspath(requested), os.path.abspath(source))
+            self.window.current_project_state = None
+
+    def test_existing_project_language_tracks_visible_english_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            service = ProjectService(folder)
+            state = ProjectState(
+                project_id="english_import",
+                project_root=folder,
+                input_video=os.path.join(folder, "video.mp4"),
+                target_language="vi",
+                settings={"audio_handling_mode": self.window.get_audio_handling_mode()},
+            )
+            self.window.project_service = service
+            self.window.current_project_state = state
+            english_index = self.window.lang_target_combo.findData("en")
+            self.assertGreaterEqual(english_index, 0)
+            self.window.lang_target_combo.setCurrentIndex(english_index)
+
+            resolved = self.window.ensure_current_project()
+
+            self.assertEqual(resolved.target_language, "en")
+            reopened = service.load_project(service.project_file(folder))
+            self.assertEqual(reopened.target_language, "en")
             self.window.current_project_state = None
 
     def test_restored_timeline_from_another_video_is_rejected(self):

@@ -674,84 +674,60 @@ class VisualLayerEditorMixin:
         """Push a BlurLayer's per-region style back to the video preview
         + persisted state + B1 timeline regions (so the export matches).
         """
-        if not hasattr(self, "video_view") or not hasattr(self.video_view, "blur_overlay"):
+        if not hasattr(self, "video_view"):
             return
-        try:
-            regions = self.video_view.blur_overlay._regions or []
-        except Exception:
-            return
-        # Find the index of this layer in the B1 track to map it to
-        # the corresponding region in the video overlay.
-        idx = -1
+        # The timeline model is authoritative for Blur geometry and style.
+        # The preview rectangle is an editing surface only; depending on its
+        # private `_regions` list caused slider updates to be discarded when
+        # the overlay had not yet been created/restored.
         blur_layers = []
         active_layers = []
         if hasattr(self, "timeline") and self.timeline._timeline:
             for tr in self.timeline._timeline.tracks:
-                if tr.name == "B1" and layer in tr.layers:
+                if str(getattr(tr, "name", "") or "") == "B1" and layer in tr.layers:
                     blur_layers = list(tr.layers)
                     active_layers = [candidate for candidate in blur_layers
                                      if self._layer_is_active_at_preview_time(candidate)]
-                    try:
-                        idx = active_layers.index(layer)
-                    except ValueError:
-                        idx = -1
                     break
-        if idx < 0 or idx >= len(regions):
+        if not blur_layers:
             return
-        # Rebuild the complete B1 payload.  Sending only the selected region
-        # used to replace every overlay and then accidentally copy its style
-        # onto B1's first layer, so sliders appeared broken for B2/B3.
-        payload = []
-        for i, candidate in enumerate(active_layers):
-            candidate_rect = regions[i] if i < len(regions) else None
+
+        def _payload_for(candidate):
             try:
-                rx = float(candidate_rect.x()) if candidate_rect is not None else float(candidate.position_x)
-                ry = float(candidate_rect.y()) if candidate_rect is not None else float(candidate.position_y)
-                rw = float(candidate_rect.width()) if candidate_rect is not None else float(candidate.width)
-                rh = float(candidate_rect.height()) if candidate_rect is not None else float(candidate.height)
-            except (AttributeError, TypeError, ValueError):
-                continue
-            payload.append({
-                "x": rx, "y": ry, "width": rw, "height": rh,
-                "start": float(getattr(candidate, "start", 0.0) or 0.0),
-                "end": float(getattr(candidate, "end", 0.0) or 0.0),
-                "blur_strength": int(getattr(candidate, "blur_strength", 36)),
-                "blur_opacity": float(getattr(candidate, "blur_opacity", 1.0)),
-                "pixelate": bool(getattr(candidate, "pixelate", False)),
-                "pixelate_size": int(getattr(candidate, "pixelate_size", 12)),
-            })
-        if not payload:
-            return
-        # Project persistence keeps every timed B1 layer, while the live MPV
-        # filter receives only layers active at the current playhead.
-        full_payload = []
-        for candidate in blur_layers:
-            try:
-                full_payload.append({
-                    "x": float(candidate.position_x), "y": float(candidate.position_y),
-                    "width": float(candidate.width), "height": float(candidate.height),
+                return {
+                    "x": float(candidate.position_x),
+                    "y": float(candidate.position_y),
+                    "width": float(candidate.width),
+                    "height": float(candidate.height),
                     "start": float(getattr(candidate, "start", 0.0) or 0.0),
                     "end": float(getattr(candidate, "end", 0.0) or 0.0),
                     "blur_strength": int(getattr(candidate, "blur_strength", 36)),
                     "blur_opacity": float(getattr(candidate, "blur_opacity", 1.0)),
                     "pixelate": bool(getattr(candidate, "pixelate", False)),
                     "pixelate_size": int(getattr(candidate, "pixelate_size", 12)),
-                })
+                }
             except (AttributeError, TypeError, ValueError):
-                continue
+                return None
+
+        # Rebuild every active region from the live model. Sending only the
+        # selected item would replace other B1 regions in MPV.
+        payload = [entry for candidate in active_layers
+                   if (entry := _payload_for(candidate)) is not None]
+        if not payload:
+            # A timed layer can be edited while the playhead is outside it.
+            # Persist that edit, but correctly show no effect at this frame.
+            payload = []
         try:
             if hasattr(self.video_view, "set_blur_regions_normalized"):
                 self.video_view.set_blur_regions_normalized(payload)
         except Exception:
             pass
-        # Persist and re-apply the filter (so the export matches).
-        if hasattr(self, "persist_project_blur_state"):
-            try:
-                self.persist_project_blur_state(regions=full_payload)
-            except Exception:
-                pass
+        # Re-apply immediately for live feedback. Disk writes are debounced so
+        # dragging a slider does not block the UI on every valueChanged event.
         if hasattr(self, "apply_preview_blur_region"):
             try:
                 self.apply_preview_blur_region(regions=payload, force=True)
             except Exception:
                 pass
+        if hasattr(self, "schedule_timeline_project_persist"):
+            self.schedule_timeline_project_persist(blur_state=True)

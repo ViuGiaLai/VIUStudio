@@ -1,5 +1,5 @@
 import os
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right, insort_right
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView, QMenu, QPushButton
@@ -66,7 +66,10 @@ class EditorTimeline(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setMouseTracking(True)
-        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        # Timeline edits only invalidate a small portion of the scene.  A full
+        # viewport repaint made long projects redraw every visible waveform,
+        # thumbnail and cue for even a playhead tick or selection change.
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
 
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -823,12 +826,21 @@ class EditorTimeline(QGraphicsView):
         layer.end — only the overlap comparison sees the audio end.
         """
         previous = self._overlap_row_assignments.get(str(track_id), {})
+        # Each row stays sorted by start time.  The old implementation scanned
+        # every interval in every candidate row, making project opening O(n²)
+        # for the common case of thousands of non-overlapping subtitle cues.
+        # A sorted row only needs its two neighbours checked.
         row_intervals: list[list[tuple[float, float]]] = []
         layer_rows_by_id: dict[str, int] = {}
 
         def can_use(row_index, start, end):
-            return all(end <= other_start or start >= other_end
-                       for other_start, other_end in row_intervals[row_index])
+            intervals = row_intervals[row_index]
+            position = bisect_left(intervals, (start, float("-inf")))
+            if position > 0 and intervals[position - 1][1] > start:
+                return False
+            if position < len(intervals) and end > intervals[position][0]:
+                return False
+            return True
 
         def assign(layer, preferred=None, *, force_preferred=False):
             try:
@@ -860,7 +872,7 @@ class EditorTimeline(QGraphicsView):
                                   if can_use(idx, start, end)), len(row_intervals))
                 if row_index == len(row_intervals):
                     row_intervals.append([])
-            row_intervals[row_index].append((start, end))
+            insort_right(row_intervals[row_index], (start, end))
             layer_rows_by_id[str(getattr(layer, "id", ""))] = row_index
 
         ordered = sorted(visible_layers, key=lambda layer: float(getattr(layer, "start", 0.0)))
@@ -878,7 +890,8 @@ class EditorTimeline(QGraphicsView):
         stable = [layer for layer in ordered
                   if str(getattr(layer, "id", "")) in previous
                   and str(getattr(layer, "id", "")) != selected_id]
-        adaptive = [layer for layer in ordered if layer not in stable]
+        stable_ids = {id(layer) for layer in stable}
+        adaptive = [layer for layer in ordered if id(layer) not in stable_ids]
         for layer in stable:
             assign(layer, previous.get(str(getattr(layer, "id", ""))))
         for layer in adaptive:

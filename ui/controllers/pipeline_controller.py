@@ -13,6 +13,14 @@ from worker_adapters import AutoRecapWorker, PrepareWorkflowWorker
 from runtime_paths import subprocess_hidden_kwargs
 from utils.thread_lifecycle import release_thread_when_stopped
 
+# Progress events are part of the application package.  ``models/`` is also
+# the user model-data directory, so importing ``models.progress`` is
+# ambiguous and fails in packaged installs.
+try:
+    from app.core.models.progress import ProgressEvent
+except ImportError:
+    from core.models.progress import ProgressEvent
+
 # Robust import for the progress widget
 try:
     from widgets.progress_dialog import BackgroundableProgressDialog, PipelineProgressDialog
@@ -659,8 +667,7 @@ class PipelineController:
             self._hide_whisper_download_dialog()
 
     def on_voiceover_progress(self, message):
-        """Surface real TTS cue progress instead of writing it only to Logs."""
-        from models.progress import ProgressEvent
+        """Update live TTS progress without flooding the runtime log."""
         substage_chip = ""
         if isinstance(message, ProgressEvent):
             percent = int(message.percent) if message.percent is not None else None
@@ -675,7 +682,14 @@ class PipelineController:
                 percent = int(int(match.group(1)) * 100 / int(match.group(2)))
             elif percent_match:
                 percent = int(percent_match.group(1))
-        if text:
+        # Cue progress is a replaceable status, not a log event.  Persisting
+        # every ``TTS n/total`` update made long jobs produce hundreds of
+        # stale lines.  Warnings and other diagnostic messages remain logged.
+        is_tts_progress = bool(
+            isinstance(message, ProgressEvent)
+            and str(getattr(message, "workflow", "") or "").lower() == "tts"
+        ) or bool(re.match(r"^TTS\s+\d+\s*/\s*\d+\b", text or "", re.IGNORECASE))
+        if text and not is_tts_progress:
             self.gui.log(text)
         if self.progress_dialog:
             self.progress_dialog.update_step_progress("voiceover", percent, text or "Generating voice audio…")

@@ -50,7 +50,13 @@ class WorkflowActionsMixin:
         can_export = v_ok and not export_running
 
         self.extract_btn.setEnabled(v_ok)
-        self.vocal_sep_btn.setEnabled(a_ok)
+        vocal_running = bool(getattr(self, "vocal_thread", None) and self.vocal_thread.isRunning())
+        can_separate = bool((a_ok or v_ok) and not vocal_running)
+        self.vocal_sep_btn.setEnabled(can_separate)
+        if hasattr(self, "audio_separation_btn"):
+            self.audio_separation_btn.setEnabled(can_separate)
+        if hasattr(self, "_refresh_audio_stem_controls"):
+            self._refresh_audio_stem_controls()
         if hasattr(self, "voice_timing_sync_combo") and hasattr(self, "voice_speed_spin"):
             sync_mode = self.voice_timing_sync_combo.currentText().strip().lower()
             self.voice_speed_spin.setEnabled(sync_mode != "off")
@@ -148,7 +154,8 @@ class WorkflowActionsMixin:
             self.ocr_region_btn.setEnabled(v_ok)
         if hasattr(self, "ocr_translator_btn"):
             self.ocr_translator_btn.setEnabled(v_ok)
-        self._sync_blur_controls()
+        if hasattr(self, "_sync_blur_controls"):
+            self._sync_blur_controls()
         if hasattr(self, "free_voice_combo"):
             self.free_voice_combo.setEnabled(
                 generated_mode
@@ -416,27 +423,99 @@ class WorkflowActionsMixin:
         self._pipeline_advance("extraction")
 
     def run_vocal_separation(self):
-        audio_src = self.audio_source_edit.text()
+        source_path = self.resolve_canonical_video_path() if hasattr(self, "resolve_canonical_video_path") else (
+            self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""
+        )
+        audio_src = self.audio_source_edit.text().strip() if hasattr(self, "audio_source_edit") else ""
+        target_dir = self.audio_folder_edit.text().strip() if hasattr(self, "audio_folder_edit") else ""
+        if not target_dir:
+            target_dir = os.path.join(self.workspace_root, "temp")
+        os.makedirs(target_dir, exist_ok=True)
+
+        video_for_worker = None
         if not audio_src or not os.path.exists(audio_src):
-            QMessageBox.warning(self, "Error", "Please extract audio or select a source first!")
+            if source_path and os.path.exists(source_path):
+                file_basename = os.path.splitext(os.path.basename(source_path))[0]
+                audio_src = os.path.join(target_dir, file_basename + ".wav")
+                video_for_worker = source_path
+            else:
+                QMessageBox.warning(self, "Error", "Please import a video or select an audio file first!")
+                return
+
+        try:
+            from services.resource_download_service import ResourceDownloadService
+            if not ResourceDownloadService(self.workspace_root).is_resource_installed("separation:uvr_mdx"):
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle("Separation model missing")
+                box.setText("Mô hình tách giọng nói / nhạc nền (UVR MDX) chưa được cài đặt.")
+                box.setInformativeText("Nhấn 'Tải mô hình ngay' để tự động tải và cài đặt (~66 MB), hoặc mở 'Manage Resources' để quản lý.")
+                install_btn = box.addButton("Tải mô hình ngay (Install Now)", QMessageBox.AcceptRole)
+                manage_btn = box.addButton("Manage Resources", QMessageBox.ActionRole)
+                box.addButton("Hủy (Cancel)", QMessageBox.RejectRole)
+                box.exec()
+                if box.clickedButton() is install_btn:
+                    self.open_resource_manager_dialog(focus_resource_id="separation:uvr_mdx", auto_start=True)
+                elif box.clickedButton() is manage_btn:
+                    self.open_resource_manager_dialog(focus_resource_id="separation:uvr_mdx")
+                return
+        except Exception as exc:
+            self.log(f"[Audio] Separation model preflight failed: {exc}")
             return
 
-        target_dir = self.audio_folder_edit.text()
         self.progress_bar.setValue(35)
-        self.vocal_sep_btn.setEnabled(False)
-        self.vocal_sep_btn.setText("Separating... (AI Processing)")
+        if hasattr(self, "audio_separation_btn") and self.audio_separation_btn is not None:
+            self.audio_separation_btn.setEnabled(False)
+            self.audio_separation_btn.setText("Separating Voice.wav + Music.wav (0%)…")
+        if hasattr(self, "vocal_sep_btn") and self.vocal_sep_btn is not None:
+            self.vocal_sep_btn.setEnabled(False)
+            self.vocal_sep_btn.setText("Separating... 0%")
+        if hasattr(self, "audio_stem_status_label") and self.audio_stem_status_label is not None:
+            self.audio_stem_status_label.setText("⏳ Đang chuẩn bị tách nhạc & giọng… (0%)")
+        if hasattr(self, "mini_status_bar") and self.mini_status_bar is not None:
+            self.mini_status_bar.set_active("Vocal Separation", "Tách Voice.wav & Music.wav…")
+            self.mini_status_bar.set_progress(percent=0, detail="Chuẩn bị tách nhạc & giọng…", chip="UVR MDX")
         self.update_project_step("separate_audio", "running")
 
-        self.vocal_thread = VocalSeparationWorker(audio_src, target_dir)
+        self.vocal_thread = VocalSeparationWorker(audio_src, target_dir, video_path=video_for_worker)
+        self.vocal_thread.progress.connect(self.on_vocal_separation_progress)
         self.vocal_thread.finished.connect(self.on_vocal_separation_finished)
         self.vocal_thread.start()
 
+    def on_vocal_separation_progress(self, percent: int, message: str):
+        pct = max(0, min(100, int(percent)))
+        btn_text = f"Separating Voice.wav + Music.wav ({pct}%)…"
+        if hasattr(self, "audio_separation_btn") and self.audio_separation_btn is not None:
+            self.audio_separation_btn.setText(btn_text)
+        if hasattr(self, "vocal_sep_btn") and self.vocal_sep_btn is not None:
+            self.vocal_sep_btn.setText(f"Separating... {pct}%")
+        if hasattr(self, "audio_stem_status_label") and self.audio_stem_status_label is not None:
+            self.audio_stem_status_label.setText(f"⏳ {message}" if message else f"⏳ Đang tách âm thanh: {pct}%")
+        if hasattr(self, "mini_status_bar") and self.mini_status_bar is not None:
+            self.mini_status_bar.set_progress(
+                percent=pct,
+                detail=str(message or f"Đang tách âm thanh ({pct}%)"),
+                chip="UVR MDX",
+            )
+        mapped = 35 + int(pct * 0.15)
+        if hasattr(self, "progress_bar") and self.progress_bar is not None:
+            self.progress_bar.setValue(mapped)
+
     def on_vocal_separation_finished(self, vocal, music, error):
-        self.vocal_sep_btn.setEnabled(True)
-        self.vocal_sep_btn.setText("Separate Voice and Background")
-        self.progress_bar.setValue(50)
+        if hasattr(self, "vocal_sep_btn") and self.vocal_sep_btn is not None:
+            self.vocal_sep_btn.setEnabled(True)
+            self.vocal_sep_btn.setText("Separate Voice and Background")
+        if hasattr(self, "audio_separation_btn") and self.audio_separation_btn is not None:
+            self.audio_separation_btn.setEnabled(True)
+            self.audio_separation_btn.setText("Separate Voice and Music")
+        if hasattr(self, "progress_bar") and self.progress_bar is not None:
+            self.progress_bar.setValue(50)
 
         if error:
+            if hasattr(self, "audio_stem_status_label") and self.audio_stem_status_label is not None:
+                self.audio_stem_status_label.setText(f"❌ Tách âm thất bại: {error}")
+            if hasattr(self, "mini_status_bar") and self.mini_status_bar is not None:
+                self.mini_status_bar.set_error(f"Tách âm thất bại: {error}")
             self.update_project_step("separate_audio", "failed")
             err_lower = error.lower()
             missing_demucs = (
@@ -461,9 +540,15 @@ class WorkflowActionsMixin:
             self.refresh_ui_state()
             return
 
+        if hasattr(self, "mini_status_bar") and self.mini_status_bar is not None:
+            self.mini_status_bar.set_done("✨ Tách Voice.wav & Music.wav thành công!")
+
         if vocal and os.path.exists(vocal):
-            self.audio_source_edit.setText(vocal)
-            self.last_extracted_audio = vocal
+            selected_mode = getattr(self, "audio_separation_mode_combo", None)
+            selected_mode = selected_mode.currentData() if selected_mode is not None else "voice"
+            selected_audio = music if selected_mode == "music" and music and os.path.exists(music) else vocal
+            self.audio_source_edit.setText(selected_audio)
+            self.last_extracted_audio = selected_audio
             self.last_vocals_path = vocal
             self.last_music_path = music
             self.processed_artifacts["vocals"] = vocal
@@ -471,14 +556,101 @@ class WorkflowActionsMixin:
             if music:
                 self.processed_artifacts["music"] = music
                 self.update_project_artifact("music", music)
+            if getattr(self, "vocal_thread", None) and getattr(self.vocal_thread, "audio_path", None):
+                extracted_path = self.vocal_thread.audio_path
+                if os.path.exists(extracted_path) and not self.processed_artifacts.get("audio_extracted"):
+                    self.processed_artifacts["audio_extracted"] = extracted_path
+                    self.update_project_artifact("extracted_audio", extracted_path)
+            if hasattr(self, "schedule_timeline_visual_refresh"):
+                self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
+            self._refresh_audio_stem_controls()
             self.update_project_step("separate_audio", "done")
             QMessageBox.information(self, "Success",
-                f"Audio stems separated!\n\nVocals: {os.path.basename(vocal)}\nBackground: {os.path.basename(music)}\n\nVocals are now selected for transcription.")
+                f"Audio stems separated!\n\nVoice.wav: {os.path.basename(vocal)}\nMusic.wav: {os.path.basename(music)}\n\nSelected for transcription: {os.path.basename(selected_audio)}")
             self._pipeline_advance("separation")
         else:
             self.update_project_step("separate_audio", "failed")
             self._pipeline_fail("Separation did not produce output.")
         self.refresh_ui_state()
+
+    def _refresh_audio_stem_controls(self):
+        """Refresh the explicit Voice/Music stem actions after separation or reload."""
+        artifacts = getattr(self, "processed_artifacts", {}) or {}
+        vocal = str(getattr(self, "last_vocals_path", "") or artifacts.get("vocals", ""))
+        music = str(getattr(self, "last_music_path", "") or artifacts.get("music", ""))
+        vocal_ok = bool(vocal and os.path.isfile(vocal))
+        music_ok = bool(music and os.path.isfile(music))
+        for attr, enabled in (("add_voice_stem_btn", vocal_ok), ("add_music_stem_btn", music_ok)):
+            if hasattr(self, attr):
+                getattr(self, attr).setEnabled(enabled)
+        if hasattr(self, "audio_stem_status_label"):
+            names = []
+            if vocal_ok:
+                names.append(f"Voice.wav: {os.path.basename(vocal)}")
+            if music_ok:
+                names.append(f"Music.wav: {os.path.basename(music)}")
+            self.audio_stem_status_label.setText("Ready: " + " · ".join(names) if names else "No separated stems yet")
+
+    def _add_audio_stem_to_timeline(self, path: str, track_name: str, label: str):
+        if not path or not os.path.isfile(path):
+            QMessageBox.warning(self, "Audio stem", f"{label} was not found. Separate the audio first.")
+            return
+        try:
+            from app.layers.audio import AudioLayer
+            from app.layers.base import LayerType
+            from app.layers.sync_bridge import find_or_create_track
+            timeline_model = self.timeline._timeline
+            duration = max(0.1, float(getattr(self.timeline, "_duration", 0.0) or 0.0))
+            track = find_or_create_track(timeline_model, track_name, LayerType.AUDIO, 80)
+            track.visible = True
+            track.layers = [layer for layer in track.layers if str(getattr(layer, "source", "")) != path]
+            volume_attr = "audio_music_volume_slider" if "Music" in track_name else "audio_voice_volume_slider"
+            volume = (getattr(self, volume_attr).value() / 100.0) if hasattr(self, volume_attr) else 1.0
+            track.layers.append(AudioLayer(
+                name=track_name, source=path, start=0.0, end=duration,
+                source_start=0.0, speed=1.0, volume=volume,
+            ))
+            track.metadata["stem"] = "music" if "Music" in track_name else "voice"
+            self.timeline._track_heights[track.id] = self.timeline._compute_track_height(track)
+            self.timeline._redraw()
+            self.persist_current_timeline_project_data()
+            self.log(f"[Audio] {label} added to timeline: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Timeline error", f"Could not add {label} to the timeline:\n{exc}")
+
+    def add_music_stem_to_timeline(self):
+        artifacts = getattr(self, "processed_artifacts", {}) or {}
+        self._add_audio_stem_to_timeline(
+            str(getattr(self, "last_music_path", "") or artifacts.get("music", "")),
+            "A2 Music", "Music.wav",
+        )
+
+    def add_voice_stem_to_timeline(self):
+        artifacts = getattr(self, "processed_artifacts", {}) or {}
+        self._add_audio_stem_to_timeline(
+            str(getattr(self, "last_vocals_path", "") or artifacts.get("vocals", "")),
+            "A3 Voice", "Voice.wav",
+        )
+
+    def _set_stem_track_volume(self, track_name: str, value: int, label_attr: str):
+        if hasattr(self, label_attr):
+            getattr(self, label_attr).setText(f"{int(value)}%")
+        timeline_model = getattr(getattr(self, "timeline", None), "_timeline", None)
+        if timeline_model is None:
+            return
+        for track in timeline_model.tracks:
+            if track.name == track_name:
+                track.metadata["_volume"] = float(value)
+                for layer in track.layers:
+                    layer.volume = max(0.0, float(value) / 100.0)
+        self.timeline._redraw()
+        self.persist_current_timeline_project_data()
+
+    def on_audio_music_volume_changed(self, value: int):
+        self._set_stem_track_volume("A2 Music", value, "audio_music_volume_label")
+
+    def on_audio_voice_volume_changed(self, value: int):
+        self._set_stem_track_volume("A3 Voice", value, "audio_voice_volume_label")
 
     def run_transcription(self):
         is_ocr = self.get_transcription_engine() == "ocr"

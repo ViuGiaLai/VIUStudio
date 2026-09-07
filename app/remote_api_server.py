@@ -448,6 +448,8 @@ class VIUStudioRemoteHandler(BaseHTTPRequestHandler):
             project_state_path=str(payload.get("project_state_path", "") or ""),
             project_temp_dir=str(payload.get("project_temp_dir", "") or ""),
             timeline_clips=list(payload.get("timeline_clips") or []),
+            export_preset=str(payload.get("export_preset", "balanced") or "balanced"),
+            video_bitrate_kbps=int(payload.get("video_bitrate_kbps", 2000) or 2000),
         )
         return {"ok": True, "output_path": output}
 

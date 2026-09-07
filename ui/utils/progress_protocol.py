@@ -1,17 +1,16 @@
 import os
 import re
 import sys
-import time
-from typing import Optional, Tuple, Any, Dict
+from typing import Optional, Any
 
 APP_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "app"))
 if APP_PATH not in sys.path:
     sys.path.insert(0, APP_PATH)
 
 try:
-    from app.core.models.progress import ProgressEvent, MonotonicProgressTracker
+    from app.core.models.progress import ProgressEvent
 except ImportError:
-    from core.models.progress import ProgressEvent, MonotonicProgressTracker
+    from core.models.progress import ProgressEvent
 
 
 def format_duration_clock(seconds: Optional[float]) -> str:

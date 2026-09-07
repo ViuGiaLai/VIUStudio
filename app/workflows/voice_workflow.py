@@ -91,6 +91,8 @@ class VoiceWorkflow:
     RESCUE_MIN_ACCEPT_RATIO = 0.88
     MAX_SAFE_SEGMENT_SPEED = 1.12
     MAX_STUBBORN_SEGMENT_SPEED = 1.10
+    MAX_ENGLISH_DENSE_RUN_SPEED = 1.35
+    DENSE_RUN_MAX_GAP_SECONDS = 0.50
     TARGET_RATIO_FLOOR = 0.84
     TARGET_RATIO_CEIL = 1.08
     VOICE_COLLISION_GUARD_SECONDS = 0.04
@@ -754,8 +756,19 @@ class VoiceWorkflow:
         style_instruction: str = "",
         log: bool = True,
     ):
+        from services import AsrVocalizationFilterService
+
+        source_segments = list(segments or [])
+        source_segments, suppressed_count = AsrVocalizationFilterService.filter_tts_segments(
+            source_segments
+        )
+        if log and suppressed_count:
+            print(
+                "[Voice Workflow] Suppressed "
+                f"{suppressed_count} stale filler-only cue(s) before TTS."
+            )
         prepared = []
-        for seg in list(segments or []):
+        for seg in source_segments:
             current = dict(seg or {})
             subtitle_text = (current.get("text") or "").strip()
             voice_edited = bool(current.get("voice_edited"))
@@ -1143,6 +1156,144 @@ class VoiceWorkflow:
             )
             synced_wavs.append(fitted_path)
         return synced_wavs
+
+    @staticmethod
+    def _is_english_voice(voice_name: str) -> bool:
+        value = str(voice_name or "").strip().lower()
+        if value.startswith("edge:"):
+            value = value.split(":", 1)[1]
+        return value.startswith(("en_", "en-")) or "piper-en" in value.replace("\\", "/")
+
+    def _fit_dense_english_voice_runs(
+        self,
+        *,
+        segments,
+        wavs,
+        tmp_dir: str,
+        sync_mode: str,
+        voice_name: str,
+        requested_speed: float = 1.0,
+    ):
+        """Keep dense imported English subtitles from accumulating voice drift.
+
+        YouTube subtitle timings are optimized for reading, not synthesized
+        narration. English Piper audio can therefore overrun many consecutive
+        cues even though each cue is valid. Serializing every overrun preserves
+        words but can push narration tens of seconds behind the picture.
+
+        For Smart mode, measure contiguous dialogue runs and apply one bounded
+        catch-up ratio to the whole run. A uniform ratio sounds substantially
+        more natural than changing speed cue-by-cue, while the 1.35x total cap
+        avoids chipmunk speech. Sparse cues and non-English voices are untouched.
+        """
+        segment_list = list(segments or [])
+        fitted_wavs = list(wavs or [])
+        if (
+            str(sync_mode or "").strip().lower() != "smart"
+            or not self._is_english_voice(voice_name)
+            or not segment_list
+            or not fitted_wavs
+        ):
+            return fitted_wavs
+
+        safe_requested_speed = max(0.1, float(requested_speed or 1.0))
+        adaptive_cap = max(1.0, self.MAX_ENGLISH_DENSE_RUN_SPEED / safe_requested_speed)
+        if adaptive_cap < 1.02:
+            return fitted_wavs
+
+        runs: list[list[int]] = []
+        current_run: list[int] = []
+        previous_end: float | None = None
+        for index, seg in enumerate(segment_list[: len(fitted_wavs)]):
+            wav_path = fitted_wavs[index]
+            if not wav_path or not os.path.exists(wav_path):
+                if current_run:
+                    runs.append(current_run)
+                    current_run = []
+                previous_end = None
+                continue
+            try:
+                start = float(seg.get("start", 0.0) or 0.0)
+                end = float(seg.get("end", start) or start)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            if (
+                current_run
+                and previous_end is not None
+                and start - previous_end > self.DENSE_RUN_MAX_GAP_SECONDS
+            ):
+                runs.append(current_run)
+                current_run = []
+            current_run.append(index)
+            previous_end = end
+        if current_run:
+            runs.append(current_run)
+
+        adjusted_runs = 0
+        adjusted_cues = 0
+        max_ratio = 1.0
+        for run_number, indices in enumerate(runs):
+            first = segment_list[indices[0]]
+            last = segment_list[indices[-1]]
+            run_start = float(first.get("start", 0.0) or 0.0)
+            run_end = float(last.get("end", run_start) or run_start)
+            available = max(
+                0.05,
+                (run_end - run_start)
+                - self.VOICE_COLLISION_GUARD_SECONDS * max(0, len(indices) - 1),
+            )
+            speech_duration = sum(
+                self._probe_wav_duration_seconds(fitted_wavs[index]) for index in indices
+            )
+            required_ratio = speech_duration / available if available > 0.0 else 1.0
+            run_ratio = min(adaptive_cap, max(1.0, required_ratio))
+            if run_ratio < 1.03:
+                continue
+
+            adjusted_runs += 1
+            max_ratio = max(max_ratio, run_ratio)
+            for index in indices:
+                source_path = fitted_wavs[index]
+                adjusted_path = os.path.join(
+                    tmp_dir,
+                    f"seg_{index:04d}_dense_en_{run_number:04d}.wav",
+                )
+                fitted_wavs[index] = self.engine_runtime.change_wav_speed(
+                    input_wav_path=source_path,
+                    output_wav_path=adjusted_path,
+                    speed_ratio=run_ratio,
+                )
+                seg = segment_list[index]
+                target_duration = max(
+                    0.0,
+                    float(seg.get("end", 0.0) or 0.0) - float(seg.get("start", 0.0) or 0.0),
+                )
+                fitted_duration = self._probe_wav_duration_seconds(fitted_wavs[index])
+                seg["tts_duration"] = round(fitted_duration, 3)
+                seg["ratio"] = round(
+                    fitted_duration / target_duration if target_duration > 0.0 else 0.0,
+                    3,
+                )
+                metrics = dict(seg.get("_tts_metrics") or {})
+                metrics["dense_run_speed_ratio"] = round(run_ratio, 3)
+                metrics["tts_duration"] = seg["tts_duration"]
+                metrics["ratio"] = seg["ratio"]
+                action = str(seg.get("action_taken") or metrics.get("action_taken") or "accept")
+                if "dense_run_fit" not in action:
+                    action = f"{action}+dense_run_fit"
+                seg["action_taken"] = action
+                metrics["action_taken"] = action
+                seg["_tts_metrics"] = metrics
+                adjusted_cues += 1
+
+        if adjusted_runs:
+            print(
+                "[Voice Timing] Dense English fit: "
+                f"runs={adjusted_runs}, cues={adjusted_cues}, max_speed={max_ratio:.3f}x"
+            )
+        return fitted_wavs
 
     def _enforce_non_overlapping_voice_windows(self, *, segments, wavs, tmp_dir: str):
         """Schedule dense voice cues without overlapping or cutting speech.
@@ -1605,6 +1756,14 @@ class VoiceWorkflow:
             wavs=wavs,
             tmp_dir=tmp_dir,
             sync_mode=timing_sync_mode,
+        )
+        wavs = self._fit_dense_english_voice_runs(
+            segments=segments,
+            wavs=wavs,
+            tmp_dir=tmp_dir,
+            sync_mode=timing_sync_mode,
+            voice_name=voice_name,
+            requested_speed=safe_voice_speed,
         )
         wavs = self._enforce_non_overlapping_voice_windows(
             segments=segments,

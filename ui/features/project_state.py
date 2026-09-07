@@ -39,9 +39,28 @@ class ProjectStateMixin:
         existing_state = getattr(self, "current_project_state", None)
         if existing_state is not None and os.path.isdir(str(existing_state.project_root or "")):
             state = existing_state
+            state_changed = False
+            # Keep the canonical project fields synchronized with the visible
+            # controls. Previously a project created with Vietnamese defaults
+            # could retain target_language="vi" after an English SRT import,
+            # while only settings.target_lang became "en". Backend workflows
+            # reopening that project could then apply Vietnamese assumptions
+            # to English subtitles and voices.
+            canonical_values = {
+                "input_language": self.get_source_language_code(),
+                "target_language": self.get_target_language_code(),
+                "mode": self.get_output_mode_key(),
+                "translator_ai": self.is_ai_polish_enabled(),
+            }
+            for field_name, field_value in canonical_values.items():
+                if getattr(state, field_name, None) != field_value:
+                    setattr(state, field_name, field_value)
+                    state_changed = True
             audio_handling_mode = self.get_audio_handling_mode()
             if str(state.settings.get("audio_handling_mode", "fast")).strip().lower() != audio_handling_mode:
                 state.set_setting("audio_handling_mode", audio_handling_mode)
+                state_changed = True
+            if state_changed:
                 self.project_service.save_project(state)
             return state
         # Project identity must follow the imported source, not whichever
@@ -228,6 +247,8 @@ class ProjectStateMixin:
         proj_settings = {
             "output_mode": self.output_mode_combo.currentText() if hasattr(self, "output_mode_combo") else "",
             "output_quality": self.output_quality_combo.currentText() if hasattr(self, "output_quality_combo") else "",
+            "output_preset": self.output_preset_combo.currentData() if hasattr(self, "output_preset_combo") else "balanced",
+            "output_bitrate_kbps": int(self.output_bitrate_spin.value()) if hasattr(self, "output_bitrate_spin") else 2000,
             "output_fps": self.output_fps_combo.currentText() if hasattr(self, "output_fps_combo") else "",
             "output_ratio": self.output_ratio_combo.currentText() if hasattr(self, "output_ratio_combo") else "",
             "output_scale_mode": self.output_scale_mode_combo.currentText() if hasattr(self, "output_scale_mode_combo") else "",
@@ -565,6 +586,17 @@ class ProjectStateMixin:
             idx = self.output_quality_combo.findText(saved_q)
             if idx >= 0:
                 self.output_quality_combo.setCurrentIndex(idx)
+        if hasattr(self, "output_preset_combo"):
+            saved_preset = st.get("output_preset")
+            if saved_preset:
+                idx = self.output_preset_combo.findData(saved_preset)
+                if idx >= 0:
+                    self.output_preset_combo.setCurrentIndex(idx)
+        if hasattr(self, "output_bitrate_spin") and st.get("output_bitrate_kbps"):
+            try:
+                self.output_bitrate_spin.setValue(int(st.get("output_bitrate_kbps")))
+            except (TypeError, ValueError):
+                pass
 
         saved_fps = st.get("output_fps")
         if saved_fps and hasattr(self, "output_fps_combo"):

@@ -105,6 +105,7 @@ a = Analysis(
         # module unless it is listed explicitly. Missing it makes the frozen
         # /v1/prepare worker fail at runtime with ModuleNotFoundError.
         "services.asr_ocr_reconciliation_service",
+        "services.asr_vocalization_filter_service",
         "services.segment_regroup_service",
         # SpeakerDiarizationService is resolved lazily through services.__getattr__.
         # Include its concrete module so the frozen worker can import it.

@@ -357,7 +357,7 @@ class RuntimeMediaMixin:
 
         if include_voice and not is_remote_profile():
             voice_name = self.get_active_voice_name()
-            if voice_name and not str(voice_name).startswith(("edge:", "f5:", "zerotts:")):
+            if voice_name and not str(voice_name).startswith(("edge:", "f5:", "zerotts:", "kokoro:")):
                 resource_id = f"voice:{voice_name}"
                 if not service.is_resource_installed(resource_id):
                     voice_label = voice_name
@@ -411,12 +411,14 @@ class RuntimeMediaMixin:
             self.open_resource_manager_dialog()
         return False
 
-    def open_resource_manager_dialog(self):
+    def open_resource_manager_dialog(self, focus_resource_id: str | None = None, auto_start: bool = False):
         from views.resource_manager import open_resource_manager
         open_resource_manager(
             self.workspace_root,
             parent=self,
             on_finished=lambda: self._on_resource_download_complete(),
+            focus_resource_id=focus_resource_id,
+            auto_start=auto_start,
         )
 
     def _on_resource_download_complete(self):

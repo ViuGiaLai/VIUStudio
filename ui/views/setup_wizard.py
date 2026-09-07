@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -190,6 +189,8 @@ class SetupWizard(QDialog):
                 resources.append("voice:pack-en")
         elif self._profile_key == "local" and self.selected_engine() == "zerotts":
             resources.append("tts:zerotts")
+        elif self._profile_key == "local" and self.selected_engine() == "kokoro":
+            resources.append("tts:kokoro")
         return resources
 
     def _refresh_status(self):
@@ -200,12 +201,19 @@ class SetupWizard(QDialog):
                 zero_index,
                 f"ZeroTTS [VI] · Natural · {'Installed' if zero_ready else 'Not installed'}",
             )
+        kokoro_index = self.tts_engine_combo.findData("kokoro")
+        if kokoro_index >= 0:
+            kokoro_ready = self.service.is_resource_installed("tts:kokoro")
+            self.tts_engine_combo.setItemText(
+                kokoro_index,
+                f"Kokoro-82M [EN] · Natural · {'Installed' if kokoro_ready else 'Not installed'}",
+            )
         self._update_voice_pack_visibility()
         profile = self.PROFILES[self._profile_key]
         missing = [rid for rid in self._selected_resources() if not self.service.is_resource_installed(rid)]
         self._pending = missing
         selected_engine = str(self.tts_engine_combo.currentData() or "").strip().lower()
-        unsupported_engine = selected_engine in {"korvatts", "kokoro"}
+        unsupported_engine = selected_engine == "korvatts"
         if self._profile_key == "local" and unsupported_engine:
             engine_name = {
                 "zerotts": "ZeroTTS",

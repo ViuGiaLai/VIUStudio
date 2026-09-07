@@ -472,6 +472,18 @@ class ProjectService:
             }
         )
 
+    def build_audio_enhancement_signature(self, audio_path: str, *, filter_chain: str) -> str:
+        """Fingerprint the stable input and recipe for an ASR enhancement file."""
+        return self._hash_payload(
+            {
+                "version": 1,
+                "audio": self._file_signature(audio_path),
+                "filter_chain": str(filter_chain or "").strip(),
+                "sample_rate": 16000,
+                "channels": 1,
+            }
+        )
+
     def build_transcription_signature(
         self,
         audio_path: str,
