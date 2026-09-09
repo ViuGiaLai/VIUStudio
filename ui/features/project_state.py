@@ -845,6 +845,8 @@ class ProjectStateMixin:
             if hasattr(self, "audio_tab_btn"):
                 self.audio_tab_btn.setEnabled(True)
         self._sync_timeline_mute_to_gui()
+        if hasattr(self, "_sync_timeline_audio_volumes_to_gui"):
+            self._sync_timeline_audio_volumes_to_gui()
         # OCR geometry is project-scoped.  For a reopened OCR project that has
         # not produced a transcript yet, keep the crop editor visible so the
         # user can configure the region before running Transcript.  Completed

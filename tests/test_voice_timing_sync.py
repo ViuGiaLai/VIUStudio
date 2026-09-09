@@ -42,6 +42,33 @@ def _make_tone_wav(path: str, duration: float, sample_rate: int = 16000) -> None
 
 
 class VoiceTimingSyncTests(unittest.TestCase):
+    def test_vietnamese_smart_fit_does_not_overcompress_short_syllables(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "vietnamese_source.wav")
+            _make_tone_wav(source, 2.415)
+            segments = [{
+                "start": 707.6,
+                "end": 709.7,
+                "text": "Tao có đồ tốt cho mày! Chờ chút.",
+                "_tts_metrics": {"duration_sec": 2.1, "speech_cost": 2, "attempt_count": 1},
+            }]
+            workflow = VoiceWorkflow(str(ROOT))
+
+            fitted = workflow._apply_safe_timing_polish(
+                segments=segments,
+                wavs=[source],
+                tmp_dir=folder,
+                voice_speed=1.0,
+                sync_mode="Smart",
+            )
+
+            # The previous 1.15x hard-coded fit reduced this exact cue to
+            # about 2.10s and made Piper swallow Vietnamese final consonants.
+            # Preserve at least the duration produced by the 1.10x safety cap.
+            self.assertGreaterEqual(ffprobe_wav_duration(fitted[0]), 2.17)
+            self.assertLessEqual(ffprobe_wav_duration(fitted[0]), 2.25)
+            self.assertEqual(segments[0].get("action_taken"), "speed_light")
+
     def test_dense_english_run_is_uniformly_sped_up_before_queueing(self):
         with tempfile.TemporaryDirectory() as folder:
             wavs = []

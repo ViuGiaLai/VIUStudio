@@ -1,0 +1,20 @@
+{
+  "name": "viustudio-web-workspace",
+  "version": "1.3.0",
+  "private": true,
+  "description": "VIUStudio Web Workspace (Frontend, Cloudflare Workers API, Shared Types)",
+  "workspaces": [
+    "shared",
+    "api",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:api": "npm run dev --workspace=api",
+    "build:shared": "npm run build --workspace=shared",
+    "build:frontend": "npm run build --workspace=frontend",
+    "build:api": "npm run build --workspace=api",
+    "build": "npm run build:shared && npm run build:frontend",
+    "typecheck": "npm run typecheck --workspace=shared && npm run typecheck --workspace=frontend && npm run typecheck --workspace=api"
+  }
+}

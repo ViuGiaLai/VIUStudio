@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3.0"
 APP_NAME = "VIUStudio Video & Auto Edit Recap"
-AUTO_RECAP_VERSION = "1.0.0"
+AUTO_RECAP_VERSION = "1.1.0"
 
-RELEASE_NOTES = """✨ VIUStudio v1.2.3 - Translation Quality, Multi-video Timeline & Performance Release
+RELEASE_NOTES = """✨ VIUStudio v1.3.0 - Modern Web Studio, Hybrid Architecture & Studio Tools Release
 
 Hạng mục tính năng mới:
-• ✨ Auto Edit Recap Engine (12 Core Rules V1): Chia ranh giới hiệu ứng không bỏ nội dung, Zoom/Pan/Crop, Speed Accent, Freeze Frame & Audio Ducking.
-• 🎛️ Consumer UI Tier 1 & Tier 2: Checkbox khởi động nhanh & Modal tùy chỉnh phong cách dựng video (Subtle, Balanced, Dynamic).
-• 🎯 Generate Dropdown Top Bar: Nút bấm thiết kế nổi bật góc trên bên phải với menu tùy chọn linh hoạt.
-• 📊 Bảng Tiến Trình 5 Bước Chuyên Biệt: Hiển thị minh bạch Analyzing Video, Building Recap, Applying Smart Edits, Processing Audio, Rendering Recap.
-• 🛡️ Graceful Audio Fallback: Tự động chuyển hướng an toàn khi mô hình tách giọng thiếu hoặc gặp sự cố.
-• 📂 Export Direct Output: Tự động kích hoạt nút Export & mở thư mục kết quả video ngay khi hoàn tất.
+• 🌐 VIUStudio Web Studio: Hệ thống giao diện web hiện đại, hoàn chỉnh (Overview, Projects, Video Editor, Tools Hub, Voice Studio, Devices, AI Resources, Settings).
+• ⚡ Kiến Trúc Thích Ứng 3 Tầng (3-Tier Adaptive Architecture): Phân lập chuẩn giữa Mobile Web (WASM SIMD, W3C Storage Quota) và PC Workstation (Companion Daemon, Whisper Turbo/Large, Demucs v4 GPU).
+• 🎙️ Voice Studio SRT-to-TTS: Tổng hợp giọng nói nơ-ron tiếng Việt (VAIS, VIVOS) chạy trực tiếp trên WebAssembly, đồng bộ khoảng lặng timeline CapCut chuẩn xác.
+• 🎛️ Studio Tools Hub: Bộ công cụ độc lập cho biên tập phụ đề SRT, nhận diện giọng nói Whisper và tách nhạc nền Demucs v4 chất lượng cao.
+• ☁️ Cloud Sync & Supabase Integration: Đồng bộ dự án, cài đặt người dùng và xác thực Google.
+• 🛡️ Engine Runtime & Quality Hardening: Tối ưu hóa pipeline xuất video NVENC/CPU, launcher lifecycle và 100% kiểm thử tự động (313 tests passed).
 """
 
 

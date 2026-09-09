@@ -1665,6 +1665,49 @@ class SegmentEditorMixin:
             except Exception:
                 pass
 
+    def _sync_timeline_audio_volumes_to_gui(self):
+        """Restore persisted A1/A2 levels into both controls and playback.
+
+        Timeline metadata is the persisted source of truth. Previously only
+        mute state was restored when reopening a project, so the sliders went
+        back to 50/100 while the timeline still contained the user's values.
+        Preview and export could consequently use different gains.
+        """
+        if not hasattr(self, "timeline") or not self.timeline._timeline:
+            return
+
+        saved = {}
+        for track in self.timeline._timeline.tracks:
+            meta = track.metadata if isinstance(track.metadata, dict) else {}
+            try:
+                if "_volume" in meta:
+                    saved[track.name] = max(0, min(200, int(round(float(meta["_volume"])))))
+            except (TypeError, ValueError):
+                continue
+
+        a1_value = saved.get("A1 Audio")
+        a2_track_name = "A2 Dub" if "A2 Dub" in saved else "TS1"
+        a2_value = saved.get(a2_track_name)
+        for value, slider_attr, label_attr in (
+            (a1_value, "audio_a1_volume_slider", "audio_a1_volume_label"),
+            (a2_value, "audio_a2_volume_slider", "audio_a2_volume_label"),
+        ):
+            if value is None:
+                continue
+            slider = getattr(self, slider_attr, None)
+            if slider is not None:
+                slider.blockSignals(True)
+                slider.setValue(value)
+                slider.blockSignals(False)
+            label = getattr(self, label_attr, None)
+            if label is not None:
+                label.setText(f"{value}%")
+
+        if a1_value is not None:
+            self._apply_audio_track_settings("A1 Audio")
+        if a2_value is not None:
+            self._apply_audio_track_settings(a2_track_name)
+
     def _is_active_timeline_audio_track_muted(self) -> bool:
         track_mutes = self._timeline_audio_track_mutes()
         if not track_mutes:

@@ -2,6 +2,8 @@ import os
 import sys
 import tempfile
 import unittest
+import wave
+from array import array
 from types import SimpleNamespace
 
 from app.layers.base import LayerType
@@ -20,6 +22,54 @@ from app.workflows.export_workflow import ExportWorkflow
 
 
 class PreviewRenderConsistencyTests(unittest.TestCase):
+    def test_export_audio_mix_cache_is_scoped_by_current_slider_values(self):
+        class Slider:
+            def __init__(self, value):
+                self._value = value
+
+            def value(self):
+                return self._value
+
+            def setValue(self, value):
+                self._value = value
+
+        def write_mono_wav(path, sample_value):
+            samples = array("h", [sample_value] * 16000)
+            with wave.open(path, "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(16000)
+                handle.writeframes(samples.tobytes())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original = os.path.join(temp_dir, "original.wav")
+            voice = os.path.join(temp_dir, "voice.wav")
+            write_mono_wav(original, 10000)
+            write_mono_wav(voice, 0)
+            mix_dir = os.path.join(temp_dir, "project", "audio_mix")
+            gui = SimpleNamespace(
+                workspace_root=temp_dir,
+                audio_a1_volume_slider=Slider(50),
+                audio_a2_volume_slider=Slider(100),
+                last_voice_vi_path=voice,
+                _resolve_preview_background_audio_path=lambda: original,
+                get_project_temp_dir=lambda _name: mix_dir,
+                _percent_to_db=lambda percent: -60.0 if percent <= 0 else 20.0 * __import__("math").log10(percent / 100.0),
+            )
+            controller = PreviewController(gui)
+            mix_50 = controller._regenerate_mixed_audio_with_current_volumes()
+            gui.audio_a1_volume_slider.setValue(25)
+            mix_25 = controller._regenerate_mixed_audio_with_current_volumes()
+
+            self.assertTrue(os.path.isfile(mix_50))
+            self.assertTrue(os.path.isfile(mix_25))
+            self.assertNotEqual(mix_50, mix_25)
+            self.assertTrue(os.path.commonpath([mix_dir, mix_25]).startswith(mix_dir))
+            with wave.open(mix_50, "rb") as first, wave.open(mix_25, "rb") as second:
+                first_peak = max(abs(value) for value in array("h", first.readframes(first.getnframes())))
+                second_peak = max(abs(value) for value in array("h", second.readframes(second.getnframes())))
+            self.assertAlmostEqual(second_peak / first_peak, 0.5, delta=0.03)
+
     def test_live_timeline_is_single_source_for_visual_layers(self):
         timeline = Timeline()
         mask_track = Track(name="M1", type=LayerType.MASK, visible=True)

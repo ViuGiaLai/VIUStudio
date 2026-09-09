@@ -18,6 +18,7 @@ from utils.display_utils import (
 from worker_adapters import (
     SegmentAudioPreviewWorker,
     VoiceSamplePreviewWorker,
+    VoiceExportWorker,
 )
 from utils.thread_lifecycle import release_thread_when_stopped
 
@@ -430,6 +431,118 @@ class VoiceSubtitlePreviewMixin:
         with open(file_path, "w", encoding="utf-8") as handle:
             handle.write(srt_text)
         QMessageBox.information(self, "Saved", f"Translated subtitle exported to:\n\n{file_path}")
+
+    def export_voice_audio(self):
+        voice_path = str(
+            getattr(self, "last_voice_vi_path", "")
+            or (self.processed_artifacts.get("voice_vi") if hasattr(self, "processed_artifacts") else "")
+            or ""
+        ).strip()
+        if not voice_path or not os.path.exists(voice_path):
+            state = getattr(self, "current_project_state", None)
+            if state and getattr(state, "artifacts", None):
+                candidate = str(state.artifacts.get("voice_vi", "")).strip()
+                if candidate and os.path.exists(candidate):
+                    voice_path = candidate
+
+        if not voice_path or not os.path.exists(voice_path):
+            has_subtitles = bool(
+                (hasattr(self, "_get_voiceover_segments") and self._get_voiceover_segments())
+                or (getattr(self, "translated_text", None) and self.translated_text.toPlainText().strip())
+                or (getattr(self, "current_translated_segments", None))
+            )
+            if has_subtitles:
+                reply = QMessageBox.question(
+                    self,
+                    "Voice Audio Not Ready",
+                    "No voice audio has been generated yet for this project.\n\nWould you like to run Generate Voice / TTS now?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    if hasattr(self, "run_voiceover_with_progress"):
+                        self.run_voiceover_with_progress(target_stage="tts")
+                    elif hasattr(self, "run_voiceover"):
+                        self.run_voiceover()
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Missing Voice Audio",
+                    "No voice audio is ready to export.\n\nPlease import or create subtitles and run Voice (TTS) first.",
+                )
+            return
+
+        source_path = (
+            (self.resolve_canonical_video_path() if hasattr(self, "resolve_canonical_video_path") else (self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""))
+            or getattr(self, "last_translated_srt_path", "")
+            or ""
+        )
+        base_name = os.path.splitext(os.path.basename(source_path))[0] if source_path else ""
+        if not base_name or base_name.lower() in ("subtitle", "voice"):
+            base_name = "voice"
+        target_lang = str(self.get_target_language_code() if hasattr(self, "get_target_language_code") else "vi").lower()
+        suggested_name = f"{base_name}_{target_lang}_voice.mp3"
+        default_dir = (
+            (self.voice_output_folder_edit.text().strip() if hasattr(self, "voice_output_folder_edit") else "")
+            or (self.final_output_folder_edit.text().strip() if hasattr(self, "final_output_folder_edit") else "")
+            or (self.srt_output_folder_edit.text().strip() if hasattr(self, "srt_output_folder_edit") else "")
+            or self.workspace_root
+        )
+        default_path = os.path.join(default_dir, suggested_name)
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Voice Audio",
+            default_path,
+            "MP3 Audio (*.mp3);;WAV Audio (*.wav)",
+        )
+        if not file_path:
+            return
+
+        if "wav" in selected_filter.lower():
+            if not file_path.lower().endswith(".wav"):
+                file_path = (file_path[:-4] if file_path.lower().endswith(".mp3") else file_path) + ".wav"
+        else:
+            if not file_path.lower().endswith((".mp3", ".wav")):
+                file_path += ".mp3"
+
+        self._perform_voice_audio_export(voice_path, file_path)
+
+    def _perform_voice_audio_export(self, voice_path: str, output_path: str):
+        self.log(f"[Voice Export] Exporting voice audio to {output_path}...")
+        old_worker = getattr(self, "_voice_export_worker", None)
+        if old_worker is not None:
+            try:
+                if old_worker.isRunning():
+                    old_worker.quit()
+                    old_worker.wait(1000)
+            except Exception:
+                pass
+            self._voice_export_worker = None
+
+        worker = VoiceExportWorker(voice_path, output_path, bitrate="256k")
+        self._voice_export_worker = worker
+
+        def on_finished(success: bool, dest: str, err: str):
+            release_thread_when_stopped(worker)
+            self._voice_export_worker = None
+            if success and os.path.exists(dest):
+                self.log(f"[Voice Export] Successfully exported voice audio to {dest}")
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    f"Voice audio exported successfully to:\n\n{dest}\n\nYou can now import this file into CapCut or any audio editor.",
+                )
+            else:
+                self.log(f"[Voice Export] Export failed: {err}")
+                QMessageBox.critical(
+                    self,
+                    "Export Failed",
+                    f"Could not export voice audio:\n\n{err or 'Unknown error'}",
+                )
+
+        worker.finished.connect(on_finished)
+        worker.start()
 
     def import_original_srt(self):
         file_path, _ = QFileDialog.getOpenFileName(

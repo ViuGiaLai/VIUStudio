@@ -1273,4 +1273,64 @@ class VoiceSamplePreviewWorker(QThread):
             pass
 
 
+class VoiceExportWorker(QThread):
+    """Encodes or copies pure TTS voice audio to MP3 or WAV in the background."""
 
+    finished = Signal(bool, str, str)  # (success, output_path, error_message)
+    progress = Signal(int, str)
+
+    def __init__(self, input_wav: str, output_path: str, bitrate: str = "256k"):
+        super().__init__()
+        self.input_wav = str(input_wav or "").strip()
+        self.output_path = str(output_path or "").strip()
+        self.bitrate = str(bitrate or "256k").strip()
+
+    def run(self):
+        try:
+            self.progress.emit(10, "Preparing audio export...")
+            if not self.input_wav or not os.path.exists(self.input_wav):
+                self.finished.emit(False, "", f"Source voice file not found: {self.input_wav}")
+                return
+
+            out_dir = os.path.dirname(os.path.abspath(self.output_path))
+            if out_dir and not os.path.exists(out_dir):
+                os.makedirs(out_dir, exist_ok=True)
+
+            if self.output_path.lower().endswith(".wav"):
+                self.progress.emit(50, "Copying WAV audio...")
+                if os.path.abspath(self.input_wav) != os.path.abspath(self.output_path):
+                    shutil.copy2(self.input_wav, self.output_path)
+                self.progress.emit(100, "WAV audio exported successfully.")
+                self.finished.emit(True, self.output_path, "")
+                return
+
+            ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
+            if not os.path.exists(ffmpeg):
+                self.finished.emit(False, "", f"FFmpeg not found at {ffmpeg}")
+                return
+
+            self.progress.emit(30, "Encoding MP3 audio...")
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                self.input_wav,
+                "-vn",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                self.bitrate,
+                "-ar",
+                "44100",
+                self.output_path,
+            ]
+            kwargs = subprocess_hidden_kwargs()
+            proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+            if proc.returncode == 0 and os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 0:
+                self.progress.emit(100, "MP3 audio exported successfully.")
+                self.finished.emit(True, self.output_path, "")
+            else:
+                err = (proc.stderr or proc.stdout or "FFmpeg MP3 export failed.").strip()
+                self.finished.emit(False, "", err)
+        except Exception as exc:
+            self.finished.emit(False, "", str(exc))

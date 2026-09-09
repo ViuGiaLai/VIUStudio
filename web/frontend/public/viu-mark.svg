@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="VIUStudio">
+  <defs>
+    <linearGradient id="g" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4DE8E1"/>
+      <stop offset="1" stop-color="#8B7CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="17" fill="#0B1020" stroke="url(#g)" stroke-width="3"/>
+  <path d="M16 18h9l7 25 7-25h9L37 49H27L16 18Z" fill="url(#g)"/>
+  <circle cx="48" cy="15" r="4" fill="#E9FFFF"/>
+</svg>

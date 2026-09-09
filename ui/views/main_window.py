@@ -286,6 +286,8 @@ def _build_header_bar(gui):
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
     gui.download_original_action = more_menu.addAction("Export Source SRT…")
     gui.download_original_action.triggered.connect(gui.download_original_script)
+    gui.export_voice_action = more_menu.addAction("Export Voice Audio (MP3)…")
+    gui.export_voice_action.triggered.connect(gui.export_voice_audio)
     gui.preview_5s_action = more_menu.addAction("Fast Preview (5 seconds)")
     gui.preview_5s_action.triggered.connect(gui.preview_5s_btn.click)
     more_menu.addSeparator()

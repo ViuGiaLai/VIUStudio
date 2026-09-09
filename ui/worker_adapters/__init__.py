@@ -20,6 +20,7 @@ from .processing_workers import (
     VocalSeparationWorker,
     VoiceSamplePreviewWorker,
     VoiceOverWorker,
+    VoiceExportWorker,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "VocalSeparationWorker",
     "VoiceSamplePreviewWorker",
     "VoiceOverWorker",
+    "VoiceExportWorker",
 ]

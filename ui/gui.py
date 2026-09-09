@@ -227,21 +227,25 @@ if __name__ == "__main__":
     if not selection:
         sys.exit(0)
 
-    LauncherWindow.add_recent(None, selection)
+    if isinstance(selection, dict) and selection.get("launch_mode") == "srt_tts":
+        from views.srt_tts_window import SrtTtsWindow
+        window = SrtTtsWindow(app_root)
+        window.show()
+    else:
+        LauncherWindow.add_recent(None, selection)
+        window = VideoTranslatorGUI()
+        runtime_logs.attach(window)
+        # Resolve all responsive sizes and splitter geometry while the editor is
+        # hidden, so the first frame after the Launcher is already settled.
+        window.prepare_initial_editor_layout()
+        window.show()
 
-    window = VideoTranslatorGUI()
-    runtime_logs.attach(window)
-    # Resolve all responsive sizes and splitter geometry while the editor is
-    # hidden, so the first frame after the Launcher is already settled.
-    window.prepare_initial_editor_layout()
-    window.show()
+        def _init_video():
+            try:
+                from utils.project_launch import initialize_editor_from_selection
+                initialize_editor_from_selection(window, selection)
+            except Exception:
+                runtime_logs.add("[Startup Error]\n" + traceback.format_exc())
 
-    def _init_video():
-        try:
-            from utils.project_launch import initialize_editor_from_selection
-            initialize_editor_from_selection(window, selection)
-        except Exception:
-            runtime_logs.add("[Startup Error]\n" + traceback.format_exc())
-
-    QTimer.singleShot(100, _init_video)
+        QTimer.singleShot(100, _init_video)
     sys.exit(app.exec())

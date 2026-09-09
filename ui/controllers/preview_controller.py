@@ -633,7 +633,14 @@ class PreviewController:
         if mode_key in {"subtitle", "original"}:
             audio_mode = "Original" if has_original_audio and a1_volume > 0 else "No Audio"
         elif mode_key == "voice":
-            audio_mode = "Dubbed" if audio_path and a2_volume > 0 else "No Audio"
+            if not audio_path or (a1_volume <= 0 and a2_volume <= 0):
+                audio_mode = "No Audio"
+            elif a1_volume > 0 and a2_volume > 0:
+                audio_mode = "Original + Dubbed"
+            elif a1_volume > 0:
+                audio_mode = "Original"
+            else:
+                audio_mode = "Dubbed"
         elif a1_volume <= 0 and a2_volume <= 0:
             audio_mode = "No Audio"
         elif a1_volume <= 0:
@@ -782,7 +789,9 @@ class PreviewController:
 
         Returns the path to the newly generated mixed audio file, or empty string if failed.
         """
-        # Get current volume settings from Audio tab
+        # Read the live controls at the instant Export/Preview is requested.
+        # Do not reuse ``mixed_vi`` here: it was authored with an older pair of
+        # gains and is therefore not a valid source after either slider moves.
         original_volume = int(self.gui.audio_a1_volume_slider.value()) if hasattr(self.gui, 'audio_a1_volume_slider') else 100
         dub_volume = int(self.gui.audio_a2_volume_slider.value()) if hasattr(self.gui, 'audio_a2_volume_slider') else 100
 
@@ -812,25 +821,52 @@ class PreviewController:
         # Resolve background / original audio from video or extracted file
         bg_path = self.gui._resolve_preview_background_audio_path() if hasattr(self.gui, '_resolve_preview_background_audio_path') else ""
 
+        mix_dir = (
+            self.gui.get_project_temp_dir("audio_mix")
+            if hasattr(self.gui, "get_project_temp_dir")
+            else os.path.join(self.gui.workspace_root, "temp", "audio_mix")
+        )
+        os.makedirs(mix_dir, exist_ok=True)
+
         if not bg_path or not os.path.exists(bg_path):
             # Try to extract audio from the original video on-the-fly
             video_path = self._resolve_export_video_path()
             if video_path and os.path.exists(video_path) and original_volume > 0:
                 try:
-                    temp_dir = os.path.join(self.gui.workspace_root, "temp")
-                    os.makedirs(temp_dir, exist_ok=True)
-                    extracted_path = os.path.join(temp_dir, "original_audio_extracted.wav")
+                    video_stat = os.stat(video_path)
+                    source_key = hashlib.sha1(
+                        f"{os.path.abspath(video_path)}|{video_stat.st_size}|{video_stat.st_mtime_ns}".encode("utf-8")
+                    ).hexdigest()[:16]
+                    extracted_path = os.path.join(mix_dir, f"original_{source_key}.wav")
                     from audio_mixer import extract_audio_from_video
-                    extract_audio_from_video(video_path, extracted_path)
+                    if not os.path.exists(extracted_path) or os.path.getsize(extracted_path) <= 44:
+                        extract_audio_from_video(video_path, extracted_path)
                     if os.path.exists(extracted_path):
                         bg_path = extracted_path
                         print(f"[Export] Extracted original audio from video: {extracted_path}")
                 except Exception as e:
                     print(f"[Export] Could not extract original audio: {e}")
 
-        temp_dir = os.path.join(self.gui.workspace_root, "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        output_path = os.path.join(temp_dir, "export_mixed_temp.wav")
+        signature_payload = {
+            "original": self._file_signature(bg_path),
+            "dub": self._file_signature(voice_path),
+            "original_volume": int(original_volume),
+            "dub_volume": int(dub_volume),
+        }
+        mix_key = hashlib.sha1(
+            json.dumps(signature_payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:16]
+        output_path = os.path.join(mix_dir, f"export_mix_{mix_key}.wav")
+        print(
+            f"[Export] Audio mix snapshot: A1 Original={original_volume}%, "
+            f"A2 Dub={dub_volume}%, cache={os.path.basename(output_path)}"
+        )
+
+        # A completed file with this content-addressed name has exactly the
+        # requested sources and gains. It is safe to reuse and avoids remixing
+        # a multi-hour project when the user exports again unchanged.
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 44:
+            return output_path
 
         # --- Case 0: Both Muted or 0 volume ---
         if original_volume <= 0 and dub_volume <= 0:
@@ -870,8 +906,8 @@ class PreviewController:
                     print(f"[Export] Dub volume=0, scaled original audio to {original_volume}%: {output_path}")
                     return output_path
                 except Exception as e:
-                    print(f"[Export] Scaled original fallback to raw audio: {e}")
-                    return bg_path
+                    print(f"[Export] Failed to scale original audio: {e}")
+                    return ""
             print("[Export] Dub volume=0 but no original audio found, returning empty")
             return ""
 
@@ -896,24 +932,29 @@ class PreviewController:
                     print(f"[Export] Original volume=0, scaled dub audio to {dub_volume}%: {output_path}")
                     return output_path
                 except Exception as e:
-                    print(f"[Export] Scaled dub fallback to raw voice: {e}")
-                    return voice_path
+                    print(f"[Export] Failed to scale dubbed audio: {e}")
+                    return ""
             print("[Export] Original volume=0 but no voice file found, returning empty")
             return ""
 
         # --- Case 3: No voice track generated yet ---
         if not voice_path:
             if bg_path and os.path.exists(bg_path):
-                print(f"[Export] No voice file, using original audio only: {bg_path}")
-                return bg_path
+                if original_volume == 100:
+                    print(f"[Export] No voice file, using original audio only: {bg_path}")
+                    return bg_path
+                print("[Export] No voice file is available for the requested two-track mix")
+                return ""
             print("[Export] No voice file and no original audio, returning empty")
             return ""
 
         # --- Case 4: Mix both tracks ---
         if not bg_path or not os.path.exists(bg_path):
-            # Still no original audio — fall back to voice only
-            print(f"[Export] No original audio available, using voice only: {voice_path}")
-            return voice_path
+            # Returning the raw voice here used to silently ignore A1 and A2
+            # slider values. A visibly wrong export is worse than a clear
+            # failure, so require the requested source to be available.
+            print("[Export] No original audio available for the requested two-track mix")
+            return ""
 
         try:
             from audio_mixer import mix_original_with_dub
@@ -1165,9 +1206,6 @@ class PreviewController:
         chosen_audio = ""
         if mode in ("voice", "both"):
             chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
-            if not chosen_audio:
-                # Fallback to cached audio if regeneration failed
-                chosen_audio = self.gui.resolve_selected_audio_path()
         else:
             chosen_audio = self.gui.resolve_selected_audio_path()
 
@@ -1363,8 +1401,6 @@ class PreviewController:
         chosen_audio = ""
         if mode in ("voice", "both"):
             chosen_audio = self._regenerate_mixed_audio_with_current_volumes()
-            if not chosen_audio:
-                chosen_audio = self.gui.resolve_selected_audio_path()
         if mode in ("voice", "both") and not chosen_audio:
             QMessageBox.warning(self.gui, "Error", "Please generate dubbed voice or choose existing audio first.")
             return
@@ -1683,8 +1719,6 @@ class PreviewController:
         audio_path = ""
         if mode in ("voice", "both"):
             audio_path = self._regenerate_mixed_audio_with_current_volumes()
-            if not audio_path:
-                audio_path = self.gui.resolve_selected_audio_path()
         if not video_path or not os.path.exists(video_path):
             self.gui.log("[Preview] Video file not found, showing error")
             QMessageBox.warning(self.gui, "Error", "Video file not found. Please select a video first.")

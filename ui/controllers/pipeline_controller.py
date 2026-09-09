@@ -489,6 +489,14 @@ class PipelineController:
         """Entry point for the full generation process."""
         video_path = self._resolve_pipeline_video_path(video_path)
         if not video_path:
+            has_trans = bool(
+                (hasattr(self.gui, "current_translated_segments") and self.gui.current_translated_segments)
+                or (hasattr(self.gui, "translated_text") and self.gui.translated_text.toPlainText().strip())
+            )
+            if has_trans and str(target_stage or "full").strip().lower() in {"full", "tts", "voiceover"}:
+                self.gui.log("[Pipeline] No video loaded, but translated subtitles are present. Running Generate Voice / TTS...")
+                self.gui.run_voiceover_with_progress(target_stage="tts")
+                return
             QMessageBox.warning(self.gui, "Error", "Please select a video file first.")
             return
 

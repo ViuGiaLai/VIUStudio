@@ -392,6 +392,7 @@ class LauncherWindow(QDialog):
         super().__init__()
         self.selected_video = ""
         self.selected_project_state_path = ""
+        self.selected_launch_mode = ""
         self.selected_device = "cuda"
         self._thumbnail_dir = os.path.join(workspace_root(), "temp", "launcher_thumbs")
         self._loader_timer = None
@@ -667,6 +668,15 @@ class LauncherWindow(QDialog):
                 padding-top: 7px;
             }
         """
+
+        self.srt_tts_btn = QPushButton("SRT → TTS → MP3")
+        self.srt_tts_btn.setMinimumHeight(38)
+        self.srt_tts_btn.setMinimumWidth(135)
+        self.srt_tts_btn.setCursor(Qt.PointingHandCursor)
+        self.srt_tts_btn.setStyleSheet(sec_btn_style)
+        self.srt_tts_btn.setToolTip("Import SRT, tạo giọng TTS và xuất file MP3; không cần video")
+        self.srt_tts_btn.clicked.connect(self._on_srt_tts_project)
+        action_row_one.addWidget(self.srt_tts_btn)
 
         self.split_btn = QPushButton("Split Video")
         self.split_btn.setMinimumHeight(38)
@@ -1036,6 +1046,14 @@ class LauncherWindow(QDialog):
         state = ProjectService(workspace_root()).create_project()
         self.selected_video = ""
         self.selected_project_state_path = os.path.join(state.project_root, "project.json")
+        self.accept()
+
+    def _on_srt_tts_project(self):
+        if getattr(self, "_is_accepting", False):
+            return
+        self.selected_launch_mode = "srt_tts"
+        self.selected_video = ""
+        self.selected_project_state_path = ""
         self.accept()
 
     @staticmethod
@@ -1488,5 +1506,6 @@ def show_launcher(settings_or_none):
         return {
             "project_state_path": w.selected_project_state_path,
             "video_path": w.selected_video,
+            "launch_mode": w.selected_launch_mode,
         }
     return None

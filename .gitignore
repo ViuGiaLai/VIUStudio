@@ -52,3 +52,5 @@ scratch/
 tmp/
 .tmp_kokoro_pkg/
 media/
+
+ssh-key-2026-07-27 (1).key

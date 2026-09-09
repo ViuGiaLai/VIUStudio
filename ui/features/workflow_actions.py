@@ -246,7 +246,7 @@ class WorkflowActionsMixin:
 
         if hasattr(self, "clean_project_action"):
             self.clean_project_action.setEnabled(self._has_cleanable_project_data())
-        self.run_all_btn.setEnabled(v_ok and not self._pipeline_active)
+        self.run_all_btn.setEnabled((v_ok or has_translated_text) and not self._pipeline_active)
         self.preview_frame_btn.setEnabled(v_ok and bool(self.get_active_segments()))
         self.preview_5s_btn.setEnabled(v_ok)
         if hasattr(self, "preview_5s_action"):
@@ -256,6 +256,9 @@ class WorkflowActionsMixin:
             self.download_subtitle_action.setEnabled(bool(self.translated_text.toPlainText().strip()))
         if hasattr(self, "download_original_action"):
             self.download_original_action.setEnabled(bool(self.transcript_text.toPlainText().strip()))
+        if hasattr(self, "export_voice_action"):
+            has_voice = bool(getattr(self, "last_voice_vi_path", "") and os.path.exists(self.last_voice_vi_path))
+            self.export_voice_action.setEnabled(has_voice or has_translated_text)
         if hasattr(self, "tabs"):
             self.tabs.setTabEnabled(1, v_ok)
             self.tabs.setTabEnabled(2, v_ok and mode in ("voice", "both"))

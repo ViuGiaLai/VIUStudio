@@ -89,7 +89,11 @@ class VoiceWorkflow:
     HARD_OUTLIER_RATIO = 1.20
     RETRY_MIN_ACCEPT_RATIO = 0.88
     RESCUE_MIN_ACCEPT_RATIO = 0.88
-    MAX_SAFE_SEGMENT_SPEED = 1.12
+    # Post-synthesis time compression above 10% noticeably smears short
+    # Vietnamese syllables in Piper voices (especially final consonants).
+    # Small overruns are safer to queue into the following silence than to
+    # force every waveform to the exact visual cue boundary.
+    MAX_SAFE_SEGMENT_SPEED = 1.10
     MAX_STUBBORN_SEGMENT_SPEED = 1.10
     MAX_ENGLISH_DENSE_RUN_SPEED = 1.35
     DENSE_RUN_MAX_GAP_SECONDS = 0.50
@@ -957,7 +961,7 @@ class VoiceWorkflow:
                 speech_cost=speech_cost,
                 ratio=ratio,
             ):
-                speed_ratio = min(1.15, max(1.0, ratio))
+                speed_ratio = min(self.MAX_SAFE_SEGMENT_SPEED, max(1.0, ratio))
                 if abs(speed_ratio - 1.0) >= 0.02:
                     adjusted_path = os.path.join(tmp_dir, f"seg_{idx:04d}_polish_speed.wav")
                     wav_path = self.engine_runtime.change_wav_speed(

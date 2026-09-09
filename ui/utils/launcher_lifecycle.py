@@ -12,6 +12,15 @@ def relaunch_launcher(window_factory):
         QApplication.quit()
         return
 
+    if isinstance(selection, dict) and selection.get("launch_mode") == "srt_tts":
+        from runtime_paths import workspace_root
+        from views.srt_tts_window import SrtTtsWindow
+
+        new_window = SrtTtsWindow(workspace_root())
+        QApplication.instance()._viustudio_active_window = new_window
+        new_window.show()
+        return
+
     LauncherWindow.add_recent(None, selection)
     new_window = window_factory()
     new_window.prepare_initial_editor_layout()
