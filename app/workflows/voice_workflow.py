@@ -3,6 +3,7 @@ import os
 import re
 import time
 import wave
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services import EngineRuntime, ProjectService
@@ -216,6 +217,8 @@ class VoiceWorkflow:
 
     def _segment_tts_text(self, seg: dict) -> str:
         current = dict(seg or {})
+        if bool(current.get("tts_suppressed")):
+            return ""
         subtitle_text = str(current.get("text") or "").strip()
         if bool(current.get("voice_edited")):
             edited_text = str(current.get("tts_text") or current.get("dubbing_vi") or "").strip()
@@ -763,17 +766,14 @@ class VoiceWorkflow:
         from services import AsrVocalizationFilterService
 
         source_segments = list(segments or [])
-        source_segments, suppressed_count = AsrVocalizationFilterService.filter_tts_segments(
-            source_segments
-        )
-        if log and suppressed_count:
-            print(
-                "[Voice Workflow] Suppressed "
-                f"{suppressed_count} stale filler-only cue(s) before TTS."
-            )
         prepared = []
-        for seg in source_segments:
+        for source_index, seg in enumerate(source_segments):
             current = dict(seg or {})
+            # Imported rows can be out of order. Keep their original identity
+            # while sorting for audio assembly.
+            current["_voice_source_index"] = source_index
+            _kept, suppressed_count = AsrVocalizationFilterService.filter_tts_segments([current])
+            current["tts_suppressed"] = bool(suppressed_count)
             subtitle_text = (current.get("text") or "").strip()
             voice_edited = bool(current.get("voice_edited"))
             spoken_text = self._segment_tts_text(current)
@@ -806,6 +806,11 @@ class VoiceWorkflow:
             prepared.append(current)
         if log:
             print(f"[Voice Workflow] Prepared TTS text: adjusted=0/{len(prepared)}")
+        # Keep WAV indexing and subtitle indexing together, including imports
+        # whose rows are not chronological.
+        prepared.sort(key=lambda item: float(item.get("start", 0.0)))
+        from services.voice_timing_service import cue_windows
+        cue_windows(prepared)
         return prepared
 
     def _probe_wav_duration_seconds(self, wav_path: str) -> float:
@@ -1300,71 +1305,16 @@ class VoiceWorkflow:
         return fitted_wavs
 
     def _enforce_non_overlapping_voice_windows(self, *, segments, wavs, tmp_dir: str):
-        """Schedule dense voice cues without overlapping or cutting speech.
-
-        The old collision guard hard-trimmed a long WAV at the next subtitle's
-        start time.  That made the following cue punctual by literally losing
-        the end of the current sentence.  Earlier timing passes already perform
-        the bounded, natural-sounding speed changes; this final pass therefore
-        serializes any remaining overrun and records the real audio window.
-        ``build_voice_track_from_srt_segments`` consumes ``_audio_start`` as a
-        second line of defence for imported/manual subtitles.
-        """
-        segment_list = list(segments or [])
-        guarded_wavs = list(wavs or [])
-        queued_count = 0
-        previous_audio_end = 0.0
-        for index in range(min(len(segment_list), len(guarded_wavs))):
-            seg = segment_list[index]
-            wav_path = guarded_wavs[index]
-            if not wav_path or not os.path.exists(wav_path):
-                continue
-            try:
-                requested_start = float(seg.get("start", 0.0) or 0.0)
-            except (AttributeError, TypeError, ValueError):
-                continue
-            actual = self._probe_wav_duration_seconds(wav_path)
-            if actual <= 0.0:
-                continue
-
-            scheduled_start = requested_start
-            if previous_audio_end > 0.0:
-                scheduled_start = max(
-                    scheduled_start,
-                    previous_audio_end + self.VOICE_COLLISION_GUARD_SECONDS,
-                )
-            audio_end = scheduled_start + actual
-            seg["_audio_start"] = scheduled_start
-            seg["_audio_end"] = audio_end
-            metrics = dict(seg.get("_tts_metrics") or {})
-            metrics["scheduled_audio_start"] = round(scheduled_start, 3)
-            metrics["scheduled_audio_end"] = round(audio_end, 3)
-            delay = max(0.0, scheduled_start - requested_start)
-            if delay > 0.01:
-                queued_count += 1
-                action = str(seg.get("action_taken") or "accept")
-                if "voice_queue" not in action:
-                    seg["action_taken"] = f"{action}+voice_queue"
-                metrics["voice_queue_delay"] = round(delay, 3)
-                metrics["action_taken"] = seg["action_taken"]
-            seg["_tts_metrics"] = metrics
-            previous_audio_end = audio_end
-
-        if queued_count:
-            print(
-                "[Voice Timing] Serialized "
-                f"{queued_count} dense voice cue(s) without cutting speech."
-            )
-        return guarded_wavs
+        """Fit every clip to its own cue; never queue later sentences."""
+        from services.voice_timing_service import align_voice_clips
+        return align_voice_clips(
+            segments=list(segments or []), wavs=list(wavs or []),
+            engine=self.engine_runtime, tmp_dir=tmp_dir,
+            mode="timeline priority",
+        )
 
     def _extend_segment_ends_to_audio(self, *, segments, wavs, sync_mode: str = "off") -> None:
-        """Synchronize subtitle windows with measured TTS duration.
-
-        Subtitle timing remains the source/timeline truth.  Voice placement is
-        kept separately in ``_audio_start``/``_audio_end`` so a long TTS clip
-        cannot rewrite the SRT and shift every later cue.  The renderer/mixer
-        can use the audio metadata without corrupting the visual subtitle lane.
-        """
+        """Record an already-fitted schedule without changing subtitle times."""
         segment_list = list(segments or [])
         for index, (seg, wav_path) in enumerate(zip(segment_list, wavs or [])):
             if not wav_path or not os.path.exists(wav_path):
@@ -1376,21 +1326,18 @@ class VoiceWorkflow:
                 start_s = float(seg.get("start", 0.0))
             except (TypeError, ValueError):
                 continue
-            audio_start = seg.get("_audio_start", start_s)
             try:
-                audio_start = float(audio_start)
+                declared_end = float(seg.get("end", start_s))
             except (TypeError, ValueError):
-                audio_start = start_s
-            try:
-                audio_end = float(seg.get("_audio_end", audio_start + actual_d))
-            except (TypeError, ValueError):
-                audio_end = audio_start + actual_d
-            seg["_audio_start"] = audio_start
+                declared_end = start_s
+            audio_end = start_s + actual_d
+            if audio_end > declared_end + 0.002:
+                raise ValueError(f"Cue {index + 1}: voice must be aligned before scheduling.")
+            seg["_audio_start"] = start_s
             seg["_audio_end"] = audio_end
-            if audio_start > start_s + 0.01:
-                metrics = dict(seg.get("_tts_metrics") or {})
-                metrics["voice_queue_delay"] = round(audio_start - start_s, 3)
-                seg["_tts_metrics"] = metrics
+            metrics = dict(seg.get("_tts_metrics") or {})
+            metrics.pop("voice_queue_delay", None)
+            seg["_tts_metrics"] = metrics
 
     def _synthesize_segment_wavs(
         self,
@@ -1412,6 +1359,7 @@ class VoiceWorkflow:
         wavs = [""] * len(segments)
         pending_jobs = []
         cache_hits = 0
+        failures = []
 
         for idx, seg in enumerate(segments):
             global_idx = int(index_offset) + idx
@@ -1420,8 +1368,10 @@ class VoiceWorkflow:
                 wavs[idx] = ""
                 continue
             segment_voice_name = str(seg.get("voice_name") or voice_name).strip() or voice_name
-            seg_wav = os.path.join(tmp_dir, f"seg_{global_idx:04d}_base.wav")
             cache_key = self._segment_cache_key(text=txt, voice_name=segment_voice_name, provider_speed=provider_speed)
+            # Cache content must not change when cue indices shift or a single
+            # row is edited. Every writer (including preview) uses this key.
+            seg_wav = os.path.join(tmp_dir, f"tts_{cache_key}.wav")
             cache_entry = manifest_segments.get(str(global_idx), {})
             cached_wav = str(cache_entry.get("wav_path", "")).strip()
             cached_key = str(cache_entry.get("cache_key", "")).strip()
@@ -1447,6 +1397,7 @@ class VoiceWorkflow:
                     "global_idx": global_idx,
                     "text": txt,
                     "wav_path": seg_wav,
+                    "staging_path": os.path.join(tmp_dir, f"tts_{cache_key}_{uuid.uuid4().hex}.partial.wav"),
                     "cache_key": cache_key,
                     "voice_name": segment_voice_name,
                 }
@@ -1516,7 +1467,7 @@ class VoiceWorkflow:
                     executor.submit(
                         self.engine_runtime.synthesize_segment,
                         text=job["text"],
-                        wav_path=job["wav_path"],
+                        wav_path=job["staging_path"],
                         voice=job["voice_name"],
                         speed=provider_speed,
                         tmp_dir=tmp_dir,
@@ -1539,21 +1490,22 @@ class VoiceWorkflow:
                     seg_wav = str(job["wav_path"])
                     try:
                         future.result()
+                        if self._probe_wav_duration_seconds(job["staging_path"]) <= 0:
+                            raise ValueError("Generated voice is empty.")
+                        os.replace(job["staging_path"], seg_wav)
                     except Exception as exc:
+                        try:
+                            if os.path.exists(job["staging_path"]):
+                                os.remove(job["staging_path"])
+                        except OSError:
+                            pass
                         preview = " ".join(txt.split())
                         if len(preview) > 120:
                             preview = preview[:117] + "..."
+                        failures.append(f"Cue {idx + 1}: {preview} — {exc}")
                         if on_progress:
-                            on_progress(f"[TTS Warning] Segment {idx + 1} failed, using silence placeholder.")
-                        target_duration = max(
-                            0.2,
-                            float(segments[idx].get("end", 0.0)) - float(segments[idx].get("start", 0.0)),
-                        )
-                        self._write_silence_wav(seg_wav, target_duration)
-                        print(
-                            f"[Voice Workflow] TTS failed at subtitle segment {idx + 1}: "
-                            f"\"{preview}\". Using silence placeholder. Error: {exc}"
-                        )
+                            on_progress(f"[TTS Warning] Cue {idx + 1} failed; regenerate to retry.")
+                        continue
                     manifest_segments[str(job["global_idx"])] = {
                         "cache_key": str(job["cache_key"]),
                         "wav_path": seg_wav,
@@ -1590,6 +1542,8 @@ class VoiceWorkflow:
         manifest["segments"] = manifest_segments
         manifest["by_cache_key"] = manifest_by_cache_key
         self._save_manifest(tmp_dir, manifest)
+        if failures:
+            raise RuntimeError("Voice generation failed; no silent placeholders were saved.\n" + "\n".join(failures[:10]))
         return wavs
 
     def prime_tts_cache(
@@ -1728,14 +1682,6 @@ class VoiceWorkflow:
             provider_speed=provider_speed,
         )
         self._save_pre_speed_ratios(segments=segments, wavs=wavs)
-        wavs = self._apply_safe_timing_polish(
-            segments=segments,
-            wavs=wavs,
-            tmp_dir=tmp_dir,
-            voice_speed=residual_speed,
-            sync_mode=timing_sync_mode,
-        )
-        self._log_segment_fit_metrics(segments=segments, wavs=wavs)
 
         if cancellation_check and cancellation_check():
             raise InterruptedError("Voice workflow cancelled by user")
@@ -1755,29 +1701,12 @@ class VoiceWorkflow:
             except Exception:
                 on_progress("Resolving voice boundary collisions...")
 
-        segments, wavs = self._apply_deficit_timing_polish(
-            segments=segments,
-            wavs=wavs,
-            tmp_dir=tmp_dir,
-            sync_mode=timing_sync_mode,
-        )
-        wavs = self._fit_dense_english_voice_runs(
-            segments=segments,
-            wavs=wavs,
-            tmp_dir=tmp_dir,
-            sync_mode=timing_sync_mode,
-            voice_name=voice_name,
-            requested_speed=safe_voice_speed,
-        )
-        wavs = self._enforce_non_overlapping_voice_windows(
-            segments=segments,
-            wavs=wavs,
-            tmp_dir=tmp_dir,
-        )
-        self._extend_segment_ends_to_audio(
-            segments=segments,
-            wavs=wavs,
-            sync_mode=timing_sync_mode,
+        from services.voice_timing_service import align_voice_clips
+        wavs = align_voice_clips(
+            segments=segments, wavs=wavs, engine=self.engine_runtime,
+            tmp_dir=tmp_dir, mode=timing_sync_mode,
+            requested_speed=safe_voice_speed, provider_speed=provider_speed,
+            cancellation_check=cancellation_check,
         )
 
         synth_elapsed = time.perf_counter() - synth_started
@@ -1804,7 +1733,7 @@ class VoiceWorkflow:
             except Exception:
                 on_progress("Assembling final voice track (voice_vi.wav)...")
 
-        voice_track = os.path.join(tmp_dir, "voice_vi.wav")
+        voice_track = os.path.join(tmp_dir, f"voice_{uuid.uuid4().hex}.wav")
         build_started = time.perf_counter()
         self.engine_runtime.build_voice_track(
             segments=segments,

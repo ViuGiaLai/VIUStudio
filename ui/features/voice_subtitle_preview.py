@@ -472,6 +472,9 @@ class VoiceSubtitlePreviewMixin:
                 )
             return
 
+        if hasattr(self, "preview_controller") and not self.preview_controller._check_audio_freshness(voice_path):
+            return
+
         source_path = (
             (self.resolve_canonical_video_path() if hasattr(self, "resolve_canonical_video_path") else (self.video_path_edit.text().strip() if hasattr(self, "video_path_edit") else ""))
             or getattr(self, "last_translated_srt_path", "")

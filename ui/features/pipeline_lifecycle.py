@@ -834,6 +834,7 @@ class PipelineLifecycleMixin:
 
         updated = False
         grouped_updates = {}
+        indexed_updates = {}
         positional_updates = []
         for seg in list(voice_segments or []):
             tts_text = ' '.join(str((seg or {}).get("tts_text") or (seg or {}).get("text") or "").split()).strip()
@@ -869,16 +870,24 @@ class PipelineLifecycleMixin:
                 "_audio_start": new_audio_start,
                 "_audio_end": new_audio_end,
             }
+            try:
+                source_index = int((seg or {}).get("_voice_source_index"))
+            except (TypeError, ValueError):
+                source_index = -1
             if group_id:
                 grouped_updates[group_id] = payload
+            elif source_index >= 0:
+                indexed_updates[source_index] = payload
             else:
                 positional_updates.append(payload)
 
         positional_index = 0
-        for seg in source_segments:
+        for source_index, seg in enumerate(source_segments):
             group_id = str((seg or {}).get("tts_group_id") or "").strip()
             if group_id and group_id in grouped_updates:
                 next_payload = grouped_updates[group_id]
+            elif source_index in indexed_updates:
+                next_payload = indexed_updates[source_index]
             elif positional_index < len(positional_updates):
                 next_payload = positional_updates[positional_index]
                 positional_index += 1
@@ -895,9 +904,8 @@ class PipelineLifecycleMixin:
             seg["action_taken"] = next_payload["action_taken"]
             seg["ratio"] = next_payload["ratio"]
             seg["attempt_count"] = next_payload["attempt_count"]
-            # Keep source/timeline start/end immutable.  TTS can be queued
-            # after a dense cue, but that scheduling belongs in audio metadata
-            # and must never move the burned-in subtitle or all later cues.
+            # Keep source/timeline start/end immutable. Voice is fitted inside
+            # this window and must never move the burned-in subtitle.
             new_audio_start = next_payload.get("_audio_start")
             if new_audio_start is not None:
                 if seg.get("_audio_start") != new_audio_start:
@@ -1007,19 +1015,26 @@ class PipelineLifecycleMixin:
             self._sync_timeline_mute_to_gui()
             self.persist_current_timeline_project_data()
             # Regenerate the project SRT from the unchanged visual subtitle
-            # timings. TTS queue placement is stored separately as metadata.
+            # timings. Voice placement remains anchored to those same cues.
             self._regenerate_translated_srt_from_segments()
             self.schedule_live_subtitle_preview_refresh()
             self.sync_segment_editor_rows()
         if self.current_project_state:
             self.current_project_state.set_setting("voice_track_partial", False)
-            voice_signature = self.build_current_voice_signature(
+            current_signature = self.build_current_voice_signature(
                 segments=self._get_voiceover_segments(),
                 background_path=self.resolve_background_audio_path(),
             )
-            if voice_signature:
-                self.current_project_state.set_setting("voice_signature", voice_signature)
-                self.project_service.save_project(self.current_project_state)
+            generated_signature = str(getattr(self, "_pending_voice_signature", "") or "")
+            # Do not mark this output fresh when subtitles were edited while a
+            # long synthesis job was still running.
+            if generated_signature and current_signature == generated_signature:
+                self.current_project_state.set_setting("voice_signature", generated_signature)
+            else:
+                self.current_project_state.set_setting("voice_track_partial", True)
+                self.current_project_state.settings.pop("voice_signature", None)
+                self.log("[Voiceover] Subtitles changed during generation; regenerate voice before export.")
+            self.project_service.save_project(self.current_project_state)
         self._voiceover_force_refresh = False
         self._pending_voice_signature = ""
         self._pending_voice_background_path = ""

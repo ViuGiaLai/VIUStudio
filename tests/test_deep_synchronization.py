@@ -16,10 +16,18 @@ from app.layers.timeline import Timeline, Track
 from app.workflows.export_workflow import ExportWorkflow
 from app.core.models.segment import Segment
 from app.services.segment_service import SegmentService
+from app.services.project_service import ProjectService
 from core.state.project_state import ProjectState
 
 
 class DeepSynchronizationTests(unittest.TestCase):
+    def test_zero_volume_is_not_signature_equivalent_to_default_volume(self):
+        service = ProjectService(str(ROOT) if "ROOT" in globals() else os.getcwd())
+        segments = [{"start": 0.0, "end": 1.0, "text": "Hello"}]
+        muted = service.build_voice_signature(segments, original_volume=0, dub_volume=0)
+        defaults = service.build_voice_signature(segments, original_volume=50, dub_volume=100)
+        self.assertNotEqual(muted, defaults)
+
     def test_hidden_track_is_skipped_during_export(self):
         """When track.visible is False, export must ignore its layers."""
         with tempfile.TemporaryDirectory() as temp_dir:

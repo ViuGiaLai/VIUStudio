@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import tempfile
 
 from runtime_paths import app_path
 
@@ -27,12 +28,17 @@ def load_manifest(tmp_dir: str) -> dict:
 
 def save_manifest(tmp_dir: str, manifest: dict) -> None:
     path = manifest_path(tmp_dir)
-    with open(path, "w", encoding="utf-8") as handle:
+    os.makedirs(tmp_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=tmp_dir,
+                                     suffix=".json", delete=False) as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        staging = handle.name
+    os.replace(staging, path)
 
 
 def segment_cache_key(*, text: str, voice_name: str, provider_speed: float) -> str:
-    payload = f"{voice_name}|{provider_speed:.3f}|{text.strip()}"
+    # v2 retires positional WAVs and silence cached as successful synthesis.
+    payload = f"content-v2|{voice_name}|{provider_speed:.6f}|{text.strip()}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 

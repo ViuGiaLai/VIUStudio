@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import traceback
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -1099,14 +1100,22 @@ class SegmentAudioPreviewWorker(QThread):
             )
             residual_speed = (requested_speed / provider_speed) if provider_speed > 0.0 else requested_speed
 
-            base_wav_path = os.path.join(cache_temp_dir, f"seg_{self.index:04d}_base.wav")
+            cache_key = segment_cache_key(text=self.text, voice_name=self.voice_name,
+                                          provider_speed=provider_speed)
+            base_wav_path = os.path.join(cache_temp_dir, f"tts_{cache_key}.wav")
+            import uuid
+            staging_path = os.path.join(cache_temp_dir, f"tts_{uuid.uuid4().hex}.partial.wav")
             engine.synthesize_segment(
                 text=self.text,
-                wav_path=base_wav_path,
+                wav_path=staging_path,
                 voice=self.voice_name,
                 speed=provider_speed,
                 tmp_dir=cache_temp_dir,
             )
+            from services.voice_timing_service import wav_duration
+            if wav_duration(staging_path) <= 0:
+                raise ValueError("Generated voice is empty.")
+            os.replace(staging_path, base_wav_path)
 
             manifest = load_manifest(cache_temp_dir)
             manifest_segments = dict(manifest.get("segments", {}) or {})
@@ -1286,6 +1295,7 @@ class VoiceExportWorker(QThread):
         self.bitrate = str(bitrate or "256k").strip()
 
     def run(self):
+        partial_path = ""
         try:
             self.progress.emit(10, "Preparing audio export...")
             if not self.input_wav or not os.path.exists(self.input_wav):
@@ -1299,7 +1309,11 @@ class VoiceExportWorker(QThread):
             if self.output_path.lower().endswith(".wav"):
                 self.progress.emit(50, "Copying WAV audio...")
                 if os.path.abspath(self.input_wav) != os.path.abspath(self.output_path):
-                    shutil.copy2(self.input_wav, self.output_path)
+                    partial_path = os.path.join(
+                        out_dir, f".{os.path.basename(self.output_path)}.{uuid.uuid4().hex}.partial.wav"
+                    )
+                    shutil.copy2(self.input_wav, partial_path)
+                    os.replace(partial_path, self.output_path)
                 self.progress.emit(100, "WAV audio exported successfully.")
                 self.finished.emit(True, self.output_path, "")
                 return
@@ -1310,6 +1324,9 @@ class VoiceExportWorker(QThread):
                 return
 
             self.progress.emit(30, "Encoding MP3 audio...")
+            partial_path = os.path.join(
+                out_dir, f".{os.path.basename(self.output_path)}.{uuid.uuid4().hex}.partial.mp3"
+            )
             cmd = [
                 ffmpeg,
                 "-y",
@@ -1322,11 +1339,12 @@ class VoiceExportWorker(QThread):
                 self.bitrate,
                 "-ar",
                 "44100",
-                self.output_path,
+                partial_path,
             ]
             kwargs = subprocess_hidden_kwargs()
             proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-            if proc.returncode == 0 and os.path.exists(self.output_path) and os.path.getsize(self.output_path) > 0:
+            if proc.returncode == 0 and os.path.exists(partial_path) and os.path.getsize(partial_path) > 0:
+                os.replace(partial_path, self.output_path)
                 self.progress.emit(100, "MP3 audio exported successfully.")
                 self.finished.emit(True, self.output_path, "")
             else:
@@ -1334,3 +1352,9 @@ class VoiceExportWorker(QThread):
                 self.finished.emit(False, "", err)
         except Exception as exc:
             self.finished.emit(False, "", str(exc))
+        finally:
+            if partial_path and os.path.exists(partial_path):
+                try:
+                    os.remove(partial_path)
+                except OSError:
+                    pass

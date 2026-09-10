@@ -203,7 +203,10 @@ class ExportWorkflow:
         command += [
             "-c:v", "copy", *audio_args,
             "-t", f"{duration:.6f}",
-            "-avoid_negative_ts", "make_zero",
+            # Do not use avoid_negative_ts=make_zero here. H.264 B-frame DTS
+            # can be negative even when presentation starts at zero; shifting
+            # the whole mux to hide that DTS delayed replacement audio by one
+            # AAC/frame interval (measured 64-100 ms).
             "-movflags", "+faststart",
             partial,
         ]

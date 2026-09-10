@@ -1,4 +1,5 @@
 import os
+import math
 import subprocess
 import tempfile
 import wave
@@ -545,40 +546,45 @@ def build_voice_track_from_srt_segments(
             return s.get(key, default)
         return getattr(s, key, default)
 
-    # Resolve a real playback schedule before allocating the output. Imported
-    # subtitle timings can be much denser than their translated speech. Never
-    # solve that mismatch by truncating a sentence: serialize the next clip.
+    # Assembly consumes an already fitted schedule. Never queue a late sentence
+    # here: that used to compound into seconds of drift across dense cues.
     placements: list[float] = []
     previous_audio_end = 0.0
-    collision_guard_seconds = 0.04
     max_end = 0.0
     for seg, wav_path in zip(segments, tts_wav_paths):
-        requested_start = float(
-            _seg_val(seg, "_audio_start", _seg_val(seg, "start", 0.0)) or 0.0
-        )
-        start = requested_start
-        if previous_audio_end > 0.0:
-            start = max(start, previous_audio_end + collision_guard_seconds)
-        placements.append(start)
+        requested_start = float(_seg_val(seg, "start", 0.0) or 0.0)
         declared_end = float(_seg_val(seg, "end", 0.0) or 0.0)
+        if not math.isfinite(requested_start) or not math.isfinite(declared_end):
+            raise ValueError("Voice cue timing must be finite.")
+        if requested_start < 0 or declared_end <= requested_start:
+            raise ValueError("Voice cue has an invalid subtitle window.")
+        start = requested_start
+        placements.append(start)
         actual_end = declared_end
-        if wav_path and os.path.exists(wav_path):
-            try:
-                measured_end = start + _probe_wav_duration_seconds(wav_path)
-                actual_end = max(actual_end, measured_end)
-                previous_audio_end = measured_end
-            except (OSError, wave.Error):
-                pass
+        cue_text = str(_seg_val(seg, "dubbing_vi", "") or _seg_val(seg, "text", "") or "").strip()
+        if cue_text and not wav_path and not bool(_seg_val(seg, "tts_suppressed", False)):
+            raise ValueError("A spoken subtitle cue has no generated voice clip.")
+        if wav_path:
+            if not os.path.isfile(wav_path):
+                raise FileNotFoundError(f"Voice clip not found: {wav_path}")
+            if start < previous_audio_end - 0.002:
+                raise ValueError("Voice clips overlap. Align voice to subtitle timing before export.")
+            measured_end = start + _probe_wav_duration_seconds(wav_path)
+            if measured_end > declared_end + 0.002:
+                raise ValueError("Voice exceeds subtitle end. Regenerate voice with timing alignment.")
+            actual_end = max(actual_end, measured_end)
+            previous_audio_end = measured_end
         max_end = max(max_end, declared_end, actual_end)
     if total_duration_ms is None:
-        total_duration_ms = int(max_end * 1000) + 500
+        total_duration_ms = int(round(max_end * 1000))
     else:
         # A regenerated TTS clip may be slightly longer than its subtitle slot.
         # Size once before allocating so a disk memmap never needs a costly copy.
-        total_duration_ms = max(int(total_duration_ms), int(max_end * 1000) + 500)
+        if int(total_duration_ms) < int(round(max_end * 1000)):
+            raise ValueError("Output duration would cut off subtitle speech.")
 
     sr = 16000
-    total_samples = int(max(0, total_duration_ms) * sr / 1000) + sr  # add 1s safety buffer
+    total_samples = int(round(max(0, total_duration_ms) * sr / 1000))
     os.makedirs(os.path.dirname(output_wav_path) or ".", exist_ok=True)
     duration_seconds = total_samples / sr
     use_disk = duration_seconds > VOICE_TRACK_IN_MEMORY_MAX_SECONDS
@@ -604,39 +610,17 @@ def build_voice_track_from_srt_segments(
         for idx, (seg, wav_path) in enumerate(zip(segments, tts_wav_paths)):
             if not wav_path or not os.path.exists(wav_path):
                 continue
-            start_ms = int(placements[idx] * 1000)
-            end_ms = int(float(_seg_val(seg, "end", 0.0) or 0.0) * 1000)
-            max_len = max(0, end_ms - start_ms)
-
+            start_ms = placements[idx] * 1000
             try:
                 clip = AudioSegment.from_file(wav_path)
-                clip = clip.set_frame_rate(sr).set_channels(1)
+                clip = clip.set_frame_rate(sr).set_channels(1).set_sample_width(2)
                 if gain_db:
                     clip = clip + gain_db
 
-                if max_len > 0:
-                    clip_len = len(clip)
-                    if clip_len < max_len:
-                        gap_ms = max_len - clip_len
-                        clip_end_ms = start_ms + clip_len
-                        if idx + 1 < len(segments):
-                            next_start_ms = int(float(_seg_val(segments[idx + 1], "start", 0.0) or 0.0) * 1000)
-                            next_gap = next_start_ms - clip_end_ms
-                            if 0 < next_gap <= 20:
-                                overlap_ms = 10
-                                extend_ms = min(next_gap + overlap_ms, clip_len)
-                                clip = clip.fade_out(duration=extend_ms)
-                                clip = clip + AudioSegment.silent(duration=extend_ms, frame_rate=sr)
-                                gap_ms = 0
-                        if gap_ms > 0:
-                            fade_ms = min(gap_ms, 50)
-                            clip = clip.fade_out(duration=fade_ms)
-                            silent_ms = gap_ms - fade_ms
-                            if silent_ms > 0:
-                                clip = clip + AudioSegment.silent(duration=silent_ms, frame_rate=sr)
-
+                # The destination is already silent between cues. Do not fade
+                # sentence endings or append padding that changes scheduling.
                 clip_samples = np.frombuffer(clip.raw_data, dtype=np.int16)
-                start_sample = int(max(0, start_ms) * sr / 1000)
+                start_sample = int(round(max(0, start_ms) * sr / 1000))
                 end_sample = min(total_samples, start_sample + len(clip_samples))
                 if end_sample > start_sample:
                     usable = end_sample - start_sample
@@ -651,7 +635,7 @@ def build_voice_track_from_srt_segments(
                     else:
                         audio_buffer[start_sample:end_sample] += incoming
             except Exception as e:
-                print(f"[audio_mixer] Error processing segment {idx} wav: {e}")
+                raise RuntimeError(f"Could not assemble voice cue {idx + 1}: {e}") from e
 
         # Write in small chunks.  The previous full-buffer astype().tobytes()
         # temporarily allocated another ~550 MB for a five-hour mono track.

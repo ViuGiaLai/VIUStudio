@@ -415,14 +415,14 @@ class ProjectService:
         payload = {
             # Bump whenever timing-fit semantics change so projects do not
             # silently reuse a voice track produced by an older algorithm.
-            "voice_timing_revision": 5,
+            "voice_timing_revision": 7,
             "audio_handling_mode": str(audio_handling_mode or "fast").strip().lower(),
             "voice_name": str(voice_name or "").strip(),
             "voice_speed": round(safe_voice_speed, 3),
             "timing_sync_mode": str(timing_sync_mode or "off").strip().lower(),
             "background": self._file_signature(background_path),
-            "original_volume": int(original_volume or 50),
-            "dub_volume": int(dub_volume or 100),
+            "original_volume": int(50 if original_volume is None else original_volume),
+            "dub_volume": int(100 if dub_volume is None else dub_volume),
             "segments": [
                 {
                     "start": round(float((seg or {}).get("start", 0.0) or 0.0), 3),
@@ -433,6 +433,7 @@ class ProjectService:
                     # the editor.  They must participate in this signature so
                     # an assignment change cannot reuse an old voice track.
                     "voice_name": str((seg or {}).get("voice_name") or "").strip(),
+                    "voice_speed": (seg or {}).get("voice_speed"),
                 }
                 for seg in list(segments or [])
             ],

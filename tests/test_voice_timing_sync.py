@@ -19,6 +19,7 @@ from app.audio_mixer import (
     mute_voice_windows,
 )
 from app.workflows.voice_workflow import VoiceWorkflow
+from app.services.voice_timing_service import align_voice_clips
 
 
 def _make_silent_wav(path: str, duration: float, sample_rate: int = 16000) -> None:
@@ -42,6 +43,42 @@ def _make_tone_wav(path: str, duration: float, sample_rate: int = 16000) -> None
 
 
 class VoiceTimingSyncTests(unittest.TestCase):
+    def test_prepare_keeps_silent_rows_and_stable_source_identity_when_sorting(self):
+        workflow = VoiceWorkflow(str(ROOT))
+        prepared = workflow._prepare_segments_for_tts(
+            [
+                {"start": 2.0, "end": 3.0, "text": "Second", "original_text": "第二"},
+                {"start": 0.0, "end": 1.0, "text": "[music]", "original_text": "[music]"},
+            ],
+            log=False,
+        )
+
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual([item["_voice_source_index"] for item in prepared], [1, 0])
+        self.assertTrue(prepared[0]["tts_suppressed"])
+        self.assertEqual(workflow._segment_tts_text(prepared[0]), "")
+
+    def test_smart_mode_automatically_speeds_extreme_cue_without_queueing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "long.wav")
+            _make_tone_wav(source, 2.4)
+            segments = [{"start": 4.0, "end": 5.0, "text": "A complete long sentence"}]
+            workflow = VoiceWorkflow(str(ROOT))
+
+            fitted = align_voice_clips(
+                segments=segments,
+                wavs=[source],
+                engine=workflow.engine_runtime,
+                tmp_dir=folder,
+                mode="smart",
+            )
+
+            self.assertLessEqual(ffprobe_wav_duration(fitted[0]), 1.002)
+            self.assertEqual(segments[0]["_audio_start"], 4.0)
+            self.assertLessEqual(segments[0]["_audio_end"], 5.002)
+            self.assertGreater(segments[0]["_tts_metrics"]["fit_speed_ratio"], 2.0)
+            self.assertNotIn("voice_queue_delay", segments[0]["_tts_metrics"])
+
     def test_vietnamese_smart_fit_does_not_overcompress_short_syllables(self):
         with tempfile.TemporaryDirectory() as folder:
             source = os.path.join(folder, "vietnamese_source.wav")
@@ -133,7 +170,7 @@ class VoiceTimingSyncTests(unittest.TestCase):
             self.assertEqual(result, capped)
             self.assertAlmostEqual(ffprobe_wav_duration(capped), 1.0, delta=0.05)
 
-    def test_voice_workflow_queues_next_cue_without_cutting_audio(self):
+    def test_voice_workflow_fits_each_cue_without_shifting_the_next_one(self):
         with tempfile.TemporaryDirectory() as folder:
             first = os.path.join(folder, "first.wav")
             second = os.path.join(folder, "second.wav")
@@ -151,13 +188,12 @@ class VoiceTimingSyncTests(unittest.TestCase):
                 tmp_dir=folder,
             )
 
-            self.assertEqual(wavs[0], first)
-            self.assertAlmostEqual(ffprobe_wav_duration(wavs[0]), 2.0, delta=0.03)
-            self.assertAlmostEqual(segments[0]["_audio_end"], 2.0, delta=0.03)
-            self.assertAlmostEqual(segments[1]["_audio_start"], 2.04, delta=0.03)
-            self.assertIn("voice_queue", segments[1]["action_taken"])
+            self.assertLessEqual(ffprobe_wav_duration(wavs[0]), 0.802)
+            self.assertAlmostEqual(segments[0]["_audio_start"], 0.0, delta=0.001)
+            self.assertAlmostEqual(segments[1]["_audio_start"], 1.0, delta=0.001)
+            self.assertNotIn("voice_queue", segments[1].get("action_taken", ""))
 
-    def test_mixer_serializes_dense_cues_without_losing_first_sentence_tail(self):
+    def test_mixer_rejects_unfitted_dense_cues_instead_of_shifting_them(self):
         with tempfile.TemporaryDirectory() as folder:
             first = os.path.join(folder, "first.wav")
             second = os.path.join(folder, "second.wav")
@@ -169,26 +205,12 @@ class VoiceTimingSyncTests(unittest.TestCase):
                 {"start": 1.0, "end": 1.5},
             ]
 
-            build_voice_track_from_srt_segments(
-                segments=segments,
-                tts_wav_paths=[first, second],
-                output_wav_path=output,
-            )
-
-            with wave.open(output, "rb") as rendered:
-                rate = rendered.getframerate()
-                rendered.setpos(int(1.1 * rate))
-                first_tail = rendered.readframes(int(0.2 * rate))
-                rendered.setpos(int(2.1 * rate))
-                second_body = rendered.readframes(int(0.2 * rate))
-            self.assertGreater(
-                max(abs(value) for value in struct.unpack(f"<{len(first_tail) // 2}h", first_tail)),
-                0,
-            )
-            self.assertGreater(
-                max(abs(value) for value in struct.unpack(f"<{len(second_body) // 2}h", second_body)),
-                0,
-            )
+            with self.assertRaisesRegex(ValueError, "exceeds subtitle end"):
+                build_voice_track_from_srt_segments(
+                    segments=segments,
+                    tts_wav_paths=[first, second],
+                    output_wav_path=output,
+                )
 
     def test_editing_one_subtitle_mutes_only_that_voice_window(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -293,17 +315,15 @@ class VoiceTimingSyncTests(unittest.TestCase):
             segments = [{"start": 1.0, "end": 3.0, "text": "Long speech"}]
             workflow = VoiceWorkflow(str(ROOT))
 
-            workflow._extend_segment_ends_to_audio(
-                segments=segments,
-                wavs=[source],
-                sync_mode="Smart",
-            )
-
+            with self.assertRaisesRegex(ValueError, "must be aligned"):
+                workflow._extend_segment_ends_to_audio(
+                    segments=segments,
+                    wavs=[source],
+                    sync_mode="Smart",
+                )
             self.assertAlmostEqual(segments[0]["end"], 3.0, delta=0.02)
-            self.assertNotIn("_original_end", segments[0])
-            self.assertNotIn("subtitle_sync", segments[0].get("action_taken", ""))
 
-    def test_long_speech_never_extends_visual_subtitle_over_next_cue(self):
+    def test_long_speech_is_fitted_without_moving_visual_or_audio_cues(self):
         with tempfile.TemporaryDirectory() as folder:
             first = os.path.join(folder, "first_long.wav")
             second = os.path.join(folder, "second.wav")
@@ -315,22 +335,22 @@ class VoiceTimingSyncTests(unittest.TestCase):
             ]
             workflow = VoiceWorkflow(str(ROOT))
 
-            workflow._enforce_non_overlapping_voice_windows(
+            fitted = workflow._enforce_non_overlapping_voice_windows(
                 segments=segments,
                 wavs=[first, second],
                 tmp_dir=folder,
             )
             workflow._extend_segment_ends_to_audio(
                 segments=segments,
-                wavs=[first, second],
+                wavs=fitted,
                 sync_mode="Smart",
             )
 
-            self.assertAlmostEqual(segments[0]["_audio_end"], 4.0, delta=0.02)
+            self.assertLessEqual(ffprobe_wav_duration(fitted[0]), 1.002)
             self.assertAlmostEqual(segments[0]["end"], 2.0, delta=0.02)
             self.assertAlmostEqual(segments[1]["start"], 2.2, delta=0.02)
-            self.assertAlmostEqual(segments[0]["_audio_end"], 4.0, delta=0.02)
-            self.assertAlmostEqual(segments[1]["_audio_start"], 4.04, delta=0.02)
+            self.assertAlmostEqual(segments[0]["_audio_start"], 1.0, delta=0.002)
+            self.assertAlmostEqual(segments[1]["_audio_start"], 2.2, delta=0.002)
 
     def test_requested_voice_speed_is_applied_before_final_smart_sync(self):
         with tempfile.TemporaryDirectory() as folder:

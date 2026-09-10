@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 import sys
+import wave
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
@@ -27,7 +28,7 @@ class TestVoiceExportWorker(unittest.TestCase):
         self.test_wav = os.path.join(self.temp_dir, "test_voice.wav")
         import subprocess
         subprocess.run(
-            [ffmpeg, "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "1", self.test_wav],
+            [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1", self.test_wav],
             capture_output=True,
         )
 
@@ -51,6 +52,27 @@ class TestVoiceExportWorker(unittest.TestCase):
         self.assertEqual(path, output_mp3)
         self.assertTrue(os.path.exists(output_mp3))
         self.assertGreater(os.path.getsize(output_mp3), 0)
+
+        # Decode the actual MP3 and compare it at sample zero. This catches
+        # encoder-delay or padding mistakes that would move every spoken cue.
+        decoded_wav = os.path.join(self.temp_dir, "decoded_voice.wav")
+        ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
+        import subprocess
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", output_mp3,
+             "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", decoded_wav],
+            capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with wave.open(self.test_wav, "rb") as source_stream:
+            source_samples = source_stream.readframes(source_stream.getnframes())
+        with wave.open(decoded_wav, "rb") as decoded_stream:
+            decoded_samples = decoded_stream.readframes(decoded_stream.getnframes())
+        import numpy as np
+        source = np.frombuffer(source_samples, dtype=np.int16).astype(np.float64)
+        decoded = np.frombuffer(decoded_samples, dtype=np.int16).astype(np.float64)
+        self.assertEqual(len(decoded), len(source))
+        self.assertGreater(float(np.corrcoef(source, decoded)[0, 1]), 0.99)
 
     def test_voice_export_to_wav(self):
         output_wav = os.path.join(self.temp_dir, "output_copy.wav")
@@ -211,4 +233,3 @@ class TestVoiceExportUI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

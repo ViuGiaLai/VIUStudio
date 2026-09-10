@@ -234,13 +234,9 @@ class ProjectStateMixin:
                     or self.processed_artifacts.get("mixed_vi")
                 )
             )
-            voice_signature = self.build_current_voice_signature(
-                segments=self._get_voiceover_segments(),
-                background_path=self.resolve_background_audio_path(),
-            )
-            if has_generated_voice and voice_signature:
-                state.set_setting("voice_signature", voice_signature)
-            elif not has_generated_voice:
+            # Saving edits must not certify old samples against new text or
+            # timing. Only the successful TTS completion writes this signature.
+            if not has_generated_voice:
                 state.settings.pop("voice_signature", None)
 
         # Collect and save all current project settings
