@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import json
 import re
 import time
 import wave
@@ -1743,6 +1744,26 @@ class VoiceWorkflow:
         )
         build_elapsed = time.perf_counter() - build_started
 
+        # Keep generation provenance beside the exact output, independent of
+        # later UI selections and overwritten cache manifests.
+        report_path = voice_track + ".json"
+        with open(report_path, "w", encoding="utf-8") as report_file:
+            json.dump({
+                "voice_name": voice_name,
+                "requested_speed": safe_voice_speed,
+                "timing_sync_mode": timing_sync_mode,
+                "voice_track": voice_track,
+                "cues": [{
+                    "index": index + 1,
+                    "voice_name": str(segment.get("voice_name") or voice_name),
+                    "text": self._segment_tts_text(segment),
+                    "start": segment["start"], "end": segment["end"],
+                    "audio_start": segment.get("_audio_start"),
+                    "audio_end": segment.get("_audio_end"),
+                    "metrics": segment.get("_tts_metrics", {}),
+                } for index, segment in enumerate(segments)],
+            }, report_file, ensure_ascii=False, indent=2)
+
         if cancellation_check and cancellation_check():
             raise InterruptedError("Voice workflow cancelled by user")
 
@@ -1784,6 +1805,7 @@ class VoiceWorkflow:
 
         return {
             "voice_track": voice_track,
+            "voice_report": report_path,
             "mixed_path": mixed,
             "segments": segments,
         }

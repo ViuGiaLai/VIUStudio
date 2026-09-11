@@ -112,6 +112,7 @@ class SetupWizard(QDialog):
         self.tts_engine_combo = QComboBox(self.voice_options)
         self.tts_engine_combo.addItem("Select an engine…", "")
         self.tts_engine_combo.addItem("Piper [VI/EN] · Fast · Offline", "piper")
+        self.tts_engine_combo.addItem("Edge TTS [VI/EN] · Natural · Online", "edge")
         self.tts_engine_combo.addItem("ZeroTTS [VI] · Natural · Not installed", "zerotts")
         self.tts_engine_combo.addItem("KorvaTTS [VI/EN] · Natural / Local · Not installed", "korvatts")
         self.tts_engine_combo.addItem("Kokoro-82M [EN] · Natural · Not installed", "kokoro")

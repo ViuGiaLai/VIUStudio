@@ -337,13 +337,26 @@ class SpeakerVoiceMixin:
         assignments = self._speaker_voice_assignments()
         if not assignments:
             return [dict(segment) for segment in segments or []]
+        # Speaker overrides are scoped to the currently selected engine and
+        # output language.  A saved Piper assignment must not survive an
+        # engine switch and silently override the user's new Edge/Zero/Kokoro
+        # choice.  The current catalog is already filtered by both values.
+        available_voices = {
+            self._voice_catalog_data_value(entry)
+            for entry in list(getattr(self, "voice_catalog_entries", []) or [])
+            if isinstance(entry, dict) and self._voice_catalog_data_value(entry)
+        }
         resolved = []
         for segment in segments or []:
             item = dict(segment)
             speaker = str(item.get("speaker", "") or "").strip()
             voice = str((assignments.get(speaker, {}) or {}).get("voice", "") or "").strip()
-            if voice:
+            if voice and voice in available_voices:
                 item["voice_name"] = voice
+            else:
+                # Remove a stale materialized override as well; callers may
+                # pass segments copied from an earlier engine run.
+                item.pop("voice_name", None)
             resolved.append(item)
         return resolved
 

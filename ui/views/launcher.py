@@ -8,12 +8,13 @@ import re
 import tempfile
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -152,14 +153,13 @@ class ProjectCard(QFrame):
         self._orig_pixmap = None
         self.setObjectName("projectCard")
         self.setMinimumSize(220, 210)
-        self.setMaximumWidth(300)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("""
             QFrame#projectCard {
-                background-color: #0f172a;
-                border: 1px solid #1e293b;
-                border-radius: 12px;
+                background-color: #11192b;
+                border: 1px solid #293451;
+                border-radius: 16px;
             }
             QFrame#projectCard:hover {
                 border: 1px solid #6366f1;
@@ -168,37 +168,38 @@ class ProjectCard(QFrame):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         self.thumb_label = QLabel()
         self.thumb_label.setMinimumSize(200, 120)
         self.thumb_label.setFixedHeight(125)
         self.thumb_label.setAlignment(Qt.AlignCenter)
-        self.thumb_label.setStyleSheet("background-color: #06080d; border-radius: 8px; color: #64748b; font-size: 11px;")
+        self.thumb_label.setStyleSheet("background: #0a1020; border: 1px solid #202d49; border-radius: 10px; color: #8293b3; font-size: 12px;")
         self.thumb_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(self.thumb_label)
 
         self.name_label = QLabel(display_name or os.path.basename(video_path) or "Untitled Project")
         self.name_label.setWordWrap(True)
         self.name_label.setMaximumHeight(34)
-        self.name_label.setStyleSheet("color: #f8fafc; font-size: 12px; font-weight: 600; line-height: 1.2em;")
+        self.name_label.setToolTip(self.name_label.text())
+        self.name_label.setStyleSheet("background: transparent; border: none; color: #edf2ff; font-size: 13px; font-weight: 600;")
         layout.addWidget(self.name_label)
 
         stage_text, stage_color = _project_pipeline_status(video_path, project_state_path)
         self.stage_badge = QLabel(stage_text)
         self.stage_badge.setAlignment(Qt.AlignCenter)
         self.stage_badge.setStyleSheet(
-            f"background-color: #080b11; color: {stage_color}; border: 1px solid #1e293b; "
-            "border-radius: 999px; padding: 4px 10px; font-size: 10px; font-weight: 700;"
+            f"background-color: #16263a; color: {stage_color}; border: none; "
+            "border-radius: 10px; padding: 4px 10px; font-size: 10px; font-weight: 700;"
         )
-        layout.addWidget(self.stage_badge)
+        layout.addWidget(self.stage_badge, 0, Qt.AlignLeft)
 
         self._load_thumb(thumbnail_cache_dir)
 
     def _load_thumb(self, cache_dir):
         if not self.video_path or not os.path.exists(self.video_path):
-            self.thumb_label.setText("Empty Project")
+            self.thumb_label.setText("Project workspace\nNo video preview")
             return
         thumb_path = os.path.join(cache_dir, _thumbnail_name(self.video_path))
         if not os.path.exists(thumb_path):
@@ -405,17 +406,18 @@ class LauncherWindow(QDialog):
             self.setWindowIcon(QIcon(logo))
 
         self.setWindowTitle("VIUStudio - Video Translator")
-        self.setMinimumSize(860, 560)
+        self.setMinimumSize(980, 640)
+        self.resize(1180, 780)
         self.setStyleSheet("""
             QDialog {
-                background-color: #080b11;
+                background-color: #090d19;
                 color: #cdd9e5;
                 font-family: 'Segoe UI', 'Inter', -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
             }
             #headerCard {
-                background-color: #0d121c;
-                border: 1px solid #1e293b;
-                border-radius: 14px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #171e36, stop:1 #101625);
+                border: 1px solid #35416b;
+                border-radius: 18px;
             }
             #projectCard {
                 background-color: #0f172a;
@@ -430,6 +432,10 @@ class LauncherWindow(QDialog):
                 border: none;
                 background-color: transparent;
             }
+            QLabel { background: transparent; color: #cdd9e5; }
+            QWidget#projectGrid { background: #090d19; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
             QScrollBar:vertical {
                 border: none;
                 background: #080b11;
@@ -445,8 +451,8 @@ class LauncherWindow(QDialog):
                 background: #334155;
             }
             QFrame#launcherAside {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0d121c, stop:1 #080b11);
-                border: 1px solid #1e293b;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #202044, stop:0.55 #10182b, stop:1 #0c1220);
+                border: 1px solid #373963;
                 border-radius: 18px;
             }
             QLabel#launcherEyebrow {
@@ -454,17 +460,17 @@ class LauncherWindow(QDialog):
                 letter-spacing: 1.4px;
             }
             QLabel#launcherHero {
-                color: #f8fafc; font-size: 27px; font-weight: 900;
+                color: #f8fafc; font-size: 28px; font-weight: 800;
             }
             QLabel#launcherAsideBody { color: #94a3b8; font-size: 12px; line-height: 1.4em; }
             QLabel#launcherStep {
                 color: #cbd5e1; font-size: 12px; font-weight: 700;
-                background: #131926; border: 1px solid #1e293b;
+                background: #171e34; border: 1px solid #2c3655;
                 border-radius: 10px; padding: 10px;
             }
             QLabel#launcherInstallState {
                 color: #34d399; font-size: 11px; font-weight: 700;
-                background: #064e3b; border: 1px solid #059669;
+                background: #10342f; border: 1px solid #236456;
                 border-radius: 10px; padding: 10px;
             }
             QFrame#launcherMainColumn { background: #080b11; border: none; }
@@ -477,19 +483,19 @@ class LauncherWindow(QDialog):
 
     def _build_ui(self):
         root = QHBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(16)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(22)
 
         aside = QFrame()
         aside.setObjectName("launcherAside")
-        aside.setFixedWidth(238)
+        aside.setFixedWidth(220)
         aside_layout = QVBoxLayout(aside)
         aside_layout.setContentsMargins(18, 22, 18, 18)
         aside_layout.setSpacing(12)
-        eyebrow = QLabel("VIU STUDIO / 01")
+        eyebrow = QLabel("VIU / CREATIVE STUDIO")
         eyebrow.setObjectName("launcherEyebrow")
         aside_layout.addWidget(eyebrow)
-        hero = QLabel("Make every\nframe speak.")
+        hero = QLabel("Your stories.\nMore voices.")
         hero.setObjectName("launcherHero")
         hero.setWordWrap(True)
         aside_layout.addWidget(hero)
@@ -517,13 +523,13 @@ class LauncherWindow(QDialog):
 
         header_frame = QFrame()
         header_frame.setObjectName("headerCard")
-        header = QHBoxLayout(header_frame)
-        header.setContentsMargins(18, 16, 18, 16)
-        header.setSpacing(16)
+        header = QVBoxLayout(header_frame)
+        header.setContentsMargins(22, 20, 22, 20)
+        header.setSpacing(18)
 
-        title = QLabel("VIUStudio")
+        title = QLabel("Welcome to VIUStudio")
         title.setStyleSheet("font-size: 24px; font-weight: 800; color: #f8fafc; letter-spacing: 0.3px;")
-        subtitle = QLabel("Video Translation & Voiceover Studio")
+        subtitle = QLabel("Create, translate and give your stories a voice.")
         subtitle.setStyleSheet("font-size: 12px; color: #94a3b8; font-weight: 500;")
 
         header_text = QVBoxLayout()
@@ -538,7 +544,6 @@ class LauncherWindow(QDialog):
 
         self._gpu_label = QLabel()
         self._gpu_label.setStyleSheet("font-size: 11px; color: #64748b;")
-        header_text.addWidget(self._gpu_label)
         self._update_gpu_label(has_gpu, gpu_name, cuda_ready)
 
         self._missing_label = QLabel("", self)
@@ -602,8 +607,14 @@ class LauncherWindow(QDialog):
         device_row.addWidget(self.cpu_btn)
         device_row.addWidget(self.gpu_btn)
         device_row.addStretch()
-        header_text.addLayout(device_row)
-        header.addLayout(header_text, 1)
+        device_column = QVBoxLayout()
+        device_column.addWidget(self._gpu_label)
+        device_column.addLayout(device_row)
+        heading_row = QHBoxLayout()
+        heading_row.setSpacing(18)
+        heading_row.addLayout(header_text, 1)
+        heading_row.addLayout(device_column)
+        header.addLayout(heading_row)
 
         action_rows = QVBoxLayout()
         action_rows.setSpacing(8)
@@ -674,7 +685,7 @@ class LauncherWindow(QDialog):
         self.srt_tts_btn.setMinimumWidth(135)
         self.srt_tts_btn.setCursor(Qt.PointingHandCursor)
         self.srt_tts_btn.setStyleSheet(sec_btn_style)
-        self.srt_tts_btn.setToolTip("Import SRT, tạo giọng TTS và xuất file MP3; không cần video")
+        self.srt_tts_btn.setToolTip("Turn subtitles into speech and export MP3. No video required.")
         self.srt_tts_btn.clicked.connect(self._on_srt_tts_project)
         action_row_one.addWidget(self.srt_tts_btn)
 
@@ -743,22 +754,30 @@ class LauncherWindow(QDialog):
         action_rows.addLayout(action_row_two)
         header.addLayout(action_rows)
         main_column.addWidget(header_frame)
+        glow = QGraphicsDropShadowEffect(header_frame)
+        glow.setBlurRadius(24)
+        glow.setOffset(0, 3)
+        glow.setColor(QColor(92, 83, 220, 40))
+        header_frame.setGraphicsEffect(glow)
 
-        self.section_label = QLabel("Recent Projects")
+        self.section_label = QLabel("YOUR PROJECTS  /  Pick up where you left off")
         self.section_label.setStyleSheet("font-size: 12px; font-weight: 800; color: #818cf8; letter-spacing: 0.8px; text-transform: uppercase;")
         self.section_label.setObjectName("launcherSectionLabel")
         main_column.addWidget(self.section_label)
 
         scroll = QScrollArea()
+        self.project_scroll = scroll
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         self.grid_widget = QWidget()
+        self.grid_widget.setObjectName("projectGrid")
         self.grid = QGridLayout(self.grid_widget)
-        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setContentsMargins(0, 2, 8, 8)
         self.grid.setSpacing(16)
-        self.grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.grid.setAlignment(Qt.AlignTop)
 
         scroll.setWidget(self.grid_widget)
         main_column.addWidget(scroll, 1)
@@ -985,7 +1004,7 @@ class LauncherWindow(QDialog):
         os.makedirs(self._thumbnail_dir, exist_ok=True)
 
         for i in reversed(range(self.grid.count())):
-            widget = self.grid.itemAt(i).widget()
+            widget = self.grid.takeAt(i).widget()
             if widget:
                 widget.deleteLater()
 
@@ -1022,22 +1041,37 @@ class LauncherWindow(QDialog):
             return
         self.empty_label.hide()
 
-        available_width = max(800, self.grid_widget.width(), self.width() - 48)
-        columns = max(3, min(4, available_width // 260))
         for i, proj in enumerate(existing):
             card = ProjectCard(
                 proj.get("video_path", ""), self._thumbnail_dir, self,
                 project_state_path=proj.get("project_state_path", ""),
                 display_name=proj.get("display_name", ""),
             )
-            row, col = divmod(i, max(1, columns))
-            self.grid.addWidget(card, row, col)
-            self.grid.setColumnStretch(col, 0)
-        self.grid.setColumnStretch(columns, 1)
+            self.grid.addWidget(card, i, 0)
+        self._reflow_project_cards()
+
+    def _reflow_project_cards(self):
+        if not hasattr(self, "project_scroll"):
+            return
+        cards = []
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                cards.append(item.widget())
+        available_width = max(220, self.project_scroll.viewport().width() - 8)
+        columns = max(1, min(4, (available_width + 16) // 236))
+        for col in range(max(5, self.grid.columnCount())):
+            self.grid.setColumnStretch(col, 1 if col < columns else 0)
+            self.grid.setColumnMinimumWidth(col, 0)
+        for i, card in enumerate(cards):
+            self.grid.addWidget(card, *divmod(i, columns))
+        if hasattr(self, "grid_widget"):
+            self.grid_widget.adjustSize()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._load_recent)
+        # Resizing is visual only: do not reload history or regenerate thumbnails.
+        QTimer.singleShot(0, self._reflow_project_cards)
 
     def _on_new_project(self):
         if getattr(self, "_is_accepting", False):

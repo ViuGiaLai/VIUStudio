@@ -37,8 +37,9 @@ def save_manifest(tmp_dir: str, manifest: dict) -> None:
 
 
 def segment_cache_key(*, text: str, voice_name: str, provider_speed: float) -> str:
-    # v2 retires positional WAVs and silence cached as successful synthesis.
-    payload = f"content-v2|{voice_name}|{provider_speed:.6f}|{text.strip()}"
+    # v3 retires audio cached under the requested voice when the old runtime
+    # silently synthesized a different fallback voice.
+    payload = f"content-v3|{voice_name}|{provider_speed:.6f}|{text.strip()}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 

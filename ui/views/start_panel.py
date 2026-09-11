@@ -754,11 +754,12 @@ def build_start_group(gui, left_layout):
     # users can choose the TTS model explicitly.
     gui.voice_engine_combo.addItem("Select TTS engine…", "")
     gui.voice_engine_combo.addItem("Piper [VI/EN] · Fast · Offline", "fast")
+    gui.voice_engine_combo.addItem("Edge TTS [VI/EN] · Natural · Online", "edge")
     gui.voice_engine_combo.addItem("ZeroTTS [VI] · Natural · Not installed", "zerotts")
     gui.voice_engine_combo.addItem("KorvaTTS [VI/EN] · Natural / Local · Not installed", "korvatts")
     gui.voice_engine_combo.addItem("Kokoro-82M [EN] · Natural · Not installed", "kokoro")
     gui.voice_engine_combo.setToolTip(
-        "Choose the engine explicitly. Engines marked Not installed require their runtime/model before generation."
+        "Choose the engine explicitly. Edge TTS requires Internet; engines marked Not installed require their runtime/model."
     )
     gui.voice_language_label = QLabel("Output language follows Language → Translate to")
     gui.voice_language_label.setObjectName("helperLabel")

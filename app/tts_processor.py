@@ -555,6 +555,14 @@ def preload_tts_voice(voice: str, on_progress: callable = None) -> bool:
             if v.get("provider") == provider and (v.get("provider_voice") == provider_voice or v.get("id") == provider_voice):
                 voice_entry = v
                 break
+    if not voice_entry and voice_to_search.lower().startswith("edge:"):
+        provider_voice = voice_to_search.split(":", 1)[1].strip()
+        if not provider_voice:
+            return False
+        # Edge voices are catalogued dynamically by the UI and require no
+        # local model to preload.  Treat a concrete service voice as ready so
+        # it can never fall through to a local Piper voice.
+        return True
     if not voice_entry and voice_to_search.lower().startswith("zerotts:"):
         voice_entry = {
             "provider": "zerotts",
@@ -634,6 +642,19 @@ def synthesize_text_to_wav_16k_mono(
             "provider_voice": voice_to_search.split(":", 1)[1].strip() or "maichi",
             "language": "vi",
         }
+    if not voice_entry and voice_to_search.lower().startswith("edge:"):
+        provider_voice = voice_to_search.split(":", 1)[1].strip()
+        if not provider_voice:
+            raise ValueError("Edge TTS voice ID is empty.")
+        # Edge entries are injected into the UI catalog at runtime rather
+        # than written into voice_preview_catalog.json.  Resolve the selected
+        # service ID here before the legacy Piper fallback is considered.
+        voice_entry = {
+            "id": voice_to_search,
+            "provider": "edge",
+            "provider_voice": provider_voice,
+            "language": provider_voice.split("-", 1)[0].lower(),
+        }
     if not voice_entry and voice_to_search.lower().startswith("kokoro:"):
         voice_entry = {
             "id": voice_to_search,
@@ -642,16 +663,11 @@ def synthesize_text_to_wav_16k_mono(
             "language": "en",
         }
 
-    # Fallback: use the first available voice
     if not voice_entry:
-        voices = catalog.get("voices", [])
-        if voices:
-            voice_entry = voices[0]
-            if on_progress:
-                on_progress(f"Voice '{voice_to_search}' not found, using fallback: {voice_entry.get('name')}")
-    
-    if not voice_entry:
-        raise ValueError(f"No voice found in catalog for: {voice_to_search}")
+        raise ValueError(
+            f"Selected voice '{voice_to_search}' is unavailable. "
+            "Choose an installed/available voice; VIUStudio will not substitute a different voice."
+        )
     
     provider = voice_entry["provider"]
     provider_voice = voice_entry["provider_voice"]

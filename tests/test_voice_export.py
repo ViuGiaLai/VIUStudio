@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import tempfile
 import unittest
@@ -37,6 +38,9 @@ class TestVoiceExportWorker(unittest.TestCase):
 
     def test_voice_export_to_mp3(self):
         output_mp3 = os.path.join(self.temp_dir, "output.mp3")
+        provenance = {"voice_name": "edge:vi-VN-HoaiMyNeural", "cues": []}
+        with open(self.test_wav + ".json", "w", encoding="utf-8") as handle:
+            json.dump(provenance, handle)
         worker = VoiceExportWorker(self.test_wav, output_mp3, bitrate="192k")
         results = []
 
@@ -52,6 +56,8 @@ class TestVoiceExportWorker(unittest.TestCase):
         self.assertEqual(path, output_mp3)
         self.assertTrue(os.path.exists(output_mp3))
         self.assertGreater(os.path.getsize(output_mp3), 0)
+        with open(output_mp3 + ".json", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), provenance)
 
         # Decode the actual MP3 and compare it at sample zero. This catches
         # encoder-delay or padding mistakes that would move every spoken cue.

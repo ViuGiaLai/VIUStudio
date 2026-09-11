@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -60,6 +60,7 @@ class SrtTtsWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             window = SrtTtsWindow(root)
             window.srt_text = "1\n00:00:00,000 --> 00:00:01,000\nXin chào\n"
+            window.engine_combo.setCurrentIndex(window.engine_combo.findData("edge"))
             window.source_segments = [{"start": 0.0, "end": 1.0, "text": "Xin chào"}]
             window.segments = list(window.source_segments)
             window._update_actions()
@@ -77,7 +78,59 @@ class SrtTtsWindowTests(unittest.TestCase):
             window.voice_path = str(voice)
             window._update_actions()
             self.assertTrue(window.export_btn.isEnabled())
+            self.assertTrue(window.play_voice_btn.isEnabled())
+            self.assertTrue(window.seek_slider.isEnabled())
             self.assertFalse(hasattr(window, "video_btn"))
+            window.close()
+
+    def test_generated_track_pause_seek_and_invalidation(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtMultimedia import QMediaPlayer
+        with tempfile.TemporaryDirectory() as root:
+            window = SrtTtsWindow(root)
+            voice = Path(root) / "voice.wav"
+            voice.touch()
+            window.voice_path = str(voice)
+            player = Mock()
+            player.source.return_value = QUrl.fromLocalFile(str(voice))
+            player.playbackState.return_value = QMediaPlayer.PlayingState
+            window._track_player = player
+            window._toggle_track()
+            player.pause.assert_called_once()
+            window._seek_track(1200)
+            player.setPosition.assert_called_once_with(1200)
+            window._invalidate_voice()
+            self.assertFalse(window.play_voice_btn.isEnabled())
+            player.stop.assert_called()
+            window.close()
+
+    def test_engine_language_gender_filters_and_exact_voice_id(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = SrtTtsWindow(root)
+            self.assertFalse(window.preview_voice_btn.isEnabled())
+            window.engine_combo.setCurrentIndex(window.engine_combo.findData("edge"))
+            self.assertEqual(window.voice_combo.count(), 2)
+            window.gender_combo.setCurrentIndex(window.gender_combo.findData("male"))
+            self.assertEqual(window.voice_combo.count(), 1)
+            self.assertEqual(window.voice_combo.currentData(), "edge:vi-VN-NamMinhNeural")
+            window.language_combo.setCurrentIndex(window.language_combo.findData("en"))
+            self.assertTrue(window.voice_combo.count())
+            self.assertTrue(all(window.voice_combo.itemData(i).startswith("edge:en-")
+                                for i in range(window.voice_combo.count())))
+            window.engine_combo.setCurrentIndex(window.engine_combo.findData("korvatts"))
+            self.assertEqual(window.voice_combo.count(), 0)
+            self.assertFalse(window.preview_voice_btn.isEnabled())
+            window.close()
+
+    def test_engine_switch_invalidates_exportable_audio(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = SrtTtsWindow(root)
+            voice = Path(root) / "voice.wav"
+            voice.touch()
+            window.voice_path = str(voice)
+            window.engine_combo.setCurrentIndex(window.engine_combo.findData("edge"))
+            self.assertEqual(window.voice_path, "")
+            self.assertFalse(window.export_btn.isEnabled())
             window.close()
 
     def test_mp3_worker_converts_generated_timeline_audio(self):
@@ -105,7 +158,7 @@ class SrtTtsWindowTests(unittest.TestCase):
             window.speed_spin.setValue(1.05)
 
             self.assertEqual(window.voice_path, "")
-            self.assertIn("tạo lại", window.status.text().lower())
+            self.assertIn("generate the voice again", window.status.text().lower())
             window.close()
 
     def test_aligned_result_does_not_replace_imported_timing_source(self):

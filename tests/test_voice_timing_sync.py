@@ -19,7 +19,7 @@ from app.audio_mixer import (
     mute_voice_windows,
 )
 from app.workflows.voice_workflow import VoiceWorkflow
-from app.services.voice_timing_service import align_voice_clips
+from app.services.voice_timing_service import align_voice_clips, trim_voice_padding
 
 
 def _make_silent_wav(path: str, duration: float, sample_rate: int = 16000) -> None:
@@ -43,6 +43,27 @@ def _make_tone_wav(path: str, duration: float, sample_rate: int = 16000) -> None
 
 
 class VoiceTimingSyncTests(unittest.TestCase):
+    def test_padding_trim_preserves_quiet_onset_and_internal_pause(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "padded.wav")
+            # Quiet initial consonant above -60 dBFS must survive byte-for-byte.
+            speech = np.concatenate([np.full(800, 50), np.full(2400, 4000),
+                                     np.zeros(3200), np.full(1600, 2000)]).astype("<i2")
+            samples = np.concatenate([np.zeros(3200, dtype="<i2"), speech,
+                                      np.zeros(12800, dtype="<i2")])
+            with wave.open(source, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(samples.tobytes())
+            out, head, tail = trim_voice_padding(source, os.path.join(folder, "trim.wav"))
+            self.assertAlmostEqual(head, 0.15)
+            self.assertAlmostEqual(tail, 0.75)
+            with wave.open(out, "rb") as w:
+                actual = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+            np.testing.assert_array_equal(actual[800:-800], speech)
+
     def test_prepare_keeps_silent_rows_and_stable_source_identity_when_sorting(self):
         workflow = VoiceWorkflow(str(ROOT))
         prepared = workflow._prepare_segments_for_tts(

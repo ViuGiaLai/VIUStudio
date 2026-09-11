@@ -1169,7 +1169,7 @@ class VoiceSamplePreviewWorker(QThread):
         try:
             temp_dir = self.temp_dir or os.path.join(self.workspace_root, "temp", "voice_sample_preview")
             os.makedirs(temp_dir, exist_ok=True)
-            cache_seed = f"{self.voice_name}|{self.voice_speed}|{self.text}".encode("utf-8", errors="replace")
+            cache_seed = f"voice-v3|{self.voice_name}|{self.voice_speed}|{self.text}".encode("utf-8", errors="replace")
             cache_key = hashlib.sha1(cache_seed).hexdigest()[:16]
             wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}.wav")
             base_wav_path = os.path.join(temp_dir, f"voice_sample_{cache_key}_base.wav")
@@ -1294,6 +1294,11 @@ class VoiceExportWorker(QThread):
         self.output_path = str(output_path or "").strip()
         self.bitrate = str(bitrate or "256k").strip()
 
+    def _copy_voice_report(self):
+        source = self.input_wav + ".json"
+        if os.path.isfile(source) and os.path.abspath(source) != os.path.abspath(self.output_path + ".json"):
+            shutil.copy2(source, self.output_path + ".json")
+
     def run(self):
         partial_path = ""
         try:
@@ -1314,6 +1319,7 @@ class VoiceExportWorker(QThread):
                     )
                     shutil.copy2(self.input_wav, partial_path)
                     os.replace(partial_path, self.output_path)
+                self._copy_voice_report()
                 self.progress.emit(100, "WAV audio exported successfully.")
                 self.finished.emit(True, self.output_path, "")
                 return
@@ -1345,6 +1351,7 @@ class VoiceExportWorker(QThread):
             proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
             if proc.returncode == 0 and os.path.exists(partial_path) and os.path.getsize(partial_path) > 0:
                 os.replace(partial_path, self.output_path)
+                self._copy_voice_report()
                 self.progress.emit(100, "MP3 audio exported successfully.")
                 self.finished.emit(True, self.output_path, "")
             else:

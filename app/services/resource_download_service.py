@@ -422,7 +422,19 @@ class ResourceDownloadService:
     def validate_tts_voice_runtime(self, voice_id: str) -> list[tuple[str, str]]:
         """Validate the selected provider without treating every local voice as Piper."""
         voice_id = str(voice_id or "").strip()
-        if not voice_id or voice_id.startswith(("edge:", "f5:")):
+        if not voice_id or voice_id.startswith("f5:"):
+            return []
+        if voice_id.startswith("edge:"):
+            try:
+                if importlib.util.find_spec("edge_tts") is None:
+                    raise ModuleNotFoundError("edge_tts")
+            except (ImportError, ModuleNotFoundError, ValueError):
+                return [
+                    (
+                        "tts:edge",
+                        "Edge TTS runtime is unavailable. Install requirements-local.txt, then try again.",
+                    )
+                ]
             return []
         if voice_id.startswith("zerotts:"):
             try:

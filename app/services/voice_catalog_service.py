@@ -5,6 +5,7 @@ import os
 
 from runtime_paths import app_path, models_path
 from runtime_profile import is_remote_profile
+from edge_tts_support import catalog_entries as edge_tts_catalog_entries
 from zerotts_support import catalog_entries as zerotts_catalog_entries
 from kokoro_support import catalog_entries as kokoro_catalog_entries
 
@@ -65,6 +66,15 @@ class VoiceCatalogService:
                 for voice in voices
                 if isinstance(voice, dict)
             }
+            voices.extend(
+                voice for voice in edge_tts_catalog_entries()
+                if str(voice.get("id", "")).strip() not in existing_ids
+            )
+            existing_ids.update(
+                str(voice.get("id", "")).strip()
+                for voice in voices
+                if isinstance(voice, dict)
+            )
             voices.extend(
                 voice for voice in zerotts_catalog_entries()
                 if str(voice.get("id", "")).strip() not in existing_ids

@@ -146,8 +146,10 @@ class VoiceCatalogMixin:
         if total_entries <= 0:
             self.voice_preview_meta_label.setText("No voices are available in the catalog yet.")
             return
+        engine_key = self._current_voice_engine_key()
+        source_label = "Online" if engine_key == "edge" else "Available"
         self.voice_preview_meta_label.setText(
-            f"Local voices: {total_entries}. Click “Preview voice” to generate a short test clip."
+            f"{source_label} voices: {total_entries}. Click “Preview voice” to generate a short test clip."
         )
 
     def _current_voice_engine_key(self) -> str:
@@ -247,6 +249,18 @@ class VoiceCatalogMixin:
         if label is None:
             return
         engine_key = self._current_voice_engine_key()
+        manage_button = getattr(self, "manage_voice_engines_btn", None)
+        if manage_button is not None:
+            is_edge = engine_key == "edge"
+            manage_button.setText(
+                "Edge TTS — Internet Required" if is_edge else "Install / Manage Voice Engines"
+            )
+            manage_button.setEnabled(not is_edge)
+            manage_button.setToolTip(
+                "Edge TTS runs online and does not require a local voice model."
+                if is_edge
+                else "Install the selected TTS runtime or manage local voice models."
+            )
         choice_label = getattr(self, "voice_choice_label", None)
         if choice_label is not None:
             choice_label.setText(
@@ -290,6 +304,15 @@ class VoiceCatalogMixin:
         if engine_key == "zerotts":
             label.setText(
                 "Output language: Vietnamese · ZeroTTS runs locally after its runtime and first-use model are installed."
+            )
+            return
+        if engine_key == "edge":
+            language = str(self.get_target_language_code() or "").strip().lower()
+            language_name = {"vi": "Vietnamese", "en": "English"}.get(
+                language, language.upper() or "the selected language"
+            )
+            label.setText(
+                f"Output language: {language_name} · Edge TTS is fast and natural, but requires an Internet connection."
             )
             return
         language = str(self.get_target_language_code() or "").strip().lower()
