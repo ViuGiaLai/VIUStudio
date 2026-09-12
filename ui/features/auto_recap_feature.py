@@ -34,10 +34,55 @@ class AutoRecapFeatureMixin:
         self.init_auto_recap_feature()
         if hasattr(self, "auto_recap_cb"):
             self.auto_recap_cb.setChecked(True)
+        if hasattr(self, "anti_duplicate_cb") and self.anti_duplicate_cb.isChecked():
+            if hasattr(self, "auto_recap_config") and self.auto_recap_config:
+                self.auto_recap_config.anti_duplicate = True
         if hasattr(self, "log"):
-            self.log("[Auto Recap] Triggered Auto Edit Recap from Generate menu.")
-        if hasattr(self, "run_auto_recap_pipeline"):
+            self.log("[Auto Recap] Bắt đầu phân tích cảnh và tạo video chống trùng lặp / Recap...")
+        if hasattr(self, "pipeline_controller") and hasattr(self.pipeline_controller, "run_auto_recap_pipeline"):
+            self.pipeline_controller.run_auto_recap_pipeline()
+        elif hasattr(self, "run_auto_recap_pipeline"):
             self.run_auto_recap_pipeline()
+        else:
+            if hasattr(self, "log"):
+                self.log("[Auto Recap] Lỗi: Không tìm thấy pipeline_controller.run_auto_recap_pipeline")
+
+    def run_auto_recap_pipeline(self, video_path=None):
+        """Delegates Auto Recap execution to pipeline_controller."""
+        if hasattr(self, "pipeline_controller") and hasattr(self.pipeline_controller, "run_auto_recap_pipeline"):
+            return self.pipeline_controller.run_auto_recap_pipeline(video_path=video_path)
+        return None
+
+    def open_video_compare_dialog(self):
+        """Opens the Side-by-Side Video Comparison Dialog (Original vs Protected)."""
+        from ui.dialogs.video_compare_dialog import VideoCompareDialog
+        from PySide6.QtWidgets import QMessageBox
+
+        orig_path = ""
+        if hasattr(self, "resolve_canonical_video_path") and callable(self.resolve_canonical_video_path):
+            orig_path = self.resolve_canonical_video_path() or ""
+        if not orig_path and hasattr(self, "video_path_edit"):
+            orig_path = str(self.video_path_edit.text() or "").strip()
+        if not orig_path and hasattr(self, "pipeline_controller"):
+            orig_path = self.pipeline_controller._resolve_pipeline_video_path()
+
+        recap_path = str(getattr(self, "last_recap_video_path", "") or "").strip()
+        if not recap_path or not os.path.exists(recap_path):
+            QMessageBox.information(
+                self,
+                "So sánh Video",
+                "Chưa có video đã xử lý chống trùng lặp. Vui lòng bấm '⚡ Phân tích && Tạo video Chống trùng' trước khi so sánh."
+            )
+            return
+
+        if not orig_path or not os.path.exists(orig_path):
+            possible = recap_path.replace("_recap.mp4", ".mp4")
+            if os.path.exists(possible):
+                orig_path = possible
+
+        decisions = getattr(self, "current_auto_recap_edl", []) or []
+        dialog = VideoCompareDialog(orig_path, recap_path, decisions, parent=self)
+        dialog.exec()
 
     def is_auto_recap_enabled(self) -> bool:
         self.init_auto_recap_feature()

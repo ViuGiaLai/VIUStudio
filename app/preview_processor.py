@@ -43,21 +43,29 @@ def _ffmpeg_supports_encoder(ffmpeg_path: str, encoder_name: str) -> bool:
 
 def _preferred_h264_encoder_args(ffmpeg_path: str, *, fast: bool = False) -> list[str]:
     try:
-        from video_processor import _ffmpeg_nvenc_works
-        nvenc_ok = _ffmpeg_nvenc_works(ffmpeg_path)
-    except ImportError:
-        nvenc_ok = False
-    if _ffmpeg_supports_encoder(ffmpeg_path, "h264_nvenc") and nvenc_ok:
-        return [
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p5" if fast else "p4",
-            "-cq",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-        ]
+        from video_processor import _ffmpeg_nvenc_works, _ffmpeg_qsv_works, _ffmpeg_amf_works
+        if _ffmpeg_supports_encoder(ffmpeg_path, "h264_nvenc") and _ffmpeg_nvenc_works(ffmpeg_path):
+            return [
+                "-c:v", "h264_nvenc",
+                "-preset", "p5" if fast else "p4",
+                "-cq", "23",
+                "-pix_fmt", "yuv420p",
+            ]
+        if _ffmpeg_supports_encoder(ffmpeg_path, "h264_qsv") and _ffmpeg_qsv_works(ffmpeg_path):
+            return [
+                "-c:v", "h264_qsv",
+                "-preset:v", "7" if fast else "4",
+                "-global_quality", "23",
+                "-pix_fmt", "nv12",
+            ]
+        if _ffmpeg_supports_encoder(ffmpeg_path, "h264_amf") and _ffmpeg_amf_works(ffmpeg_path):
+            return [
+                "-c:v", "h264_amf",
+                "-quality", "speed" if fast else "balanced",
+                "-pix_fmt", "yuv420p",
+            ]
+    except Exception:
+        pass
     return [
         "-c:v",
         "libx264",
@@ -65,6 +73,8 @@ def _preferred_h264_encoder_args(ffmpeg_path: str, *, fast: bool = False) -> lis
         "veryfast" if fast else "medium",
         "-crf",
         "18",
+        "-threads",
+        "0",
         "-pix_fmt",
         "yuv420p",
     ]

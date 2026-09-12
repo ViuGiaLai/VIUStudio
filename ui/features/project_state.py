@@ -663,7 +663,7 @@ class ProjectStateMixin:
                 self.translation_style_preset_combo.setCurrentIndex(idx)
 
         # 4. Voice Settings
-        saved_vengine = st.get("voice_engine")
+        saved_vengine = st.get("voice_engine") or "fast"
         if saved_vengine and hasattr(self, "voice_engine_combo"):
             idx = self.voice_engine_combo.findData(saved_vengine)
             if idx < 0:
@@ -671,17 +671,20 @@ class ProjectStateMixin:
             if idx >= 0:
                 self.voice_engine_combo.setCurrentIndex(idx)
 
-        saved_voice = st.get("free_voice_name") or st.get("voice_name")
-        if saved_voice and hasattr(self, "free_voice_combo"):
-            idx = self.free_voice_combo.findText(saved_voice)
-            if idx >= 0:
-                self.free_voice_combo.setCurrentIndex(idx)
-
-        saved_gender = st.get("voice_gender")
+        saved_gender = st.get("voice_gender") or "Female"
         if saved_gender and hasattr(self, "voice_gender_combo"):
             idx = self.voice_gender_combo.findText(saved_gender)
             if idx >= 0:
                 self.voice_gender_combo.setCurrentIndex(idx)
+
+        saved_voice = st.get("free_voice_name") or st.get("voice_name") or "Ngọc Huyền (New) (Local)"
+        if saved_voice and hasattr(self, "free_voice_combo"):
+            idx = self.free_voice_combo.findText(saved_voice)
+            if idx < 0:
+                idx = self.free_voice_combo.findData(saved_voice)
+            if idx >= 0:
+                self.free_voice_combo.setCurrentIndex(idx)
+
 
         saved_speed = st.get("voice_speed")
         if saved_speed and hasattr(self, "voice_speed_spin"):

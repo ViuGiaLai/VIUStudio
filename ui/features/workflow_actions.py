@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QToolButton, QMessageBox)
 from PySide6.QtCore import Qt, QUrl
 
-from widgets.progress_dialog import BackgroundableProgressDialog
+from widgets.progress_dialog import BackgroundableProgressDialog, ExportProgressDialog
 from worker_adapters import (
     ExtractionWorker,
     VocalSeparationWorker,
@@ -259,6 +259,8 @@ class WorkflowActionsMixin:
         if hasattr(self, "export_voice_action"):
             has_voice = bool(getattr(self, "last_voice_vi_path", "") and os.path.exists(self.last_voice_vi_path))
             self.export_voice_action.setEnabled(has_voice or has_translated_text)
+        if hasattr(self, "import_voice_action"):
+            self.import_voice_action.setEnabled(not self._pipeline_active)
         if hasattr(self, "tabs"):
             self.tabs.setTabEnabled(1, v_ok)
             self.tabs.setTabEnabled(2, v_ok and mode in ("voice", "both"))
@@ -282,48 +284,69 @@ class WorkflowActionsMixin:
             menu.setObjectName("generateMenu")
             menu.setMinimumWidth(240)
 
-            # --- ✨ Auto Edit Recap Top Actions ---
-            recap_action = QAction("✨ Run Auto Edit Recap", menu)
+            # --- ✨ Auto Edit Recap & Anti-Duplicate Top Actions ---
+            recap_action = QAction("✨ Tự động cắt ghép Recap (Auto Recap)", menu)
             if hasattr(self, "run_auto_recap_workflow"):
                 recap_action.triggered.connect(self.run_auto_recap_workflow)
+            elif hasattr(self, "pipeline_controller") and hasattr(self.pipeline_controller, "run_auto_recap_pipeline"):
+                recap_action.triggered.connect(self.pipeline_controller.run_auto_recap_pipeline)
             else:
                 recap_action.triggered.connect(self.run_all_pipeline)
             menu.addAction(recap_action)
 
-            recap_custom_action = QAction("⚙ Customize Auto Recap Rules...", menu)
+            anti_dup_action = QAction("🛡️ Phân tích && Tạo video chống trùng (Xem ngay)", menu)
+            def _trigger_anti_dup_generate():
+                if hasattr(self, "anti_duplicate_cb"):
+                    self.anti_duplicate_cb.setChecked(True)
+                if hasattr(self, "auto_recap_config") and self.auto_recap_config:
+                    self.auto_recap_config.anti_duplicate = True
+                    self.auto_recap_config.enabled = True
+                if hasattr(self, "run_auto_recap_workflow"):
+                    self.run_auto_recap_workflow()
+                elif hasattr(self, "pipeline_controller") and hasattr(self.pipeline_controller, "run_auto_recap_pipeline"):
+                    self.pipeline_controller.run_auto_recap_pipeline()
+            anti_dup_action.triggered.connect(_trigger_anti_dup_generate)
+            menu.addAction(anti_dup_action)
+
+            compare_action = QAction("🔍 So sánh Video Gốc vs Đã xử lý...", menu)
+            if hasattr(self, "open_video_compare_dialog"):
+                compare_action.triggered.connect(self.open_video_compare_dialog)
+            menu.addAction(compare_action)
+
+            recap_custom_action = QAction("⚙ Cấu hình quy tắc Recap...", menu)
             if hasattr(self, "open_auto_recap_settings_dialog"):
                 recap_custom_action.triggered.connect(self.open_auto_recap_settings_dialog)
             menu.addAction(recap_custom_action)
 
             menu.addSeparator()
 
-            step_menu = menu.addMenu("Step-by-Step")
+            step_menu = menu.addMenu("Chạy từng bước (Step-by-Step)")
             step_menu.setObjectName("generateStepMenu")
             step_menu.setMinimumWidth(220)
-            transcript_action = QAction("Run to Original Transcript", step_menu)
+            transcript_action = QAction("1. Tạo phụ đề gốc (Transcript)", step_menu)
             transcript_action.triggered.connect(lambda: self.run_pipeline_to_stage("transcript"))
-            translate_menu = step_menu.addMenu("Run to Translate")
+            translate_menu = step_menu.addMenu("2. Dịch thuật phụ đề")
             translate_menu.setObjectName("generateStepMenu")
             translate_menu.setMinimumWidth(220)
-            translate_action = QAction("Auto Translate", translate_menu)
+            translate_action = QAction("Tự động dịch AI", translate_menu)
             translate_action.triggered.connect(lambda: self.run_pipeline_to_stage("translate"))
-            import_translation_action = QAction("Import Translated File…", translate_menu)
+            import_translation_action = QAction("Nhập file phụ đề đã dịch…", translate_menu)
             import_translation_action.triggered.connect(self.import_translated_srt)
             translate_menu.addActions([translate_action, import_translation_action])
-            tts_menu = step_menu.addMenu("Generate Voice / TTS")
+            tts_menu = step_menu.addMenu("3. Tạo giọng đọc AI (TTS)")
             tts_menu.setObjectName("generateStepMenu")
             tts_menu.setMinimumWidth(220)
-            tts_action = QAction("TTS", tts_menu)
+            tts_action = QAction("Tạo giọng đọc", tts_menu)
             tts_action.triggered.connect(lambda: self.run_pipeline_to_stage("tts"))
-            tts_skip_action = QAction("Skip", tts_menu)
+            tts_skip_action = QAction("Bỏ qua giọng đọc", tts_menu)
             tts_skip_action.triggered.connect(self.skip_tts_stage)
             tts_menu.addActions([tts_action, tts_skip_action])
             step_menu.insertAction(translate_menu.menuAction(), transcript_action)
             step_menu.addAction(tts_menu.menuAction())
-            full_menu = menu.addMenu("Full Pipeline")
+            full_menu = menu.addMenu("Quy trình đầy đủ (Full Pipeline)")
             full_menu.setObjectName("generateStepMenu")
             full_menu.setMinimumWidth(220)
-            full_action = QAction("Run full pipeline", full_menu)
+            full_action = QAction("Chạy toàn bộ quy trình", full_menu)
             full_action.triggered.connect(self.run_all_pipeline)
             full_menu.addAction(full_action)
             btn.setMenu(menu)
@@ -697,32 +720,54 @@ class WorkflowActionsMixin:
         finally:
             self.export_progress_dialog = None
 
+    def cancel_video_export(self):
+        dlg = getattr(self, "export_progress_dialog", None)
+        if dlg is not None:
+            if hasattr(dlg, "cancel_btn"):
+                dlg.cancel_btn.setEnabled(False)
+                dlg.cancel_btn.setText("Cancelling...")
+            dlg.setLabelText("Exporting final video...\n\nCancelling export...")
+
+        worker = getattr(self, "export_thread", None)
+        if worker is not None and getattr(worker, "isRunning", lambda: False)():
+            self.log("[Export] Cancellation requested by user...")
+            try:
+                worker.requestInterruption()
+            except Exception as exc:
+                self.log(f"[Export] Could not request interruption on export worker: {exc}")
+
+            def _force_stop_if_still_running():
+                current_worker = getattr(self, "export_thread", None)
+                if current_worker is worker and getattr(worker, "isRunning", lambda: False)():
+                    self.log("[Export] Forcing export worker termination...")
+                    try:
+                        worker.terminate()
+                        worker.wait(200)
+                    except Exception:
+                        pass
+                    if hasattr(self, "on_export_finished"):
+                        self.on_export_finished("", "Operation cancelled by user")
+                    elif hasattr(self, "preview_controller"):
+                        self.preview_controller.on_export_finished("", "Operation cancelled by user")
+
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(3000, _force_stop_if_still_running)
+        else:
+            self._close_export_progress_dialog()
+            if hasattr(self, "export_btn"):
+                self.export_btn.setEnabled(True)
+                self.export_btn.setText("Export")
+            if hasattr(self, "progress_bar"):
+                self.progress_bar.setValue(0)
+            self.update_project_step("export", "pending")
+            self.refresh_ui_state()
+
     def _ensure_export_progress_dialog(self):
         dlg = getattr(self, "export_progress_dialog", None)
         if dlg is not None:
             return dlg
-        dlg = BackgroundableProgressDialog("Preparing final export...", "Hide", 0, 100, self)
-        dlg.setWindowTitle("Exporting Video")
-        dlg.setWindowModality(Qt.WindowModal)
-        dlg.setMinimumDuration(0)
-        dlg.setAutoReset(False)
-        dlg.setAutoClose(False)
-        dlg.setMinimumWidth(520)
-        dlg.setValue(0)
-        dlg.setLabelText("Exporting final video...\n\nWaiting to start...")
-        dlg.setStyleSheet(
-            "QProgressDialog { background-color: #101826; color: #e6eef9; }"
-            "QLabel { color: #e6eef9; background: transparent; }"
-            "QPushButton { background-color: #24364f; color: #ffffff; border: 1px solid #335171; border-radius: 10px; padding: 8px 14px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #2d4665; border-color: #4575a8; }"
-            "QProgressBar { border: 1px solid #2a3a50; border-radius: 10px; text-align: center; background-color: #111927; color: white; min-height: 16px; }"
-            "QProgressBar::chunk { background-color: #4ed0b3; border-radius: 10px; }"
-        )
-        try:
-            dlg.setCancelButtonText("Run in background")
-            dlg.canceled.connect(dlg.hide)
-        except Exception:
-            pass
+        dlg = ExportProgressDialog(self)
+        dlg.cancel_requested.connect(self.cancel_video_export)
         self.export_progress_dialog = dlg
         self._register_progress_dialog(dlg)
         dlg.show()

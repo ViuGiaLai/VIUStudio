@@ -178,6 +178,204 @@ class PreviewRenderConsistencyTests(unittest.TestCase):
         self.assertEqual(len(fake.render_calls), 1)
         self.assertTrue(fake.render_calls[0][2]["video_filter_state"]["active"])
 
+    def test_subtitle_overlay_item_font_size_and_box_height_proportional(self):
+        from PySide6.QtWidgets import QApplication
+        from widgets.subtitle_overlay import SubtitleOverlayItem
+        from PySide6.QtGui import QPainter, QImage
+
+        app = QApplication.instance() or QApplication([])
+        item = SubtitleOverlayItem()
+        # Verify set_style updates font_size correctly
+        item.set_style(font_size=18, background_box=True, background_padding=2, background_radius=0)
+        self.assertEqual(item.font_size, 18, "font_size must be updated when set_style is called")
+
+        # Set single-line text
+        item.set_text("Một suất phi lê gà tăng thêm 1 tệ.")
+        # Height must be proportional to font (e.g. ~24-34px), NOT the old hardcoded 96px!
+        self.assertLess(item.H, 50, f"Single-line overlay height {item.H} must not be inflated to 96px")
+        self.assertGreaterEqual(item.H, 18)
+
+        # Paint onto image and ensure no crash
+        img = QImage(360, 200, QImage.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        painter = QPainter(img)
+        item.paint(painter, None, None)
+        painter.end()
+
+    def test_video_view_subtitle_render_dimensions_scaling(self):
+        from PySide6.QtWidgets import QApplication
+        from widgets.video_view import VideoView
+
+        app = QApplication.instance() or QApplication([])
+        view = VideoView()
+        view.resize(360, 200)
+        # Set 1080p source video dimensions
+        view.set_subtitle_render_dimensions(1920, 1080)
+        self.assertEqual(view.subtitle_render_width, 1920)
+        self.assertEqual(view.subtitle_render_height, 1080)
+
+        # Reposition subtitle and verify scaled coordinates
+        view.reposition_subtitle()
+        canvas_rect = view.get_preview_canvas_rect()
+    def test_subtitle_overlay_item_capcut_gizmo_and_handles(self):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPainter, QImage
+        from widgets.subtitle_overlay import SubtitleOverlayItem
+
+        app = QApplication.instance() or QApplication([])
+        item = SubtitleOverlayItem()
+        item.set_style(font_size=24, background_box=True)
+        item.set_text("Test Subtitle Line")
+        item.set_editable(True)
+        item.set_selected(True)
+
+        content_rect = item._get_content_rect()
+        self.assertGreater(content_rect.width(), 40)
+        self.assertGreater(content_rect.height(), 16)
+
+        handles = item._handle_rects(content_rect)
+        self.assertIn("top_left", handles)
+        self.assertIn("top_right", handles)
+        self.assertIn("bottom_left", handles)
+        self.assertIn("bottom_right", handles)
+
+        # Hit test corner handle
+        tl_point = handles["top_left"].center()
+        self.assertEqual(item._hit_test(tl_point), "top_left")
+
+        # Hit test center
+        center_point = content_rect.center()
+        self.assertEqual(item._hit_test(center_point), "move")
+
+        # Hit test outside
+        outside_point = QPointF(content_rect.left() - 50, content_rect.top() - 50)
+        self.assertEqual(item._hit_test(outside_point), "")
+
+        # Paint with gizmo enabled and verify no crash
+        img = QImage(400, 200, QImage.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        painter = QPainter(img)
+        item.paint(painter, None, None)
+        painter.end()
+
+    def test_subtitle_overlay_item_drag_and_scale_signals(self):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QPointF
+        from widgets.subtitle_overlay import SubtitleOverlayItem
+
+        app = QApplication.instance() or QApplication([])
+        item = SubtitleOverlayItem()
+        item.set_style(font_size=20, base_font_size=60)
+        item.set_text("Drag and Scale Subtitle")
+        item.set_editable(True)
+        item.set_selected(True)
+
+        events_received = []
+        item.positionDragFinished.connect(lambda x, y: events_received.append(("pos", x, y)))
+        item.fontSizeChanged.connect(lambda size: events_received.append(("size", size)))
+
+        # Simulate move drag release
+        item._drag_mode = "move"
+        item.custom_x_percent = 40
+        item.custom_y_percent = 70
+        from PySide6.QtWidgets import QGraphicsSceneMouseEvent
+        from PySide6.QtCore import QEvent
+        release_event = QGraphicsSceneMouseEvent(QEvent.GraphicsSceneMouseRelease)
+        release_event.setButton(item.acceptedMouseButtons())
+        item.mouseReleaseEvent(release_event)
+
+        self.assertEqual(len(events_received), 1)
+        self.assertEqual(events_received[0], ("pos", 40, 70))
+
+        # Simulate scale resize release
+        events_received.clear()
+        item._drag_mode = "bottom_right"
+        item.base_font_size = 72
+        item.mouseReleaseEvent(release_event)
+
+        self.assertEqual(len(events_received), 1)
+        self.assertEqual(events_received[0], ("size", 72))
+
+    def test_preview_manipulation_updates_export_ass_style_and_pos(self):
+        from PySide6.QtWidgets import QApplication, QSpinBox, QComboBox
+        from features.filter_subtitle_style import FilterSubtitleStyleMixin
+        from app.video_processor import srt_to_ass
+
+        app = QApplication.instance() or QApplication([])
+
+        class DummyWindow(FilterSubtitleStyleMixin):
+            def __init__(self):
+                self.subtitle_custom_x_spin = QSpinBox()
+                self.subtitle_custom_x_spin.setRange(0, 100)
+                self.subtitle_custom_x_spin.setValue(50)
+                self.subtitle_custom_y_spin = QSpinBox()
+                self.subtitle_custom_y_spin.setRange(0, 100)
+                self.subtitle_custom_y_spin.setValue(86)
+                self.subtitle_font_size_spin = QSpinBox()
+                self.subtitle_font_size_spin.setRange(8, 200)
+                self.subtitle_font_size_spin.setValue(24)
+                self.subtitle_position_mode_combo = QComboBox()
+                self.subtitle_position_mode_combo.addItem("Anchor", "anchor")
+                self.subtitle_position_mode_combo.addItem("Custom", "custom")
+                self.subtitle_position_mode_combo.setCurrentIndex(0)
+                self.style_updated = False
+                self.state_persisted = False
+
+            def _preview_is_playing(self):
+                return False
+
+            def update_subtitle_preview_style(self):
+                self.style_updated = True
+
+            def persist_project_state(self):
+                self.state_persisted = True
+
+            def schedule_timeline_project_persist(self):
+                self.state_persisted = True
+
+            def on_subtitle_style_control_edited(self):
+                self.update_subtitle_preview_style()
+                self.persist_project_state()
+
+        window = DummyWindow()
+
+        # Simulate user dragging subtitle to (35%, 65%)
+        window.on_subtitle_position_dragged(35, 65)
+        self.assertEqual(window.subtitle_position_mode_combo.currentData(), "custom")
+        self.assertEqual(window.subtitle_custom_x_spin.value(), 35)
+        self.assertEqual(window.subtitle_custom_y_spin.value(), 65)
+        self.assertTrue(window.style_updated)
+
+        # Simulate user scaling font to 52px
+        window.on_subtitle_font_size_scaled(52)
+        self.assertEqual(window.subtitle_font_size_spin.value(), 52)
+        self.assertTrue(window.state_persisted)
+
+        # Now test srt_to_ass generation with these exact dragged/scaled parameters
+        with tempfile.TemporaryDirectory() as temp_dir:
+            srt_file = os.path.join(temp_dir, "test.srt")
+            with open(srt_file, "w", encoding="utf-8") as f:
+                f.write("1\n00:00:01,000 --> 00:00:03,000\nCapCut Subtitle Drag & Scale Test\n\n")
+
+            ass_file = srt_to_ass(
+                srt_path=srt_file,
+                video_width=1920,
+                video_height=1080,
+                font_size=window.subtitle_font_size_spin.value(),
+                custom_position_enabled=True,
+                custom_position_x=float(window.subtitle_custom_x_spin.value()),
+                custom_position_y=float(window.subtitle_custom_y_spin.value()),
+            )
+
+            with open(ass_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # Verify font size in Style header
+            self.assertIn(",52,", content, "Exported ASS Style line must contain the scaled font_size 52")
+            # Verify coordinates in Dialogue line: 1920 * 0.35 = 672, 1080 * 0.65 = 702
+            self.assertIn(r"\an5\pos(672,702)", content, r"Exported ASS Dialogue must contain the exact dragged position \an5\pos(672,702)")
+
 
 if __name__ == "__main__":
     unittest.main()

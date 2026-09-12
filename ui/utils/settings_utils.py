@@ -171,7 +171,7 @@ def load_user_settings(gui):
             gui.translation_style_preset_combo.setCurrentIndex(idx)
 
     # Voice
-    voice_engine = s.value("voice_engine", None)
+    voice_engine = s.value("voice_engine", "fast")
     if voice_engine and hasattr(gui, "voice_engine_combo"):
         idx = gui.voice_engine_combo.findData(voice_engine)
         if idx < 0:
@@ -179,17 +179,20 @@ def load_user_settings(gui):
         if idx >= 0:
             gui.voice_engine_combo.setCurrentIndex(idx)
 
-    saved_voice = s.value("free_voice_name", None)
-    if saved_voice and hasattr(gui, "free_voice_combo"):
-        idx = gui.free_voice_combo.findText(saved_voice)
-        if idx >= 0:
-            gui.free_voice_combo.setCurrentIndex(idx)
-
-    saved_gender = s.value("voice_gender", None)
+    saved_gender = s.value("voice_gender", "Female")
     if saved_gender and hasattr(gui, "voice_gender_combo"):
         idx = gui.voice_gender_combo.findText(saved_gender)
         if idx >= 0:
             gui.voice_gender_combo.setCurrentIndex(idx)
+
+    saved_voice = s.value("free_voice_name", "Ngọc Huyền (New) (Local)")
+    if saved_voice and hasattr(gui, "free_voice_combo"):
+        idx = gui.free_voice_combo.findText(saved_voice)
+        if idx < 0:
+            idx = gui.free_voice_combo.findData(saved_voice)
+        if idx >= 0:
+            gui.free_voice_combo.setCurrentIndex(idx)
+
 
     saved_speed = s.value("voice_speed", None)
     if saved_speed and hasattr(gui, "voice_speed_spin"):

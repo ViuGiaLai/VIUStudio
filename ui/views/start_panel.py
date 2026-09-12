@@ -447,7 +447,168 @@ def build_start_group(gui, left_layout):
     gui.reset_framing_btn.hide()
     output_scale_row.addWidget(gui.reset_framing_btn)
     output_quality_layout.addLayout(output_scale_row)
+
+    # --- Anti-Duplicate Mode (chong nhan dien Content ID) ---
+    _ad_sep = QFrame()
+    _ad_sep.setFrameShape(QFrame.HLine)
+    _ad_row = QHBoxLayout()
+    _ad_row.setSpacing(6)
+    gui.anti_duplicate_cb = QCheckBox("🛡️ Chế độ Chống trùng lặp")
+    gui.anti_duplicate_cb.setChecked(False)
+    gui.anti_duplicate_cb.setToolTip(
+        "Bật chế độ chống nhận diện video trùng lặp (Content ID):\n"
+        "  - 4 phong cách làm mới (Letterbox 2.05:1, Ambient 92%, Ken Burns Pan, Vệt sáng)\n"
+        "  - Xen kẽ 4p xuôi / 1p lật thông minh\n"
+        "  - Xoay vòng 4 tone màu điện ảnh mỗi 4 phút\n"
+        "  - Zoom 105% & Punch Zoom, Grain noise, Unsharp, Pitch shift\n\n"
+        "Nên bật khi upload video recap/dịch lên YouTube / TikTok / Facebook."
+    )
+    _ad_row.addWidget(gui.anti_duplicate_cb)
+    _ad_row.addStretch(1)
+
+    gui.anti_duplicate_config_btn = QPushButton("⚙️ Tùy chỉnh...")
+    gui.anti_duplicate_config_btn.setToolTip("Mở bảng tùy chỉnh: Chọn 4 phong cách làm mới khung hình, chế độ lật gương, tone màu...")
+    gui.anti_duplicate_config_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #1e293b;
+            color: #38bdf8;
+            border: 1px solid #334155;
+            border-radius: 5px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background-color: #334155;
+            color: #ffffff;
+            border-color: #38bdf8;
+        }
+    """)
+
+    def _open_ad_custom():
+        from app.anti_duplicate import AntiDuplicateSettings
+        from ui.dialogs.anti_duplicate_custom_dialog import AntiDuplicateCustomDialog
+        ad_settings = getattr(gui, "_anti_duplicate_settings", None)
+        if ad_settings is None and hasattr(gui, "current_project_state") and gui.current_project_state:
+            ps = gui.current_project_state
+            saved = None
+            if hasattr(ps, "get_setting"):
+                saved = ps.get_setting("anti_duplicate_custom_settings", None)
+            elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                saved = ps.settings.get("anti_duplicate_custom_settings", None)
+            if saved and isinstance(saved, dict):
+                ad_settings = AntiDuplicateSettings.from_dict(saved)
+        if ad_settings is None:
+            ad_settings = AntiDuplicateSettings(enabled=True, continuous_mode=True, allow_horizontal_flip=True)
+        dlg = AntiDuplicateCustomDialog(ad_settings, parent=gui)
+        if dlg.exec():
+            gui._anti_duplicate_settings = dlg.settings
+            gui.anti_duplicate_cb.setChecked(True)
+            if hasattr(gui, "current_project_state") and gui.current_project_state:
+                ps = gui.current_project_state
+                if hasattr(ps, "set_setting"):
+                    ps.set_setting("anti_duplicate_custom_settings", dlg.settings.to_dict())
+                elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                    ps.settings["anti_duplicate_custom_settings"] = dlg.settings.to_dict()
+
+    gui.anti_duplicate_config_btn.clicked.connect(_open_ad_custom)
+    _ad_row.addWidget(gui.anti_duplicate_config_btn)
+    output_quality_layout.addLayout(_ad_row)
+
+    gui.run_anti_duplicate_btn = QPushButton("⚡ Phân tích && Tạo video Chống trùng\n(Xem trước ngay)")
+    gui.run_anti_duplicate_btn.setMinimumHeight(44)
+    gui.run_anti_duplicate_btn.setToolTip(
+        "Tự động phân tích cảnh (Scene Detection), áp dụng Zoom kháng hash (≥105%), chỉnh màu tự động per-shot, "
+        "dịch cao độ audio (±2%) và tạo video xem trước ngay trên Preview Player & Timeline!"
+    )
+    gui.run_anti_duplicate_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #1e3a5f;
+            color: #93c5fd;
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 8px;
+            text-align: center;
+        }
+        QPushButton:hover {
+            background-color: #2563eb;
+            color: #ffffff;
+            border-color: #60a5fa;
+        }
+        QPushButton:pressed {
+            background-color: #1d4ed8;
+        }
+    """)
+    def _on_run_anti_dup_clicked():
+        gui.anti_duplicate_cb.setChecked(True)
+        if hasattr(gui, "auto_recap_config") and gui.auto_recap_config:
+            gui.auto_recap_config.anti_duplicate = True
+            gui.auto_recap_config.enabled = True
+        if hasattr(gui, "run_auto_recap_workflow"):
+            gui.run_auto_recap_workflow()
+        elif hasattr(gui, "pipeline_controller") and hasattr(gui.pipeline_controller, "run_auto_recap_pipeline"):
+            gui.pipeline_controller.run_auto_recap_pipeline()
+    gui.run_anti_duplicate_btn.clicked.connect(_on_run_anti_dup_clicked)
+    output_quality_layout.addWidget(gui.run_anti_duplicate_btn)
+
+    gui.compare_anti_duplicate_btn = QPushButton("🔍 So sánh Video Gốc vs Đã xử lý")
+    gui.compare_anti_duplicate_btn.setMinimumHeight(34)
+    gui.compare_anti_duplicate_btn.setToolTip("Mở cửa sổ so sánh song song 2 video để trực tiếp kiểm tra hình ảnh và âm thanh thay đổi.")
+    gui.compare_anti_duplicate_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #0f172a;
+            color: #38bdf8;
+            border: 1px dashed #0284c7;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px;
+        }
+        QPushButton:hover {
+            background-color: #1e293b;
+            color: #7dd3fc;
+            border-style: solid;
+        }
+    """)
+    if hasattr(gui, "open_video_compare_dialog"):
+        gui.compare_anti_duplicate_btn.clicked.connect(gui.open_video_compare_dialog)
+    output_quality_layout.addWidget(gui.compare_anti_duplicate_btn)
+
+    gui.anti_duplicate_hint = QLabel(
+        "Khi bật: Bấm nút bên trên để xử lý ngay (0% ➔ 100%), xem trước trên Preview và xem chi tiết hiệu ứng trên Timeline; hoặc áp dụng khi 'Export'.",
+        gui,
+    )
+    gui.anti_duplicate_hint.setObjectName("helperLabel")
+    gui.anti_duplicate_hint.setWordWrap(True)
+    output_quality_layout.addWidget(gui.anti_duplicate_hint)
+
+    def _on_ad_toggled(checked: bool):
+        if checked:
+            gui.anti_duplicate_hint.setText(
+                "🛡️ ĐÃ BẬT: Bấm nút 'Phân tích && Tạo video' để xem trước ngay hoặc bấm 'Export' để xuất file cuối."
+            )
+            gui.anti_duplicate_hint.setStyleSheet("color: #4ade80; font-weight: 500;")
+            if hasattr(gui, "auto_recap_config") and gui.auto_recap_config:
+                gui.auto_recap_config.anti_duplicate = True
+            if hasattr(gui, "log"):
+                gui.log("[Chống trùng lặp] Đã bật chế độ chống trùng lặp (Anti-Duplicate Mode).")
+        else:
+            gui.anti_duplicate_hint.setText(
+                "Khi bật: Bấm nút bên trên để xử lý ngay (0% ➔ 100%), xem trước trên Preview và xem chi tiết hiệu ứng trên Timeline; hoặc áp dụng khi 'Export'."
+            )
+            gui.anti_duplicate_hint.setStyleSheet("")
+            if hasattr(gui, "auto_recap_config") and gui.auto_recap_config:
+                gui.auto_recap_config.anti_duplicate = False
+            if hasattr(gui, "log"):
+                gui.log("[Chống trùng lặp] Đã tắt chế độ chống trùng lặp.")
+
+    gui.anti_duplicate_cb.toggled.connect(_on_ad_toggled)
+    # --- het Anti-Duplicate Mode ---
+
     output_layout.addWidget(output_quality_card)
+
 
     audio_cleanup_card, audio_cleanup_layout = _section_card()
     audio_cleanup_title = QLabel("Audio Processing")
@@ -500,27 +661,27 @@ def build_start_group(gui, left_layout):
 
     # --- Auto Edit Recap Card (Tier 1 & Tier 2) ---
     recap_card, recap_layout = _section_card()
-    recap_title = QLabel("Auto Edit Recap")
+    recap_title = QLabel("Tự động cắt ghép Recap")
     recap_title.setObjectName("sectionTitle")
     recap_layout.addWidget(recap_title)
 
     recap_row = QHBoxLayout()
-    gui.auto_recap_cb = QCheckBox("✨ Auto Edit Recap (Speed Priority)")
+    gui.auto_recap_cb = QCheckBox("✨ Tự động cắt ghép Recap (Tối ưu tốc độ)")
     gui.auto_recap_cb.setChecked(True)
     gui.auto_recap_cb.setToolTip(
-        "Keep every scene. Use scene boundaries only for Zoom, Pan, Crop, Speed, Freeze, Safe Flip and Anti-Repetition effects."
+        "Giữ nguyên toàn bộ nội dung video gốc. Sử dụng ranh giới cảnh để áp dụng Zoom, Pan, Crop, Đổi màu, Tốc độ, Đổi góc an toàn và chống lặp hiệu ứng."
     )
     recap_row.addWidget(gui.auto_recap_cb, 1)
 
-    gui.auto_recap_customize_btn = QPushButton("⚙ Customize")
+    gui.auto_recap_customize_btn = QPushButton("⚙ Tùy chỉnh")
     gui.auto_recap_customize_btn.setObjectName("secondaryActionBtn")
-    gui.auto_recap_customize_btn.setToolTip("Customize the 12 Auto Recap rules")
+    gui.auto_recap_customize_btn.setToolTip("Tùy chỉnh chi tiết 12 quy tắc cắt ghép Recap")
     if hasattr(gui, "open_auto_recap_settings_dialog"):
         gui.auto_recap_customize_btn.clicked.connect(gui.open_auto_recap_settings_dialog)
     recap_row.addWidget(gui.auto_recap_customize_btn)
     recap_layout.addLayout(recap_row)
 
-    recap_hint = QLabel("Keeps all content and applies shot-aware zoom, pan, crop, speed, freeze and safe flip effects. Click 'Customize' for advanced control.", gui)
+    recap_hint = QLabel("Giữ nguyên nội dung và tự động áp dụng hiệu ứng Zoom, Pan, Crop, chỉnh màu, đổi góc an toàn. Bấm 'Tùy chỉnh' để thay đổi chi tiết.", gui)
     recap_hint.setObjectName("helperLabel")
     recap_hint.setWordWrap(True)
     recap_layout.addWidget(recap_hint)
@@ -750,14 +911,16 @@ def build_start_group(gui, left_layout):
     gui.voice_section_card = voice_card
     gui.voice_engine_combo = QComboBox()
     # Keep the legacy ``fast`` value for project compatibility; it now means
-    # the offline Piper engine. New projects start with no forced engine so
-    # users can choose the TTS model explicitly.
+    # the offline Piper engine. Default to Piper as requested.
     gui.voice_engine_combo.addItem("Select TTS engine…", "")
     gui.voice_engine_combo.addItem("Piper [VI/EN] · Fast · Offline", "fast")
     gui.voice_engine_combo.addItem("Edge TTS [VI/EN] · Natural · Online", "edge")
     gui.voice_engine_combo.addItem("ZeroTTS [VI] · Natural · Not installed", "zerotts")
     gui.voice_engine_combo.addItem("KorvaTTS [VI/EN] · Natural / Local · Not installed", "korvatts")
     gui.voice_engine_combo.addItem("Kokoro-82M [EN] · Natural · Not installed", "kokoro")
+    idx_piper = gui.voice_engine_combo.findData("fast")
+    if idx_piper >= 0:
+        gui.voice_engine_combo.setCurrentIndex(idx_piper)
     gui.voice_engine_combo.setToolTip(
         "Choose the engine explicitly. Edge TTS requires Internet; engines marked Not installed require their runtime/model."
     )
@@ -767,7 +930,9 @@ def build_start_group(gui, left_layout):
     gui.free_voice_combo = QComboBox()
     gui.voice_gender_combo = QComboBox()
     gui.voice_gender_combo.addItems(["Any", "Male", "Female"])
+    gui.voice_gender_combo.setCurrentText("Female")
     gui.voice_gender_combo.currentTextChanged.connect(gui.on_voice_gender_changed)
+
     gui.voice_speed_spin = QComboBox(gui)
     gui.voice_speed_spin.setEditable(True)
     gui.voice_speed_spin.addItems(["0.8x", "0.9x", "1.0x", "1.1x", "1.2x", "1.3x", "1.4x", "1.5x", "1.6x", "1.8x", "2.0x"])

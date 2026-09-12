@@ -24,6 +24,139 @@ class BackgroundableProgressDialog(QProgressDialog):
             return
         super().closeEvent(event)
 
+
+class ExportProgressDialog(QDialog):
+    cancel_requested = Signal()
+    bg_requested = Signal()
+    canceled = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Exporting Video")
+        self.setWindowModality(Qt.WindowModal)
+        self.setMinimumWidth(520)
+        self.setStyleSheet("""
+            QDialog { background-color: #101826; color: #e6eef9; }
+            QLabel { color: #e6eef9; background: transparent; font-size: 13px; line-height: 1.4; }
+            QPushButton#exportCancelBtn {
+                background-color: #2a181e;
+                color: #fca5a5;
+                border: 1px solid #5c202d;
+                border-radius: 10px;
+                padding: 8px 18px;
+                font-weight: 700;
+                font-size: 12px;
+            }
+            QPushButton#exportCancelBtn:hover {
+                background-color: #3d1c25;
+                border-color: #ef4444;
+                color: #ffffff;
+            }
+            QPushButton#exportCancelBtn:disabled {
+                background-color: #1c1417;
+                color: #855b63;
+                border-color: #381a20;
+            }
+            QPushButton#exportBgBtn {
+                background-color: #24364f;
+                color: #ffffff;
+                border: 1px solid #335171;
+                border-radius: 10px;
+                padding: 8px 18px;
+                font-weight: 700;
+                font-size: 12px;
+            }
+            QPushButton#exportBgBtn:hover {
+                background-color: #2d4665;
+                border-color: #4575a8;
+            }
+            QProgressBar {
+                border: 1px solid #2a3a50;
+                border-radius: 10px;
+                text-align: center;
+                background-color: #111927;
+                color: white;
+                min-height: 20px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QProgressBar::chunk {
+                background-color: #4ed0b3;
+                border-radius: 10px;
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        self.label = QLabel("Exporting final video...\n\nWaiting to start...", self)
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label)
+
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        btn_row.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel", self)
+        self.cancel_btn.setObjectName("exportCancelBtn")
+        self.cancel_btn.clicked.connect(self._on_cancel_clicked)
+        btn_row.addWidget(self.cancel_btn)
+
+        self.bg_btn = QPushButton("Run in background", self)
+        self.bg_btn.setObjectName("exportBgBtn")
+        self.bg_btn.clicked.connect(self._on_bg_clicked)
+        btn_row.addWidget(self.bg_btn)
+
+        layout.addLayout(btn_row)
+
+    def _on_cancel_clicked(self):
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("Cancelling...")
+        self.label.setText("Exporting final video...\n\nCancelling export...")
+        self.cancel_requested.emit()
+        self.canceled.emit()
+
+    def _on_bg_clicked(self):
+        self.bg_requested.emit()
+        self.hide()
+
+    def setLabelText(self, text: str):
+        self.label.setText(str(text or ""))
+
+    def setValue(self, val: int):
+        self.progress_bar.setValue(int(val))
+
+    def value(self) -> int:
+        return self.progress_bar.value()
+
+    def setRange(self, min_val: int, max_val: int):
+        self.progress_bar.setRange(int(min_val), int(max_val))
+
+    def maximum(self) -> int:
+        return self.progress_bar.maximum()
+
+    def setMinimumDuration(self, _):
+        pass
+
+    def setAutoReset(self, _):
+        pass
+
+    def setAutoClose(self, _):
+        pass
+
+    def setCancelButtonText(self, text: str):
+        self.bg_btn.setText(str(text))
+
+    def closeEvent(self, event):
+        self.hide()
+        event.ignore()
+
 class StepWidget(QFrame):
     def __init__(self, name, parent=None):
         super().__init__(parent)

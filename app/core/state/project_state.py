@@ -78,6 +78,9 @@ class ProjectState:
         self.settings[name] = value
         self.touch()
 
+    def get_setting(self, name: str, default: Any = None) -> Any:
+        return self.settings.get(name, default)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "project_id": self.project_id,

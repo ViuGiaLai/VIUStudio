@@ -1459,7 +1459,7 @@ class MpvMediaPlayerBackend(QObject):
                 alignment=subtitle_style.get("alignment", 2),
                 margin_v=subtitle_style.get("margin_v", 30),
                 font_name=subtitle_style.get("font_name", "Arial"),
-                font_size=subtitle_style.get("font_size", 18),
+                font_size=subtitle_style.get("font_size", 52),
                 font_color=subtitle_style.get("font_color", "&H00FFFFFF"),
                 background_box=subtitle_style.get("background_box", False),
                 animation_style=subtitle_style.get("animation", "Static"),

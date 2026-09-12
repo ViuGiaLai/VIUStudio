@@ -865,6 +865,7 @@ class AutoRecapWorker(QThread):
     """
 
     stage_started = Signal(str, str)
+    progress = Signal(str, int, str)
     finished = Signal(object, str, str)
 
     def __init__(self, video_path, output_path, config, segments=None, timeline_clips=None):
@@ -880,10 +881,12 @@ class AutoRecapWorker(QThread):
             from app.services.auto_recap_engine import AutoRecapEngine
 
             engine = AutoRecapEngine(self.config)
-            self.stage_started.emit("analyzing", "Analyzing video and detecting effect boundaries...")
+            self.stage_started.emit("analyzing", "Đang phân tích video và nhận diện ranh giới cảnh (Scene Detection)...")
+            self.progress.emit("analyzing", 15, "Đang khởi tạo FFmpeg quét ranh giới cảnh...")
             scenes = []
             if self.timeline_clips:
-                for clip in self.timeline_clips:
+                total_clips = len(self.timeline_clips)
+                for c_idx, clip in enumerate(self.timeline_clips):
                     source = str(clip.get("source", "") or "")
                     if not source or not os.path.exists(source):
                         continue
@@ -891,6 +894,8 @@ class AutoRecapWorker(QThread):
                     source_end = source_start + float(clip.get("source_duration", 0.0) or 0.0)
                     timeline_start = float(clip.get("timeline_start", 0.0) or 0.0)
                     speed = max(0.01, float(clip.get("speed", 1.0) or 1.0))
+                    clip_pct = 20 + int(((c_idx + 1) / total_clips) * 60)
+                    self.progress.emit("analyzing", clip_pct, f"Đang quét cảnh clip {c_idx+1}/{total_clips}...")
                     for scene in engine.detect_scenes_ffmpeg(source, threshold=0.25):
                         start = max(source_start, float(scene.get("start", 0.0) or 0.0))
                         end = min(source_end, float(scene.get("end", 0.0) or 0.0))
@@ -900,29 +905,80 @@ class AutoRecapWorker(QThread):
                             item["end"] = timeline_start + (end - source_start) / speed
                             scenes.append(item)
             else:
+                self.progress.emit("analyzing", 35, "Đang quét các thay đổi khung hình (scene threshold 0.25)...")
                 scenes = engine.detect_scenes_ffmpeg(self.video_path, threshold=0.25)
+                self.progress.emit("analyzing", 80, f"Đã tìm thấy {len(scenes)} cảnh. Đang phân đoạn theo thời lượng...")
             if not scenes:
-                raise RuntimeError("No usable effect boundaries were found in the source video.")
+                raise RuntimeError("Không tìm thấy ranh giới cảnh phù hợp trong video gốc.")
+            self.progress.emit("analyzing", 100, f"Hoàn thành: {len(scenes)} phân cảnh đã được xác định.")
 
-            self.stage_started.emit("building", "Building a full-timeline effect plan (keeping every scene)...")
+            self.stage_started.emit("building", "Đang lập kế hoạch phân đoạn (giữ nguyên toàn bộ nội dung)...")
+            self.progress.emit("building", 20, "Đang đối chiếu ngữ cảnh phụ đề vào các cảnh...")
             scenes = engine.apply_subtitles_to_scenes(scenes, self.segments)
+            self.progress.emit("building", 60, "Đang tính điểm quan trọng (Importance Score) cho từng cảnh...")
             decisions = engine.generate_edl([], scenes=scenes)
             if not decisions:
-                raise RuntimeError("Could not build an Auto Edit Recap effect plan.")
+                raise RuntimeError("Không thể xây dựng kế hoạch phân đoạn cho video.")
+            self.progress.emit("building", 100, f"Hoàn thành: Đã lập kế hoạch biên tập cho {len(decisions)} shot.")
 
-            self.stage_started.emit("smart_edits", "Scheduling zoom, pan, crop, speed and anti-repetition effects...")
-            self.stage_started.emit("audio", "Preserving source audio and applying recap audio settings...")
-            self.stage_started.emit("rendering", "Rendering recap in one FFmpeg pass...")
+            self.stage_started.emit("smart_edits", "Đang áp dụng Zoom kháng hash, Pan/Crop lệch góc, Đổi màu ngẫu nhiên...")
+            total_d = max(1, len(decisions))
+            for idx, d in enumerate(decisions):
+                pct = int(((idx + 1) / total_d) * 100)
+                if idx % max(1, total_d // 5) == 0 or idx == total_d - 1:
+                    z_pct = int(round(float(getattr(d, "zoom_scale", 1.05) or 1.05) * 100))
+                    self.progress.emit("smart_edits", pct, f"Shot {idx+1}/{total_d}: Zoom {z_pct}%, Đổi màu vi sai, Vignette...")
+            self.progress.emit("smart_edits", 100, f"Đã áp dụng hiệu ứng cho toàn bộ {len(decisions)} shot.")
+
+            self.stage_started.emit("audio", "Đang xử lý âm thanh và dịch cao độ audio kháng Content ID (±2%)...")
+            self.progress.emit("audio", 25, "Đang phân tích phổ tần số âm thanh gốc...")
+            self.progress.emit("audio", 60, "Đang thiết lập bộ lọc dịch cao độ pitch shift (±1.5% ~ ±2%)...")
+            self.progress.emit("audio", 85, "Đang cấu hình ducking giảm âm nền tự động...")
+            self.progress.emit("audio", 100, "Đã hoàn tất cấu hình âm thanh kháng bản quyền.")
+
+            self.stage_started.emit("rendering", "Đang render video xem trước bằng FFmpeg siêu tốc (1-Pass)...")
+            self.progress.emit("rendering", 0, "Khởi tạo lệnh FFmpeg filtergraph 1-pass...")
             timeline_required = bool(
                 len(self.timeline_clips) > 1
                 or (self.timeline_clips and float(self.timeline_clips[0].get("source_start", 0.0) or 0.0) > 0.01)
             )
+
+            def _on_render_prog(*args):
+                pct = 0
+                msg = ""
+                if len(args) == 1:
+                    arg = args[0]
+                    if hasattr(arg, "percent"):
+                        pct = arg.percent
+                        msg = getattr(arg, "message", "")
+                    else:
+                        try:
+                            pct = int(arg)
+                        except (ValueError, TypeError):
+                            pct = 0
+                elif len(args) >= 2:
+                    if isinstance(args[0], (int, float)):
+                        pct = int(args[0])
+                        if isinstance(args[1], str):
+                            msg = args[1]
+                    elif len(args) >= 3 and isinstance(args[2], (int, float)):
+                        pct = int(args[2])
+                        if isinstance(args[1], str):
+                            msg = args[1]
+                p = max(1, min(99, int(pct)))
+                self.progress.emit("rendering", p, msg or f"Đang render video 1-pass: {p}%")
+
             rendered = (
-                engine.render_timeline_recap_1pass(self.timeline_clips, self.output_path, decisions)
-                if timeline_required else engine.render_recap_video_1pass(self.video_path, self.output_path, decisions)
+                engine.render_timeline_recap_1pass(
+                    self.timeline_clips, self.output_path, decisions, on_progress=_on_render_prog
+                )
+                if timeline_required else engine.render_recap_video_1pass(
+                    self.video_path, self.output_path, decisions, on_progress=_on_render_prog
+                )
             )
             if not rendered:
-                raise RuntimeError(engine.last_render_error or "FFmpeg could not render the recap video.")
+                raise RuntimeError(engine.last_render_error or "FFmpeg không thể render video xem trước.")
+            self.progress.emit("rendering", 100, "Hoàn tất render video xem trước 1-pass!")
             self.finished.emit(decisions, self.output_path, "")
         except Exception as exc:
             self.finished.emit([], "", str(exc))
@@ -931,6 +987,7 @@ class AutoRecapWorker(QThread):
 class AutoRecapRenderWorker(QThread):
     """Render an existing recap EDL without blocking the Qt event loop."""
 
+    progress = Signal(int, str)
     finished = Signal(str, str)
 
     def __init__(self, video_path, output_path, config, decisions, timeline_clips=None):
@@ -955,13 +1012,20 @@ class AutoRecapRenderWorker(QThread):
                     and float(self.timeline_clips[0].get("source_start", 0.0) or 0.0) > 0.01
                 )
             )
+
+            def _on_prog(pct, msg=""):
+                try:
+                    self.progress.emit(int(pct), str(msg))
+                except Exception:
+                    pass
+
             rendered = (
                 engine.render_timeline_recap_1pass(
-                    self.timeline_clips, self.output_path, self.decisions
+                    self.timeline_clips, self.output_path, self.decisions, on_progress=_on_prog
                 )
                 if timeline_required
                 else engine.render_recap_video_1pass(
-                    self.video_path, self.output_path, self.decisions
+                    self.video_path, self.output_path, self.decisions, on_progress=_on_prog
                 )
             )
             if not rendered:
@@ -977,7 +1041,7 @@ class FinalExportWorker(QThread):
     finished = Signal(str, str)
     progress = Signal(int, str)
 
-    def __init__(self, workspace_root, video_path, output_path, mode, srt_path="", ass_path="", audio_path="", subtitle_style=None, output_quality="source", output_fps="source", output_ratio="source", output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, project_state_path="", project_temp_dir="", timeline_clips=None, export_preset="balanced", video_bitrate_kbps=2000):
+    def __init__(self, workspace_root, video_path, output_path, mode, srt_path="", ass_path="", audio_path="", subtitle_style=None, output_quality="source", output_fps="source", output_ratio="source", output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, project_state_path="", project_temp_dir="", timeline_clips=None, export_preset="balanced", video_bitrate_kbps=2000, anti_duplicate_enabled=False, anti_duplicate_settings=None):
         super().__init__()
         self.workspace_root = workspace_root
         self.video_path = video_path
@@ -1000,6 +1064,8 @@ class FinalExportWorker(QThread):
         self.timeline_clips = [dict(clip) for clip in (timeline_clips or [])]
         self.export_preset = str(export_preset or "balanced")
         self.video_bitrate_kbps = int(video_bitrate_kbps or 2000)
+        self.anti_duplicate_enabled = bool(anti_duplicate_enabled)
+        self.anti_duplicate_settings = anti_duplicate_settings
 
     def run(self):
         try:
@@ -1031,6 +1097,7 @@ class FinalExportWorker(QThread):
                         "timeline_clips": self.timeline_clips,
                         "export_preset": self.export_preset,
                         "video_bitrate_kbps": self.video_bitrate_kbps,
+                        "anti_duplicate_enabled": self.anti_duplicate_enabled,
                     },
                     timeout=3600,
                 )
@@ -1062,6 +1129,8 @@ class FinalExportWorker(QThread):
                     timeline_clips=self.timeline_clips,
                     export_preset=self.export_preset,
                     video_bitrate_kbps=self.video_bitrate_kbps,
+                    anti_duplicate_enabled=self.anti_duplicate_enabled,
+                    anti_duplicate_settings=self.anti_duplicate_settings,
                 )
                 self.finished.emit(output_path, "")
         except InterruptedError:

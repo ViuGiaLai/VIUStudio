@@ -32,7 +32,7 @@ class WindowUiMixin:
             "tiktok": {
                 "label": "TikTok",
                 "font_name": "Montserrat",
-                "font_size": 30,
+                "font_size": 56,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFD400",
                 "outline_color": "#000000",
@@ -52,7 +52,7 @@ class WindowUiMixin:
             "youtube": {
                 "label": "YouTube",
                 "font_name": "Roboto",
-                "font_size": 30,
+                "font_size": 48,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFFFFF",
                 "outline_color": "#000000",
@@ -72,7 +72,7 @@ class WindowUiMixin:
             "minimal": {
                 "label": "Short",
                 "font_name": "Inter",
-                "font_size": 30,
+                "font_size": 44,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFFFFF",
                 "outline_color": "#000000",
@@ -90,7 +90,7 @@ class WindowUiMixin:
             "custom": {
                 "label": "Custom",
                 "font_name": "Segoe UI",
-                "font_size": 30,
+                "font_size": 52,
                 "font_color": "#FFFFFF",
                 "highlight_color": "#FFD400",
                 "outline_color": "#000000",
@@ -347,6 +347,14 @@ class WindowUiMixin:
             if not getattr(self, "_subtitle_position_drag_signal_bound", False):
                 self.video_view.subtitlePositionChanged.connect(self.on_subtitle_position_dragged)
                 self._subtitle_position_drag_signal_bound = True
+        if hasattr(self, "video_view") and hasattr(self.video_view, "subtitleFontSizeChanged"):
+            if not getattr(self, "_subtitle_font_scale_signal_bound", False):
+                self.video_view.subtitleFontSizeChanged.connect(self.on_subtitle_font_size_scaled)
+                self._subtitle_font_scale_signal_bound = True
+        if hasattr(self, "video_view") and hasattr(self.video_view, "subtitleClicked"):
+            if not getattr(self, "_subtitle_clicked_signal_bound", False):
+                self.video_view.subtitleClicked.connect(self.on_preview_subtitle_clicked)
+                self._subtitle_clicked_signal_bound = True
         if hasattr(self, "video_view") and hasattr(self.video_view, "textLayerSelected"):
             if not getattr(self, "_text_layer_signal_bound", False):
                 self.video_view.textLayerSelected.connect(self._on_text_layer_selected_from_preview)

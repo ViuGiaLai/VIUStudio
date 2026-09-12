@@ -182,8 +182,15 @@ def format_segments_to_srt(segments, max_gap_ms: float = 100.0):
                 end_s = next_start
         end = format_timestamp(end_s)
         lines.append(f"{idx + 1}")
-        lines.append(f"{start} --> {end}")
-        lines.append(f"{seg['text'].strip()}\n")
+        seg_text = str(
+            seg.get("final_text")
+            or seg.get("text")
+            or seg.get("subtitle_text")
+            or seg.get("raw_translation")
+            or seg.get("original_text")
+            or ""
+        ).strip()
+        lines.append(f"{seg_text}\n")
     return "\n".join(lines)
 
 

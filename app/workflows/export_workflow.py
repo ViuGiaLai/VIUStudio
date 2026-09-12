@@ -55,7 +55,7 @@ class ExportWorkflow:
         style.setdefault("alignment", 2)
         style.setdefault("margin_v", 30)
         style.setdefault("font_name", "Arial")
-        style.setdefault("font_size", 18)
+        style.setdefault("font_size", 52)
         style.setdefault("font_color", "&H00FFFFFF")
         style.setdefault("background_box", False)
         style.setdefault("animation", "Static")
@@ -330,7 +330,7 @@ class ExportWorkflow:
             cancellation_check=cancellation_check,
             output_path_to_clean=partial,
         )
-        if not ok and "h264_nvenc" in command:
+        if not ok and any(e in command for e in ("h264_nvenc", "h264_qsv", "h264_amf")):
             fallback_args = build_export_h264_encoder_args(
                 ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
             )
@@ -376,6 +376,7 @@ class ExportWorkflow:
         video_bitrate_kbps=0,
         progress_callback=None,
         cancellation_check=None,
+        anti_duplicate_settings=None,
     ):
         print(f"[Export] _export_subtitle_video: mask_regions={mask_regions}, logo_layers={logo_layers}")
         print(f"[Export] ass_path={ass_path}, exists={os.path.exists(ass_path) if ass_path else False}")
@@ -403,6 +404,7 @@ class ExportWorkflow:
                 video_bitrate_kbps=video_bitrate_kbps,
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check,
+                anti_duplicate_settings=anti_duplicate_settings,
             )
         else:
             ok = self.engine_runtime.embed_subtitles(
@@ -425,6 +427,7 @@ class ExportWorkflow:
                 video_bitrate_kbps=video_bitrate_kbps,
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check,
+                anti_duplicate_settings=anti_duplicate_settings,
             )
         if not ok:
             raise RuntimeError("Failed to burn subtitles into the output video.")
@@ -489,14 +492,18 @@ class ExportWorkflow:
             return mask_regions, logo_layers, text_layers, blur_regions
         
         try:
+            state_settings = state.get("settings", {}) if isinstance(state, dict) else getattr(state, "settings", {})
+            state_artifacts = state.get("artifacts", {}) if isinstance(state, dict) else getattr(state, "artifacts", {})
+            
             # Extract logo layers from timeline
-            timeline_data = state.artifacts.get("timeline") if (hasattr(state, "artifacts") and isinstance(state.artifacts, dict)) else None
-            if not timeline_data and hasattr(state, "timeline") and state.timeline:
-                timeline_data = state.timeline
-            if not timeline_data and hasattr(state, "project_root") and state.project_root:
+            timeline_data = state_artifacts.get("timeline") if isinstance(state_artifacts, dict) else None
+            if not timeline_data:
+                timeline_data = state.get("timeline") if isinstance(state, dict) else getattr(state, "timeline", None)
+            project_root = state.get("project_root") if isinstance(state, dict) else getattr(state, "project_root", None)
+            if not timeline_data and project_root:
                 candidates = [
-                    os.path.join(state.project_root, "timeline", "timeline.json"),
-                    os.path.join(state.project_root, "timeline.json"),
+                    os.path.join(project_root, "timeline", "timeline.json"),
+                    os.path.join(project_root, "timeline.json"),
                 ]
                 for tl_file in candidates:
                     if os.path.exists(tl_file):
@@ -537,18 +544,36 @@ class ExportWorkflow:
                     if track_type == "mask":
                         for layer in layers:
                             try:
+                                if not bool(layer.get("visible", True)):
+                                    continue
+                                val_x = layer.get("position_x") if layer.get("position_x") is not None else layer.get("x", 0.3)
+                                raw_x = float(val_x if val_x is not None else 0.3)
+                                x = raw_x / 100.0 if raw_x > 1.0 else raw_x
+
+                                val_y = layer.get("position_y") if layer.get("position_y") is not None else layer.get("y", 0.4)
+                                raw_y = float(val_y if val_y is not None else 0.4)
+                                y = raw_y / 100.0 if raw_y > 1.0 else raw_y
+
+                                val_w = layer.get("width") if layer.get("width") is not None else layer.get("w", 0.4)
+                                raw_w = float(val_w if val_w is not None else 0.4)
+                                w = raw_w / 100.0 if raw_w > 1.0 else raw_w
+
+                                val_h = layer.get("height") if layer.get("height") is not None else layer.get("h", 0.2)
+                                raw_h = float(val_h if val_h is not None else 0.2)
+                                h = raw_h / 100.0 if raw_h > 1.0 else raw_h
+
                                 mask_regions.append({
-                                    "x": float(layer.get("position_x", 0.3)),
-                                    "y": float(layer.get("position_y", 0.4)),
-                                    "width": float(layer.get("width", 0.4)),
-                                    "height": float(layer.get("height", 0.2)),
+                                    "x": max(0.0, min(1.0, x)),
+                                    "y": max(0.0, min(1.0, y)),
+                                    "width": max(0.001, min(1.0, w)),
+                                    "height": max(0.001, min(1.0, h)),
                                     "color": str(layer.get("color", "#000000")),
                                     "mode": str(layer.get("mode", "solid")),
-                                    "opacity": float(layer.get("opacity", 1.0)),
-                                    "pixelate_size": int(layer.get("pixelate_size", 12)),
-                                    "blur_strength": int(layer.get("blur_strength", 20)),
-                                    "start": max(0.0, float(layer.get("start", 0.0))),
-                                    "end": max(0.0, float(layer.get("end", 0.0))),
+                                    "opacity": float(layer.get("opacity", 1.0) if layer.get("opacity") is not None else 1.0),
+                                    "pixelate_size": int(layer.get("pixelate_size", 12) or 12),
+                                    "blur_strength": int(layer.get("blur_strength", 20) or 20),
+                                    "start": max(0.0, float(layer.get("start", 0.0) or 0.0)),
+                                    "end": max(0.0, float(layer.get("end", 0.0) or 0.0)),
                                 })
                             except (TypeError, ValueError):
                                 continue
@@ -556,58 +581,74 @@ class ExportWorkflow:
 
                     if track_type == "blur":
                         for layer in layers:
-                            if not layer.get("visible", True):
+                            if not bool(layer.get("visible", True)):
                                 continue
                             try:
+                                val_x = layer.get("position_x") if layer.get("position_x") is not None else layer.get("x", 0.0)
+                                raw_x = float(val_x if val_x is not None else 0.0)
+                                x = raw_x / 100.0 if raw_x > 1.0 else raw_x
+
+                                val_y = layer.get("position_y") if layer.get("position_y") is not None else layer.get("y", 0.0)
+                                raw_y = float(val_y if val_y is not None else 0.0)
+                                y = raw_y / 100.0 if raw_y > 1.0 else raw_y
+
+                                val_w = layer.get("width") if layer.get("width") is not None else layer.get("w", 0.0)
+                                raw_w = float(val_w if val_w is not None else 0.0)
+                                w = raw_w / 100.0 if raw_w > 1.0 else raw_w
+
+                                val_h = layer.get("height") if layer.get("height") is not None else layer.get("h", 0.0)
+                                raw_h = float(val_h if val_h is not None else 0.0)
+                                h = raw_h / 100.0 if raw_h > 1.0 else raw_h
+
                                 blur_regions.append({
-                                    "x": float(layer.get("position_x", 0.0)),
-                                    "y": float(layer.get("position_y", 0.0)),
-                                    "width": float(layer.get("width", 0.0)),
-                                    "height": float(layer.get("height", 0.0)),
-                                    "blur_strength": float(layer.get("blur_strength", 20.0)),
-                                    "blur_opacity": float(layer.get("blur_opacity", 1.0)),
+                                    "x": max(0.0, min(1.0, x)),
+                                    "y": max(0.0, min(1.0, y)),
+                                    "width": max(0.001, min(1.0, w)),
+                                    "height": max(0.001, min(1.0, h)),
+                                    "blur_strength": float(layer.get("blur_strength", 20.0) or 20.0),
+                                    "blur_opacity": float(layer.get("blur_opacity", 1.0) if layer.get("blur_opacity") is not None else 1.0),
                                     "pixelate": bool(layer.get("pixelate", False)),
-                                    "pixelate_size": int(layer.get("pixelate_size", 12)),
-                                    "start": max(0.0, float(layer.get("start", 0.0))),
-                                    "end": max(0.0, float(layer.get("end", 0.0))),
+                                    "pixelate_size": int(layer.get("pixelate_size", 12) or 12),
+                                    "start": max(0.0, float(layer.get("start", 0.0) or 0.0)),
+                                    "end": max(0.0, float(layer.get("end", 0.0) or 0.0)),
                                 })
                             except (TypeError, ValueError):
                                 continue
                     
-                    # Extract logo/image layers from image track (type="image" or "sticker")
-                    if track_type in ("image", "sticker"):
+                    # Extract logo/image layers from image track (type="image" or "sticker" or "logo")
+                    if track_type in ("image", "sticker", "logo"):
                         for layer in layers:
-                            if layer.get("visible", True):
-                                source = layer.get("source", "")
+                            if bool(layer.get("visible", True)):
+                                source = str(layer.get("source", "")).strip()
                                 if not source:
                                     continue
                                 transform = layer.get("transform", {}) or {}
-                                val_x = transform.get("x", 0.0)
+                                val_x = transform.get("x") if transform.get("x") is not None else layer.get("position_x", layer.get("x", 0.0))
                                 raw_x = float(val_x if val_x is not None else 0.0)
                                 x = raw_x / 100.0 if raw_x > 1.0 else raw_x
 
-                                val_y = transform.get("y", 0.0)
+                                val_y = transform.get("y") if transform.get("y") is not None else layer.get("position_y", layer.get("y", 0.0))
                                 raw_y = float(val_y if val_y is not None else 0.0)
                                 y = raw_y / 100.0 if raw_y > 1.0 else raw_y
 
-                                val_sx = transform.get("scale_x", 0.2)
+                                val_sx = transform.get("scale_x") if transform.get("scale_x") is not None else layer.get("width", layer.get("w", 0.2))
                                 raw_sx = float(val_sx if val_sx is not None else 0.2)
                                 w = raw_sx / 100.0 if raw_sx > 1.0 else raw_sx
 
-                                val_sy = transform.get("scale_y", 0.2)
+                                val_sy = transform.get("scale_y") if transform.get("scale_y") is not None else layer.get("height", layer.get("h", 0.2))
                                 raw_sy = float(val_sy if val_sy is not None else 0.2)
                                 h = raw_sy / 100.0 if raw_sy > 1.0 else raw_sy
 
-                                val_rot = transform.get("rotation", 0.0)
+                                val_rot = transform.get("rotation") if transform.get("rotation") is not None else layer.get("rotation", 0.0)
                                 rotation = float(val_rot if val_rot is not None else 0.0)
 
                                 logo_layers.append({
                                     "source": str(source),
-                                    "x": x,
-                                    "y": y,
-                                    "width": w,
-                                    "height": h,
-                                    "opacity": float(layer.get("opacity", 1.0) or 1.0),
+                                    "x": max(0.0, min(1.0, x)),
+                                    "y": max(0.0, min(1.0, y)),
+                                    "width": max(0.001, min(1.0, w)),
+                                    "height": max(0.001, min(1.0, h)),
+                                    "opacity": float(layer.get("opacity", 1.0) if layer.get("opacity") is not None else 1.0),
                                     "rotation": rotation,
                                     "start": max(0.0, float(layer.get("start", 0.0) or 0.0)),
                                     "end": max(0.0, float(layer.get("end", 0.0) or 0.0)),
@@ -649,44 +690,76 @@ class ExportWorkflow:
                             except (TypeError, ValueError):
                                 continue
 
-            preview_visibility = getattr(state, "settings", {}).get("preview_track_visibility") or {}
+            preview_visibility = state_settings.get("preview_track_visibility") or {}
             m1_visible = preview_visibility.get("M1", True) if isinstance(preview_visibility, dict) else True
             # Fallback: extract mask regions from settings if not found in timeline
             if not mask_regions and m1_visible:
-                mask_state = state.settings.get("mask_state", {})
+                mask_state = state_settings.get("mask_state", {})
                 print(f"[Export] Fallback: checking settings mask_state: {mask_state}")
                 if mask_state and mask_state.get("enabled", False):
                     regions = mask_state.get("regions", [])
                     print(f"[Export] Found {len(regions)} mask region(s) in settings")
                     for region in regions:
+                        val_x = region.get("position_x") if region.get("position_x") is not None else region.get("x", 0.3)
+                        raw_x = float(val_x if val_x is not None else 0.3)
+                        x = raw_x / 100.0 if raw_x > 1.0 else raw_x
+
+                        val_y = region.get("position_y") if region.get("position_y") is not None else region.get("y", 0.4)
+                        raw_y = float(val_y if val_y is not None else 0.4)
+                        y = raw_y / 100.0 if raw_y > 1.0 else raw_y
+
+                        val_w = region.get("width") if region.get("width") is not None else region.get("w", 0.4)
+                        raw_w = float(val_w if val_w is not None else 0.4)
+                        w = raw_w / 100.0 if raw_w > 1.0 else raw_w
+
+                        val_h = region.get("height") if region.get("height") is not None else region.get("h", 0.2)
+                        raw_h = float(val_h if val_h is not None else 0.2)
+                        h = raw_h / 100.0 if raw_h > 1.0 else raw_h
+
                         mask_regions.append({
-                            "x": float(region.get("x", 0.3)),
-                            "y": float(region.get("y", 0.4)),
-                            "width": float(region.get("width", 0.4)),
-                            "height": float(region.get("height", 0.2)),
+                            "x": max(0.0, min(1.0, x)),
+                            "y": max(0.0, min(1.0, y)),
+                            "width": max(0.001, min(1.0, w)),
+                            "height": max(0.001, min(1.0, h)),
                             "mode": str(region.get("mode", "solid")),
                             "color": str(region.get("color", "#000000")),
-                            "pixelate_size": int(region.get("pixelate_size", 12)),
-                            "blur_strength": int(region.get("blur_strength", 20)),
+                            "pixelate_size": int(region.get("pixelate_size", 12) or 12),
+                            "blur_strength": int(region.get("blur_strength", 20) or 20),
                         })
 
             b1_visible = preview_visibility.get("B1", True) if isinstance(preview_visibility, dict) else True
             # Fallback: extract blur regions from settings if not found in timeline
             if not blur_regions and b1_visible:
-                blur_state = getattr(state, "settings", {}).get("blur_state", {})
+                blur_state = state_settings.get("blur_state", {})
                 print(f"[Export] Fallback: checking settings blur_state: {blur_state}")
                 if blur_state and blur_state.get("enabled", False):
                     regions = blur_state.get("regions", [])
                     print(f"[Export] Found {len(regions)} blur region(s) in settings")
                     for region in regions:
                         try:
+                            val_x = region.get("position_x") if region.get("position_x") is not None else region.get("x", 0.0)
+                            raw_x = float(val_x if val_x is not None else 0.0)
+                            x = raw_x / 100.0 if raw_x > 1.0 else raw_x
+
+                            val_y = region.get("position_y") if region.get("position_y") is not None else region.get("y", 0.0)
+                            raw_y = float(val_y if val_y is not None else 0.0)
+                            y = raw_y / 100.0 if raw_y > 1.0 else raw_y
+
+                            val_w = region.get("width") if region.get("width") is not None else region.get("w", 0.0)
+                            raw_w = float(val_w if val_w is not None else 0.0)
+                            w = raw_w / 100.0 if raw_w > 1.0 else raw_w
+
+                            val_h = region.get("height") if region.get("height") is not None else region.get("h", 0.0)
+                            raw_h = float(val_h if val_h is not None else 0.0)
+                            h = raw_h / 100.0 if raw_h > 1.0 else raw_h
+
                             blur_regions.append({
-                                "x": float(region.get("x", 0.0) or 0.0),
-                                "y": float(region.get("y", 0.0) or 0.0),
-                                "width": float(region.get("width", 0.0) or 0.0),
-                                "height": float(region.get("height", 0.0) or 0.0),
+                                "x": max(0.0, min(1.0, x)),
+                                "y": max(0.0, min(1.0, y)),
+                                "width": max(0.001, min(1.0, w)),
+                                "height": max(0.001, min(1.0, h)),
                                 "blur_strength": float(region.get("blur_strength", 20.0) or 20.0),
-                                "blur_opacity": float(region.get("blur_opacity", 1.0) or 1.0),
+                                "blur_opacity": float(region.get("blur_opacity", 1.0) if region.get("blur_opacity") is not None else 1.0),
                                 "pixelate": bool(region.get("pixelate", False)),
                                 "pixelate_size": int(region.get("pixelate_size", 12) or 12),
                                 "start": max(0.0, float(region.get("start", 0.0) or 0.0)),
@@ -832,16 +905,30 @@ class ExportWorkflow:
         # libass event geometry byte-for-byte identical in MPV and FFmpeg.
         # Other ASS paths are still rebuilt from SRT so stale legacy exports
         # cannot silently ignore style changes.
-        if ass_path and os.path.exists(ass_path) and os.path.basename(ass_path).lower().startswith("live_preview_"):
-            print(f"[Export] Reusing live preview ASS for WYSIWYG: {ass_path}")
-            return ass_path
-        if not srt_path or not os.path.exists(srt_path):
-            return ass_path if ass_path and os.path.exists(ass_path) else ""
         from video_processor import srt_to_ass
         style = self._subtitle_options(subtitle_style)
         source_w, source_h = self.engine_runtime.get_video_dimensions(video_path)
         width = int(target_width or source_w or 1920)
         height = int(target_height or source_h or 1080)
+
+        # Check if existing ass_path matches the target canvas resolution
+        can_reuse = False
+        if ass_path and os.path.exists(ass_path):
+            try:
+                with open(ass_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read(1024)
+                m_x = re.search(r"PlayResX:\s*(\d+)", content)
+                m_y = re.search(r"PlayResY:\s*(\d+)", content)
+                if m_x and m_y and int(m_x.group(1)) == width and int(m_y.group(1)) == height:
+                    can_reuse = True
+            except Exception:
+                can_reuse = False
+
+        if can_reuse and os.path.basename(ass_path).lower().startswith("live_preview_"):
+            print(f"[Export] Reusing matching live preview ASS for WYSIWYG: {ass_path}")
+            return ass_path
+        if not srt_path or not os.path.exists(srt_path):
+            return ass_path if ass_path and os.path.exists(ass_path) else ""
         generated = srt_to_ass(
             srt_path, width, height,
             alignment=int(style["alignment"]), margin_v=int(style["margin_v"]),
@@ -893,34 +980,42 @@ class ExportWorkflow:
         timeline_clips=None,
         export_preset: str = "balanced",
         video_bitrate_kbps: int = 2000,
+        anti_duplicate_enabled: bool = False,
+        anti_duplicate_settings=None,
     ) -> str:
         subtitle_style = subtitle_style or {}
         target_w, target_h = self._resolve_target_dimensions(video_path, output_quality, output_ratio)
         target_fps = self._resolve_target_fps(output_fps)
-        # MPV renders the live ASS track on the source frame before its
-        # Fit/Fill presentation transform.  Author export ASS in that same
-        # source render space; embed_ass_subtitles applies the canvas transform
-        # after the ASS pass so preview and export share one coordinate system.
+        # Subtitles and text overlays are rendered on the output canvas space
+        # so preview and export share the exact same coordinates and sizing 1:1.
         source_w, source_h = self.engine_runtime.get_video_dimensions(video_path)
         ass_style = dict(subtitle_style)
-        if ass_style.get("custom_position_enabled") and target_w and target_h:
-            try:
-                mode_key = str(output_scale_mode or "fit").strip().lower()
-                fx = max(0.0, min(1.0, float(output_fill_focus_x)))
-                fy = max(0.0, min(1.0, float(output_fill_focus_y)))
-                scale = max(target_w / source_w, target_h / source_h) if mode_key == "fill" else min(target_w / source_w, target_h / source_h)
-                displayed_w, displayed_h = source_w * scale, source_h * scale
-                offset_x = (target_w - displayed_w) * (fx if mode_key == "fill" else 0.5)
-                offset_y = (target_h - displayed_h) * (fy if mode_key == "fill" else 0.5)
-                x_canvas = float(ass_style.get("custom_position_x", 50.0)) * target_w / 100.0
-                y_canvas = float(ass_style.get("custom_position_y", 86.0)) * target_h / 100.0
-                ass_style["custom_position_x"] = max(0.0, min(100.0, (x_canvas - offset_x) * 100.0 / displayed_w))
-                ass_style["custom_position_y"] = max(0.0, min(100.0, (y_canvas - offset_y) * 100.0 / displayed_h))
-            except (TypeError, ValueError, ZeroDivisionError):
-                pass
+        render_canvas_w = int(target_w or source_w or 1920)
+        render_canvas_h = int(target_h or source_h or 1080)
         ass_path = self._ensure_subtitle_ass(
-            ass_path, srt_path, ass_style, video_path, source_w, source_h
+            ass_path, srt_path, ass_style, video_path, render_canvas_w, render_canvas_h
         )
+
+        if anti_duplicate_enabled:
+            if anti_duplicate_settings is not None:
+                anti_duplicate_settings.enabled = True
+                anti_duplicate_settings.continuous_mode = True
+                anti_duplicate_settings.target_width = int(target_w or render_canvas_w or 1920)
+                anti_duplicate_settings.target_height = int(target_h or render_canvas_h or 1080)
+            else:
+                try:
+                    from anti_duplicate import AntiDuplicateSettings
+                    anti_duplicate_settings = AntiDuplicateSettings(
+                        enabled=True,
+                        continuous_mode=True,
+                        allow_horizontal_flip=True,
+                        target_width=int(target_w or render_canvas_w or 1920),
+                        target_height=int(target_h or render_canvas_h or 1080),
+                    )
+                except ImportError:
+                    anti_duplicate_settings = None
+        else:
+            anti_duplicate_settings = None
 
         state = self._load_state(project_state_path)
         self._mark_started(state)
@@ -944,6 +1039,7 @@ class ExportWorkflow:
         requires_video_render = bool(
             has_visible_overlays or filter_state_active or target_w or target_h or target_fps
             or abs(float(original_audio_gain_db or 0.0)) > 0.001
+            or anti_duplicate_enabled
         )
         # Text layers are rendered to target-canvas PNGs.  Their stored
         # normalized positions are source-video coordinates, so use the same
@@ -1002,7 +1098,8 @@ class ExportWorkflow:
                 except Exception:
                     timeline_edit_required = False
         single_clip_simple_export = bool(
-            len(timeline_clips) == 1
+            not anti_duplicate_enabled
+            and len(timeline_clips) == 1
             and (timeline_edit_required or mode == "voice")
             and mode in {"original", "voice"}
             and not has_visible_overlays
@@ -1078,6 +1175,8 @@ class ExportWorkflow:
                     text_image_layers=text_image_layers,
                     export_preset=export_preset,
                     video_bitrate_kbps=video_bitrate_kbps,
+                    anti_duplicate_enabled=anti_duplicate_enabled,
+                    anti_duplicate_settings=anti_duplicate_settings,
                     on_progress=lambda event: self._emit_progress(
                         on_progress,
                         min(99, 20 + int(getattr(event, "percent", 0) * 0.79)),
@@ -1094,10 +1193,21 @@ class ExportWorkflow:
                 raise
 
         tmp_mux_path = ""
+        ad_prefix = "🛡️ Anti-Duplicate · " if anti_duplicate_enabled else ""
+        # Khi mode la "voice" hoac "both", audio track trong tmp_mux_path da la TTS/dub.
+        # Phai dung dubbed_ad_settings (skip_audio_filter=True) de tranh bien dang giong doc TTS.
+        # Video anti-dup filters (zoom, crop, color, vignette) van hoat dong binh thuong.
+        dubbed_ad_settings = None
+        if anti_duplicate_settings is not None:
+            try:
+                from dataclasses import replace as _dc_replace
+                dubbed_ad_settings = _dc_replace(anti_duplicate_settings, skip_audio_filter=True)
+            except Exception:
+                dubbed_ad_settings = anti_duplicate_settings
         def _make_ffmpeg_progress_cb(start_pct: int, end_pct: int, label: str):
             def _cb(cur, tot, pct):
                 scaled = int(start_pct + (pct / 100.0) * (end_pct - start_pct))
-                self._emit_progress(on_progress, scaled, f"{label} ({pct}%)", substage="ffmpeg_encode")
+                self._emit_progress(on_progress, scaled, f"{ad_prefix}{label} ({pct}%)", substage="ffmpeg_encode")
             return _cb
 
         try:
@@ -1109,7 +1219,8 @@ class ExportWorkflow:
                     raise ValueError("Choose a different output filename from the source video.")
                 shutil.copy2(video_path, output_path)
             elif mode == "subtitle" or (mode == "original" and requires_video_render):
-                self._emit_progress(on_progress, 20, "Burning subtitles into the video...")
+                burn_label = f"{ad_prefix}Rendering protected video with subtitles..." if anti_duplicate_enabled else "Burning subtitles into the video..."
+                self._emit_progress(on_progress, 20, burn_label)
                 if abs(float(original_audio_gain_db or 0.0)) > 0.001:
                     print(f"[Export] Applying A1 Original audio gain: {float(original_audio_gain_db):.2f} dB")
                 self._export_subtitle_video(
@@ -1134,6 +1245,7 @@ class ExportWorkflow:
                     video_bitrate_kbps=video_bitrate_kbps,
                     progress_callback=_make_ffmpeg_progress_cb(20, 95, "Burning subtitles into video"),
                     cancellation_check=cancellation_check,
+                    anti_duplicate_settings=anti_duplicate_settings,
                 )
             elif mode == "voice":
                 self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
@@ -1185,6 +1297,9 @@ class ExportWorkflow:
                         video_bitrate_kbps=video_bitrate_kbps,
                         progress_callback=_make_ffmpeg_progress_cb(40, 95, "Rendering visual overlays"),
                         cancellation_check=cancellation_check,
+                        # Audio track da la TTS - dung dubbed_ad_settings (skip_audio_filter=True)
+                        # de khong bien dang pitch/EQ/volume cua giong doc.
+                        anti_duplicate_settings=dubbed_ad_settings,
                     )
             elif mode == "both":
                 tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
@@ -1201,7 +1316,8 @@ class ExportWorkflow:
                 )
                 if cancellation_check and cancellation_check():
                     raise InterruptedError("Export cancelled by user")
-                self._emit_progress(on_progress, 40, "Burning styled subtitles into the final video...")
+                burn_both_label = f"{ad_prefix}Rendering final video with subtitles & audio..." if anti_duplicate_enabled else "Burning styled subtitles into the final video..."
+                self._emit_progress(on_progress, 40, burn_both_label)
                 self._export_subtitle_video(
                     video_path=tmp_mux_path,
                     srt_path=srt_path,
@@ -1223,6 +1339,9 @@ class ExportWorkflow:
                     video_bitrate_kbps=video_bitrate_kbps,
                     progress_callback=_make_ffmpeg_progress_cb(40, 95, "Burning styled subtitles into final video"),
                     cancellation_check=cancellation_check,
+                    # tmp_mux_path da chua TTS audio - dung dubbed_ad_settings (skip_audio_filter=True)
+                    # de khong bien dang pitch/EQ/volume cua giong doc TTS.
+                    anti_duplicate_settings=dubbed_ad_settings,
                 )
             else:
                 raise ValueError(f"Unsupported export mode: {mode}")

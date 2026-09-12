@@ -15,6 +15,19 @@ from video_filter_chain import (
     normalize_video_filter_state,
 )
 
+# Anti-duplicate support (optional import — graceful fallback if missing)
+try:
+    from anti_duplicate import (
+        AntiDuplicateSettings,
+        apply_anti_duplicate_to_command as _apply_ad_to_cmd,
+        build_anti_duplicate_video_chain as _build_ad_video_chain,
+        describe_settings as _ad_describe,
+    )
+    _AD_AVAILABLE = True
+except ImportError:
+    _AD_AVAILABLE = False
+    AntiDuplicateSettings = None  # type: ignore[assignment,misc]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -144,11 +157,62 @@ def _ffmpeg_nvenc_works(ffmpeg_path: str) -> bool:
     return works
 
 
+def _ffmpeg_qsv_works(ffmpeg_path: str) -> bool:
+    """Do a real 1-frame encode test to verify h264_qsv (Intel Quick Sync) actually works."""
+    cache_key = (os.path.abspath(ffmpeg_path), '_qsv_works')
+    if cache_key in _FFMPEG_ENCODER_CACHE:
+        return _FFMPEG_ENCODER_CACHE[cache_key]
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_path, '-hide_banner', '-loglevel', 'error',
+                '-f', 'lavfi', '-i', 'color=black:size=128x72:duration=0.1:rate=1',
+                '-c:v', 'h264_qsv', '-preset:v', '7', '-frames:v', '1',
+                '-f', 'null', '-',
+            ],
+            capture_output=True,
+            **_text_subprocess_run_kwargs(),
+        )
+        works = result.returncode == 0
+    except Exception:
+        works = False
+    _FFMPEG_ENCODER_CACHE[cache_key] = works
+    return works
+
+
+def _ffmpeg_amf_works(ffmpeg_path: str) -> bool:
+    """Do a real 1-frame encode test to verify h264_amf (AMD) actually works."""
+    cache_key = (os.path.abspath(ffmpeg_path), '_amf_works')
+    if cache_key in _FFMPEG_ENCODER_CACHE:
+        return _FFMPEG_ENCODER_CACHE[cache_key]
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_path, '-hide_banner', '-loglevel', 'error',
+                '-f', 'lavfi', '-i', 'color=black:size=128x72:duration=0.1:rate=1',
+                '-c:v', 'h264_amf', '-frames:v', '1',
+                '-f', 'null', '-',
+            ],
+            capture_output=True,
+            **_text_subprocess_run_kwargs(),
+        )
+        works = result.returncode == 0
+    except Exception:
+        works = False
+    _FFMPEG_ENCODER_CACHE[cache_key] = works
+    return works
+
+
 def _preferred_h264_encoder_args(ffmpeg_path: str, fast: bool = False) -> list[str]:
     if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_nvenc') and _ffmpeg_nvenc_works(ffmpeg_path):
         return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p']
+    if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_qsv') and _ffmpeg_qsv_works(ffmpeg_path):
+        preset = '7' if fast else '4'
+        return ['-c:v', 'h264_qsv', '-preset:v', preset, '-global_quality', '23', '-pix_fmt', 'nv12']
+    if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_amf') and _ffmpeg_amf_works(ffmpeg_path):
+        return ['-c:v', 'h264_amf', '-quality', 'speed' if fast else 'balanced', '-pix_fmt', 'yuv420p']
     preset = 'veryfast' if fast else 'medium'
-    return ['-c:v', 'libx264', '-preset', preset, '-crf', '18', '-pix_fmt', 'yuv420p']
+    return ['-c:v', 'libx264', '-preset', preset, '-crf', '18', '-threads', '0', '-pix_fmt', 'yuv420p']
 
 
 def build_export_h264_encoder_args(
@@ -160,9 +224,8 @@ def build_export_h264_encoder_args(
 ) -> list[str]:
     """Return one consistent H.264 profile for every final-export path.
 
-    The preset controls encoding effort while bitrate remains an explicit user
-    choice. NVENC is selected only after a real runtime encode probe succeeds;
-    otherwise the CPU presets favor practical export speed.
+    Supports hardware acceleration (NVIDIA NVENC, Intel QSV, AMD AMF) with real
+    encode probes, falling back to multi-threaded CPU libx264.
     """
     profile = str(export_preset or "balanced").strip().lower()
     if profile not in {"fast", "balanced", "max"}:
@@ -186,9 +249,19 @@ def build_export_h264_encoder_args(
         quality_args = rate_args or ["-cq", {"fast": "25", "balanced": "22", "max": "19"}[profile]]
         return ["-c:v", "h264_nvenc", "-preset", nvenc_preset, *quality_args, "-pix_fmt", "yuv420p"]
 
+    if allow_hardware and _ffmpeg_supports_encoder(ffmpeg_path, "h264_qsv") and _ffmpeg_qsv_works(ffmpeg_path):
+        qsv_preset = {"fast": "7", "balanced": "4", "max": "1"}[profile]
+        quality_args = rate_args or ["-global_quality", {"fast": "26", "balanced": "23", "max": "20"}[profile]]
+        return ["-c:v", "h264_qsv", "-preset:v", qsv_preset, *quality_args, "-pix_fmt", "nv12"]
+
+    if allow_hardware and _ffmpeg_supports_encoder(ffmpeg_path, "h264_amf") and _ffmpeg_amf_works(ffmpeg_path):
+        amf_quality = {"fast": "speed", "balanced": "balanced", "max": "quality"}[profile]
+        quality_args = rate_args or ["-rc", "cqp", "-qp_p", {"fast": "26", "balanced": "22", "max": "19"}[profile]]
+        return ["-c:v", "h264_amf", "-quality", amf_quality, *quality_args, "-pix_fmt", "yuv420p"]
+
     cpu_preset = {"fast": "ultrafast", "balanced": "veryfast", "max": "medium"}[profile]
     quality_args = rate_args or ["-crf", {"fast": "24", "balanced": "21", "max": "18"}[profile]]
-    return ["-c:v", "libx264", "-preset", cpu_preset, *quality_args, "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", cpu_preset, *quality_args, "-threads", "0", "-pix_fmt", "yuv420p"]
 
 
 def _escape_path_for_filter(path):
@@ -459,9 +532,17 @@ def _build_blur_filter_chain(blur_region, video_width, video_height):
             continue
 
         x = max(0, min(video_width - 2, int(round(x_norm * video_width))))
+        x = (x // 2) * 2
         y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
+        y = (y // 2) * 2
         w = max(2, min(video_width - x, int(round(w_norm * video_width))))
+        w = max(2, (w // 2) * 2)
+        if x + w > video_width:
+            w = max(2, (video_width - x) // 2 * 2)
         h = max(2, min(video_height - y, int(round(h_norm * video_height))))
+        h = max(2, (h // 2) * 2)
+        if y + h > video_height:
+            h = max(2, (video_height - y) // 2 * 2)
         try:
             strength = float(region.get("blur_strength", 36.0))
         except (TypeError, ValueError):
@@ -499,7 +580,7 @@ def _build_blur_filter_chain(blur_region, video_width, video_height):
         else:
             effect = f"gblur=sigma={sigma}:steps=3"
         if opacity < 0.999:
-            effect = f"format=yuva420p,{effect},colorchannelmixer=aa={opacity:.3f}"
+            effect = f"format=rgba,{effect},colorchannelmixer=aa={opacity:.3f}"
         crop_parts.append(
             f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},{effect}[blur{index}]"
         )
@@ -560,9 +641,17 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             continue
 
         x = max(0, min(video_width - 2, int(round(x_norm * video_width))))
+        x = (x // 2) * 2
         y = max(0, min(video_height - 2, int(round(y_norm * video_height))))
+        y = (y // 2) * 2
         w = max(2, min(video_width - x, int(round(w_norm * video_width))))
+        w = max(2, (w // 2) * 2)
+        if x + w > video_width:
+            w = max(2, (video_width - x) // 2 * 2)
         h = max(2, min(video_height - y, int(round(h_norm * video_height))))
+        h = max(2, (h // 2) * 2)
+        if y + h > video_height:
+            h = max(2, (video_height - y) // 2 * 2)
         try:
             start = max(0.0, float(region.get("start", 0.0) or 0.0))
             end = float(region.get("end", 0.0) or 0.0)
@@ -598,7 +687,7 @@ def _build_mask_filter_chain(mask_regions, video_width, video_height):
             filter_statements.append(
                 f"{current_input}split=2[main{index}][tmp{index}];"
                 f"[tmp{index}]crop=w={w}:h={h}:x={x}:y={y},"
-                f"scale={small_w}:{small_h},scale={w}:{h}{alpha_chain}[pix{index}];"
+                f"scale={small_w}:{small_h}:flags=neighbor,scale={w}:{h}:flags=neighbor{alpha_chain}[pix{index}];"
                 f"[main{index}][pix{index}]overlay={x}:{y}{timing}{output_label}"
             )
 
@@ -1491,7 +1580,7 @@ def _apply_keyword_highlight(text: str, *, preset_key: str, highlight_color: str
 def srt_to_ass(srt_path: str,
                video_width: int, video_height: int,
                alignment: int = 2, margin_v: int = 30,
-               font_name: str = "Arial", font_size: int = 18,
+               font_name: str = "Arial", font_size: int = 52,
                font_color: str = "&H00FFFFFF",
                background_box: bool = False,
                animation_style: str = "Static",
@@ -1938,7 +2027,7 @@ def _append_text_image_filter_parts(filter_parts, current_label, text_image_laye
     return current_label
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, export_preset="balanced", video_bitrate_kbps=0, progress_callback=None, cancellation_check=None):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, export_preset="balanced", video_bitrate_kbps=0, progress_callback=None, cancellation_check=None, anti_duplicate_settings=None):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -1996,12 +2085,26 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             audio_gain_db=audio_gain_db,
             export_preset=("fast" if fast else export_preset),
             video_bitrate_kbps=video_bitrate_kbps,
+            anti_duplicate_settings=anti_duplicate_settings,
         )
     else:
         # Simple filter chain (no logos)
         filter_parts = []
         current_label = "[0:v]"
-        
+
+        # Apply anti-duplicate video filter (Zoom 105%, Random Color Grade, Geometric Distortion, Auto Recap continuous)
+        if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
+            v_dur = get_video_duration(video_path) if video_path and os.path.exists(video_path) else None
+            ad_chain = _build_ad_video_chain(
+                anti_duplicate_settings,
+                target_w=canvas_w or source_w or 1920,
+                target_h=canvas_h or source_h or 1080,
+                total_duration=v_dur,
+            )
+            if ad_chain:
+                filter_parts.append(f"{current_label}{ad_chain}[ad_filtered]")
+                current_label = "[ad_filtered]"
+
         filter_video_chain = _build_video_color_chain(video_filter_state)
         if filter_video_chain:
             filter_parts.append(f"{current_label}{filter_video_chain}[filtered]")
@@ -2023,13 +2126,14 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             filter_parts.append(f"{current_label}{lut_chain}[lut_filtered]")
             current_label = "[lut_filtered]"
         
-        # TS1 remains an ASS/libass pass in source-video coordinates, matching
-        # MPV preview. The output canvas transform follows this pass.
+        if scale_chain:
+            filter_parts.append(f"{current_label}{scale_chain}[scaled]")
+            current_label = "[scaled]"
+        
+        # Subtitles (ASS) are burned AFTER scale_chain onto the canvas
+        # so font size and position match the preview 1:1 and never get shrunken
         filter_parts.append(f"{current_label}{_ass_filter_expression(ass_path)}[subbed]")
         current_label = "subbed"
-        if scale_chain:
-            filter_parts.append(f"[{current_label}]{scale_chain}[scaled]")
-            current_label = "scaled"
         if text_ass_path and os.path.exists(text_ass_path):
             filter_parts.append(f"[{current_label}]{_ass_filter_expression(text_ass_path)}[text_ass]")
             current_label = "text_ass"
@@ -2083,10 +2187,28 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
                 command += ['-af', f'volume={gain_db:.4f}dB']
         except (TypeError, ValueError):
             pass
-        command += [output_path]
-    
-    encoder_name = 'libx264' if 'libx264' in ' '.join(command) else 'h264_nvenc'
-    print(f"Executing ({encoder_name}): {' '.join(command)}")
+
+        # KT#3 + KT#5: Ap dung anti-duplicate (metadata + audio pitch)
+        # anti_duplicate_settings duoc lay tu bien trong scope cua ham cha.
+        # Neu khong co, fallback ve export binh thuong.
+        _ad_settings = locals().get("anti_duplicate_settings", None)
+        _has_af = "-af" in command
+        if _AD_AVAILABLE and _ad_settings is not None and getattr(_ad_settings, "enabled", False):
+            print(_ad_describe(_ad_settings))
+            command += [output_path]
+            _apply_ad_to_cmd(command, _ad_settings, output_path=output_path, has_audio=True, has_existing_af=_has_af)
+        else:
+            command += [output_path]
+
+    encoder_name = 'libx264'
+    for candidate in ('h264_nvenc', 'h264_qsv', 'h264_amf', 'libx264'):
+        if candidate in command:
+            encoder_name = candidate
+            break
+    try:
+        print(f"Executing ({encoder_name}): {' '.join(command)}")
+    except Exception:
+        pass
 
     video_duration = get_video_duration(video_path)
     ok, stdout_txt, stderr_txt = run_ffmpeg_with_progress(
@@ -2107,7 +2229,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
     else:
         if encoder_name != 'libx264':
             # Retry with a complete CPU profile. Replacing only the codec name
-            # left NVENC-only options such as p1/p4/p7 in the command.
+            # left hardware-only options in the command.
             fallback_args = build_export_h264_encoder_args(
                 ffmpeg,
                 ("fast" if fast else export_preset),
@@ -2118,7 +2240,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             audio_arg_index = command.index('-c:a', video_arg_index)
             command[video_arg_index:audio_arg_index] = fallback_args
             
-            print(f"NVENC failed, retrying with libx264. Error:\n{stderr_txt}")
+            print(f"{encoder_name} failed, retrying with libx264. Error:\n{stderr_txt}")
             fb_ok, fb_stdout, fb_stderr = run_ffmpeg_with_progress(
                 command,
                 total_duration_seconds=video_duration,
@@ -2144,7 +2266,8 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
                                  scale_chain, blur_chain, mask_chain,
                                  output_fps, video_filter_state, text_ass_path="", text_image_layers=None,
                                  source_width=None, source_height=None, audio_gain_db=0.0,
-                                 export_preset="balanced", video_bitrate_kbps=0):
+                                 export_preset="balanced", video_bitrate_kbps=0,
+                                 anti_duplicate_settings=None):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
     # Start building the command with video input
@@ -2174,6 +2297,19 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     # after scaling because they are authored in output-canvas coordinates.
     main_label = "0:v"
     
+    # Apply anti-duplicate video filter (Zoom 105%, Random Color Grade, Geometric Distortion, Auto Recap continuous)
+    if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
+        v_dur = get_video_duration(video_path) if video_path and os.path.exists(video_path) else None
+        ad_chain = _build_ad_video_chain(
+            anti_duplicate_settings,
+            target_w=video_w or source_width or 1920,
+            target_h=video_h or source_height or 1080,
+            total_duration=v_dur,
+        )
+        if ad_chain:
+            filter_parts.append(f"[{main_label}]{ad_chain}[ad_filtered]")
+            main_label = "ad_filtered"
+
     # Apply video filter chain
     filter_video_chain = _build_video_color_chain(video_filter_state)
     if filter_video_chain:
@@ -2199,11 +2335,14 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         filter_parts.append(f"[{main_label}]{lut_chain}[lut_filtered]")
         main_label = "lut_filtered"
 
-    filter_parts.append(f"[{main_label}]{_ass_filter_expression(ass_path)}[subbed]")
-    main_label = "subbed"
     if scale_chain:
         filter_parts.append(f"[{main_label}]{scale_chain}[scaled]")
         main_label = "scaled"
+
+    # Burn ASS subtitles onto the output canvas so font size and position
+    # match the preview 1:1 and are never shrunken by scale_chain
+    filter_parts.append(f"[{main_label}]{_ass_filter_expression(ass_path)}[subbed]")
+    main_label = "subbed"
     
     # 2. Process each logo layer
     logo_input_idx = 1
@@ -2223,27 +2362,45 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         start = max(0.0, float(logo.get('start', 0.0) or 0.0))
         end = float(logo.get('end', 0.0) or 0.0)
         
-        # Calculate pixel dimensions
-        logo_w = int(video_w * width)
-        logo_h = int(video_h * height)
-        logo_x = int(video_w * x)
-        logo_y = int(video_h * y)
+        # Determine intrinsic image dimensions to preserve natural aspect ratio
+        img_w, img_h = None, None
+        try:
+            from PIL import Image
+            with Image.open(source) as img:
+                img_w, img_h = img.size
+        except Exception:
+            pass
+
+        # Calculate bounding box in pixels (ensure even numbers for yuv420p chroma alignment)
+        box_w = max(2, (int(round(video_w * width)) // 2) * 2)
+        box_h = max(2, (int(round(video_h * height)) // 2) * 2)
+
+        if img_w and img_h and img_w > 0 and img_h > 0:
+            img_aspect = img_w / float(img_h)
+            fit_w = min(box_w, int(round(box_h * img_aspect)))
+            fit_h = min(box_h, int(round(box_w / img_aspect)))
+            logo_w = max(2, (fit_w // 2) * 2)
+            logo_h = max(2, (fit_h // 2) * 2)
+        else:
+            logo_w = box_w
+            logo_h = box_h
+
+        logo_x = max(0, min(video_w - logo_w, (int(round(video_w * x)) // 2) * 2))
+        logo_y = max(0, min(video_h - logo_h, (int(round(video_h * y)) // 2) * 2))
         
-        # Scale logo
-        filter_parts.append(f"[{logo_input_idx}:v]scale={logo_w}:{logo_h}[logo{i}_scaled]")
+        # Scale logo with format=rgba, force_original_aspect_ratio and lanczos for crisp text
+        filter_parts.append(f"[{logo_input_idx}:v]format=rgba,scale={logo_w}:{logo_h}:force_original_aspect_ratio=decrease:flags=lanczos[logo{i}_scaled]")
+        logo_label = f"logo{i}_scaled"
         
         # Apply opacity if needed
-        if opacity < 1.0:
-            filter_parts.append(f"[logo{i}_scaled]format=rgba,colorchannelmixer=aa={opacity}[logo{i}_opacity]")
+        if opacity < 0.999:
+            filter_parts.append(f"[{logo_label}]colorchannelmixer=aa={opacity:.3f}[logo{i}_opacity]")
             logo_label = f"logo{i}_opacity"
-        else:
-            logo_label = f"logo{i}_scaled"
         
         # Apply rotation if needed
         if abs(rotation) > 0.1:
-            # FFmpeg uses radians, convert from degrees
-            rotation_rad = rotation * 3.14159265 / 180.0
-            filter_parts.append(f"[{logo_label}]rotate={rotation_rad}:c=none:ow={logo_w}:oh={logo_h}[logo{i}_rotated]")
+            rotation_rad = rotation * 3.141592653589793 / 180.0
+            filter_parts.append(f"[{logo_label}]rotate={rotation_rad:.6f}:c=none:ow={logo_w}:oh={logo_h}[logo{i}_rotated]")
             logo_label = f"logo{i}_rotated"
         
         # Overlay logo on video
@@ -2296,7 +2453,12 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     except Exception:
         pass
     
-    command += [output_path]
+    if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
+        command += [output_path]
+        _has_af = "-af" in command
+        _apply_ad_to_cmd(command, anti_duplicate_settings, output_path=output_path, has_audio=True, has_existing_af=_has_af)
+    else:
+        command += [output_path]
     return command
 
 
@@ -2327,7 +2489,7 @@ def extract_audio(video_path, audio_output_path, ffmpeg_path=None):
 
 def embed_subtitles(video_path, srt_path, output_path,
                     alignment=2, margin_v=30,
-                    font_name="Arial", font_size=18, font_color="&H00FFFFFF",
+                    font_name="Arial", font_size=52, font_color="&H00FFFFFF",
                     background_box=False,
                     animation_style="Static",
                     highlight_color="&H00FFFFFF",
@@ -2369,7 +2531,8 @@ def embed_subtitles(video_path, srt_path, output_path,
                     export_preset="balanced",
                     video_bitrate_kbps=0,
                     progress_callback=None,
-                    cancellation_check=None):
+                    cancellation_check=None,
+                    anti_duplicate_settings=None):
     """Burn subtitles into video using a properly-styled ASS file.
 
     Workflow:
@@ -2383,14 +2546,13 @@ def embed_subtitles(video_path, srt_path, output_path,
     if not os.path.exists(ffmpeg):
         raise FileNotFoundError(f"FFmpeg not found at {ffmpeg}")
 
-    # Step 1: get real video resolution
-    # ASS is rendered before the output Fit/Fill transform, just like MPV's
-    # live subtitle track, so author it in source-video coordinates.
+    # Step 1: get video resolution and canvas resolution
     video_w, video_h = get_video_dimensions(video_path)
+    canvas_w, canvas_h = (int(target_width), int(target_height)) if (target_width and target_height and int(target_width) > 0 and int(target_height) > 0) else (video_w, video_h)
 
-    # Step 2: generate ASS
+    # Step 2: generate ASS at output canvas resolution so font size and position match preview 1:1
     ass_path = srt_to_ass(
-        srt_path, video_w, video_h,
+        srt_path, canvas_w, canvas_h,
         alignment=alignment, margin_v=margin_v,
         font_name=font_name, font_size=font_size, font_color=font_color,
         background_box=background_box,
@@ -2441,6 +2603,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         video_bitrate_kbps=video_bitrate_kbps,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
+        anti_duplicate_settings=anti_duplicate_settings,
     )
 
     # Step 4: clean up temp ASS

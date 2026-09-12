@@ -103,7 +103,8 @@ class SegmentEditorMixin:
                 or ""
             )
             shown_text = str(
-                translated.get("text", "")
+                translated.get("final_text", "")
+                or translated.get("text", "")
                 or translated.get("translated", "")
                 or original_text
             )
@@ -426,6 +427,8 @@ class SegmentEditorMixin:
                 current_pos = int(getattr(self.media_player, "position", lambda: 0)() or 0)
                 if abs(current_pos - target_pos_ms) > 100:
                     self.set_position(target_pos_ms)
+                else:
+                    self.update_playback_subtitle_highlight(target_pos_ms)
             except Exception:
                 pass
 
@@ -1880,11 +1883,13 @@ class SegmentEditorMixin:
             # logo is currently editable in the preview overlay.
             idx = len(img_track.layers)
             dur = tl.duration if tl.duration > 0 else 10.0
+            from app.layers.transform import Transform
             layer = ImageLayer(
                 name=f"Logo {idx + 1}",
                 source=path,
                 start=0.0,
                 end=dur,
+                transform=Transform(x=0.08, y=0.08, scale_x=0.2, scale_y=0.2),
             )
             layer.z_index = idx
             # Mark as watermark so the preview positions it correctly

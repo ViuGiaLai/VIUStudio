@@ -31,6 +31,8 @@ class _SubtitleOverlayWidget(QWidget):
     """A real-time overlay widget for MpvVideoView."""
     positionDragStarted = Signal()
     positionDragFinished = Signal(int, int)
+    fontSizeChanged = Signal(int)
+    subtitleClicked = Signal()
 
     # Match the ASS export row spacing in app.video_processor.
     LINE_HEIGHT_FACTOR = 1.40
@@ -81,6 +83,13 @@ class _SubtitleOverlayWidget(QWidget):
         self._drag_grab_offset = QPointF()
         self._target_view = parent
         self._host_window = None
+        self.HANDLE_SIZE = 12.0
+        self.base_font_size = 60
+        self._drag_mode = ""
+        self._press_pos = QPointF()
+        self._initial_base_font_size = 60
+        self._initial_center = QPointF()
+        self._initial_dist = 1.0
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setCursor(Qt.ArrowCursor)
@@ -139,19 +148,83 @@ class _SubtitleOverlayWidget(QWidget):
     def is_top_level_overlay(self) -> bool:
         return self.parentWidget() is None
 
+    def _get_content_rect(self) -> QRectF:
+        font = QFont(self.font_name)
+        font.setPixelSize(max(1, int(self.font_size)))
+        font.setBold(self.bold)
+        metrics = QFontMetrics(font)
+        entries = self.current_lines or ([self.current_text] if self.current_text else [""])
+        max_text_width = max((metrics.boundingRect(line).width() for line in entries), default=0)
+        box_pad_x = max(8.0, float(getattr(self, "background_padding", 6.0)) + 6.0)
+        w = max(40.0, min(float(self.width()), float(max_text_width) + box_pad_x * 2.0))
+        cx = float(self.width()) / 2.0
+        return QRectF(cx - w / 2.0, float(self.VERTICAL_PADDING), w, max(16.0, float(self.height() - self.VERTICAL_PADDING * 2)))
+
+    def _handle_rects(self, content_rect: QRectF) -> dict[str, QRectF]:
+        s = float(self.HANDLE_SIZE)
+        half = s / 2.0
+        points = {
+            "top_left": content_rect.topLeft(),
+            "top_right": content_rect.topRight(),
+            "bottom_left": content_rect.bottomLeft(),
+            "bottom_right": content_rect.bottomRight(),
+        }
+        return {
+            key: QRectF(point.x() - half, point.y() - half, s, s)
+            for key, point in points.items()
+        }
+
+    def _hit_test(self, pos: QPointF) -> str:
+        content_rect = self._get_content_rect()
+        if self._editable:
+            for handle_name, handle_rect in self._handle_rects(content_rect).items():
+                if handle_rect.adjusted(-4, -4, 4, 4).contains(pos):
+                    return handle_name
+        if content_rect.adjusted(-6, -6, 6, 6).contains(pos):
+            return "move"
+        return ""
+
     def mousePressEvent(self, event):
         if not self._editable or event.button() != Qt.LeftButton:
             event.ignore()
             return
+        pos = QPointF(event.position()) if hasattr(event, "position") else QPointF(event.pos())
+        hit = self._hit_test(pos)
+        if not hit:
+            event.ignore()
+            return
         self._drag_active = True
-        self._drag_grab_offset = QPointF(event.position())
-        self.setCursor(Qt.ClosedHandCursor)
-        self.positionDragStarted.emit()
+        self._drag_mode = hit
+        self._press_pos = pos
+        self._initial_base_font_size = int(getattr(self, "base_font_size", 60) or 60)
+        content_rect = self._get_content_rect()
+        self._initial_center = content_rect.center()
+        self._initial_dist = max(10.0, math.hypot(pos.x() - self._initial_center.x(), pos.y() - self._initial_center.y()))
+        if hit == "move":
+            self.setCursor(Qt.ClosedHandCursor)
+            self._drag_grab_offset = pos
+            self.positionDragStarted.emit()
+        elif hit in ("top_left", "bottom_right"):
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif hit in ("top_right", "bottom_left"):
+            self.setCursor(Qt.SizeBDiagCursor)
+        self.subtitleClicked.emit()
+        self.update()
         event.accept()
 
     def mouseMoveEvent(self, event):
+        pos = QPointF(event.position()) if hasattr(event, "position") else QPointF(event.pos())
         if not self._drag_active:
-            event.ignore()
+            if self._editable:
+                hit = self._hit_test(pos)
+                if hit in ("top_left", "bottom_right"):
+                    self.setCursor(Qt.SizeFDiagCursor)
+                elif hit in ("top_right", "bottom_left"):
+                    self.setCursor(Qt.SizeBDiagCursor)
+                elif hit == "move":
+                    self.setCursor(Qt.OpenHandCursor)
+                else:
+                    self.setCursor(Qt.ArrowCursor)
             return
         view = self._target_view or self.parentWidget()
         if view is None or not hasattr(view, "get_preview_canvas_rect"):
@@ -161,33 +234,46 @@ class _SubtitleOverlayWidget(QWidget):
         if canvas.width() <= 0 or canvas.height() <= 0:
             event.ignore()
             return
-        # The subtitle is a top-level overlay above MPV, not a child of the
-        # preview widget. Convert through global coordinates to avoid Qt's
-        # parent-hierarchy warning and get the correct canvas-relative point.
-        pointer = view.mapFromGlobal(self.mapToGlobal(event.position().toPoint()))
-        center_x = pointer.x() - self._drag_grab_offset.x() + self.width() / 2.0
-        center_y = pointer.y() - self._drag_grab_offset.y() + self.height() / 2.0
-        # The drag position represents the subtitle's anchor/centre, not the
-        # outer edge of its (often wide) wrapping widget.  Constraining by
-        # half the widget width limited wide subtitles to a narrow strip in
-        # the middle of portrait previews.  Keep the anchor anywhere on the
-        # full video canvas and let positioning use that same normalized
-        # centre for preview and export.
-        center_x = max(canvas.left(), min(center_x, canvas.right()))
-        center_y = max(canvas.top(), min(center_y, canvas.bottom()))
-        x_percent = int(round(max(0.0, min(100.0, (center_x - canvas.left()) * 100.0 / canvas.width()))))
-        y_percent = int(round(max(0.0, min(100.0, (center_y - canvas.top()) * 100.0 / canvas.height()))))
-        self.custom_position_enabled = True
-        self.custom_x_percent = x_percent
-        self.custom_y_percent = y_percent
-        view.reposition_subtitle()
-        event.accept()
+
+        if self._drag_mode == "move":
+            pointer = view.mapFromGlobal(self.mapToGlobal(pos.toPoint()))
+            center_x = pointer.x() - self._drag_grab_offset.x() + self.width() / 2.0
+            center_y = pointer.y() - self._drag_grab_offset.y() + self.height() / 2.0
+            center_x = max(canvas.left(), min(center_x, canvas.right()))
+            center_y = max(canvas.top(), min(center_y, canvas.bottom()))
+            x_percent = int(round(max(0.0, min(100.0, (center_x - canvas.left()) * 100.0 / canvas.width()))))
+            y_percent = int(round(max(0.0, min(100.0, (center_y - canvas.top()) * 100.0 / canvas.height()))))
+            self.custom_position_enabled = True
+            self.custom_x_percent = x_percent
+            self.custom_y_percent = y_percent
+            view.reposition_subtitle()
+            event.accept()
+            return
+        elif self._drag_mode in ("top_left", "top_right", "bottom_left", "bottom_right"):
+            cur_dist = math.hypot(pos.x() - self._initial_center.x(), pos.y() - self._initial_center.y())
+            ratio = cur_dist / max(10.0, self._initial_dist)
+            new_base = int(round(self._initial_base_font_size * ratio))
+            new_base = max(12, min(140, new_base))
+            self.base_font_size = new_base
+            source_h = max(1, int(getattr(view, "subtitle_render_height", 0) or getattr(view, "video_source_height", 0) or 1080))
+            scale_y = canvas.height() / source_h if canvas.height() > 0 else 1.0
+            self.font_size = max(1, int(round(new_base * scale_y)))
+            self._update_height()
+            view.reposition_subtitle()
+            self.update()
+            event.accept()
+            return
 
     def mouseReleaseEvent(self, event):
         if self._drag_active and event.button() == Qt.LeftButton:
             self._drag_active = False
-            self.setCursor(Qt.OpenHandCursor)
-            self.positionDragFinished.emit(self.custom_x_percent, self.custom_y_percent)
+            self.setCursor(Qt.OpenHandCursor if self._editable else Qt.ArrowCursor)
+            if self._drag_mode == "move":
+                self.positionDragFinished.emit(self.custom_x_percent, self.custom_y_percent)
+            elif self._drag_mode in ("top_left", "top_right", "bottom_left", "bottom_right"):
+                self.fontSizeChanged.emit(int(getattr(self, "base_font_size", self.font_size) or 60))
+            self._drag_mode = ""
+            self.update()
             event.accept()
             return
         event.ignore()
@@ -497,6 +583,30 @@ class _SubtitleOverlayWidget(QWidget):
             else:
                 painter.setPen(self.font_color)
                 painter.drawText(line_rect, int(wrap_flags), line_text)
+
+        # CapCut-style Bounding Box & Transform Handles
+        if self._editable:
+            content_rect = self._get_content_rect()
+            gizmo_rect = content_rect.adjusted(-6, -4, 6, 4)
+
+            # High-contrast drop shadow / outline
+            painter.setPen(QPen(QColor(0, 0, 0, 180), 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(gizmo_rect, 2, 2)
+
+            # Bright cyan dashed selection border
+            painter.setPen(QPen(QColor("#00E5FF"), 1.5, Qt.DashLine))
+            painter.drawRoundedRect(gizmo_rect, 2, 2)
+
+            # 4 Corner Handles
+            for handle_name, handle_rect in self._handle_rects(content_rect).items():
+                painter.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
+                painter.setBrush(QColor("#00E5FF"))
+                painter.drawEllipse(handle_rect)
+                inner = handle_rect.adjusted(3, 3, -3, -3)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(255, 255, 255))
+                painter.drawEllipse(inner)
 
 
 
@@ -1067,6 +1177,19 @@ class _LogoRegionOverlayWindow(_BlurRegionOverlayWindow):
             self._opacity = item["opacity"]
             self._rotation = item["rotation"]
 
+    def region_rect(self, index: int | None = None) -> QRectF:
+        rect = super().region_rect(index)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return rect
+        idx = self._active_index if index is None else index
+        pixmap = self._logo_items[idx]["pixmap"] if (0 <= idx < len(self._logo_items)) else self._pixmap
+        if pixmap is not None and not pixmap.isNull() and pixmap.width() > 0 and pixmap.height() > 0:
+            ar = pixmap.width() / float(pixmap.height())
+            draw_w = min(rect.width(), rect.height() * ar)
+            draw_h = min(rect.height(), rect.width() / ar)
+            return QRectF(rect.left(), rect.top(), draw_w, draw_h)
+        return rect
+
     def _hit_test(self, pos: QPointF) -> tuple[int, str]:
         index = self._active_index
         if index < 0 or index >= len(self._regions):
@@ -1397,6 +1520,8 @@ class MpvVideoView(QWidget):
     blurEditFinished = Signal()
     subtitlePositionChanged = Signal(int, int)  # x_percent, y_percent
     subtitleDragStarted = Signal()
+    subtitleFontSizeChanged = Signal(int)  # new_base_font_size
+    subtitleClicked = Signal()
     framingChanged = Signal(float, float)
     logoMoved = Signal(float, float, float, float)  # x, y, w, h
     logoDeleted = Signal()
@@ -1443,6 +1568,8 @@ class MpvVideoView(QWidget):
         self.subtitle_item.attach_to_view(self)
         self.subtitle_item.positionDragStarted.connect(self.subtitleDragStarted.emit)
         self.subtitle_item.positionDragFinished.connect(self.subtitlePositionChanged.emit)
+        self.subtitle_item.fontSizeChanged.connect(self.subtitleFontSizeChanged.emit)
+        self.subtitle_item.subtitleClicked.connect(self.subtitleClicked.emit)
         # Create the additional top-level overlay only when the project has
         # a text layer. This keeps ordinary video opening identical to the
         # established preview path.

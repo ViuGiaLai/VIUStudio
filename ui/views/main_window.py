@@ -282,6 +282,9 @@ def _build_header_bar(gui):
     gui.import_subtitle_action.triggered.connect(gui.import_translated_srt)
     gui.import_original_action = more_menu.addAction("Import Source SRT…")
     gui.import_original_action.triggered.connect(gui.import_original_srt)
+    gui.import_voice_action = more_menu.addAction("Import Voice Audio…")
+    if hasattr(gui, "import_voice_audio"):
+        gui.import_voice_action.triggered.connect(gui.import_voice_audio)
     gui.download_subtitle_action = more_menu.addAction("Export Translated SRT…")
     gui.download_subtitle_action.triggered.connect(gui.download_subtitle)
     gui.download_original_action = more_menu.addAction("Export Source SRT…")
@@ -301,7 +304,7 @@ def _build_header_bar(gui):
     gui.settings_action.triggered.connect(gui.open_model_settings_dialog)
     gui.normalizer_dict_action = more_menu.addAction("Normalizer Dictionary")
     gui.normalizer_dict_action.triggered.connect(gui.open_normalizer_dict_dialog)
-    gui.auto_recap_action = more_menu.addAction("⚡ Auto Edit Recap Settings")
+    gui.auto_recap_action = more_menu.addAction("⚡ Cấu hình Tự động Recap (Auto Edit Recap)")
     if hasattr(gui, "open_auto_recap_settings_dialog"):
         gui.auto_recap_action.triggered.connect(gui.open_auto_recap_settings_dialog)
     gui.check_updates_action = more_menu.addAction("🔄 Check for Updates…")

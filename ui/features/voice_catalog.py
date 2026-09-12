@@ -122,16 +122,18 @@ class VoiceCatalogMixin:
             or entry.get("preview_audio_url")
         )
 
-    def set_voice_combo_value(self, combo, value):
+    def set_voice_combo_value(self, combo, value) -> bool:
         target = str(value or "").strip()
         if not combo or not target:
-            return
+            return False
         for index in range(combo.count()):
             item_value = str(combo.itemData(index) or "").strip()
             item_entry_id = str(combo.itemData(index, self.VOICE_ENTRY_ID_ROLE) or "").strip()
-            if item_value == target or item_entry_id == target:
+            item_text = str(combo.itemText(index) or "").strip()
+            if item_value == target or item_entry_id == target or item_text == target or item_text.lower() == target.lower():
                 combo.setCurrentIndex(index)
-                return
+                return True
+        return False
 
     def _get_previewable_voice_catalog_entry(self):
         return None
@@ -223,10 +225,13 @@ class VoiceCatalogMixin:
         if free_value and free_value in getattr(self, "voice_catalog_map", {}):
             return free_value
         target_language = self.get_target_language_code()
+        if target_language == "vi" and "ngochuyennew" in getattr(self, "voice_catalog_map", {}):
+            return "ngochuyennew"
         if target_language == "vi" and "ngochuyen" in getattr(self, "voice_catalog_map", {}):
             return "ngochuyen"
         if target_language == "vi" and "vi_VN-vais1000-medium" in getattr(self, "voice_catalog_map", {}):
             return "vi_VN-vais1000-medium"
+
         if hasattr(self, "free_voice_combo") and self.free_voice_combo.count() > 0:
             fallback_value = str(self.free_voice_combo.itemData(0) or "").strip()
             if fallback_value:
@@ -606,17 +611,20 @@ class VoiceCatalogMixin:
 
         if self.free_voice_combo.count() > 0:
             self.free_voice_combo.setCurrentIndex(0)
+        matched_prev = False
         if previous_free:
-            self.set_voice_combo_value(self.free_voice_combo, previous_free)
-        elif target_language == "vi" and "ngochuyen" in self.voice_catalog_map:
-            self.set_voice_combo_value(self.free_voice_combo, "ngochuyen")
-        elif target_language == "vi" and "vi_VN-vais1000-medium" in self.voice_catalog_map:
-            self.set_voice_combo_value(self.free_voice_combo, "vi_VN-vais1000-medium")
-        elif target_language == "en" and "en_US-lessac-medium" in self.voice_catalog_map:
-            # Lessac is the clear, general-purpose US English default. Keep a
-            # user's explicit/saved selection above, but prefer Lessac for a
-            # new English setup instead of whichever item sorts first.
-            self.set_voice_combo_value(self.free_voice_combo, "en_US-lessac-medium")
+            matched_prev = self.set_voice_combo_value(self.free_voice_combo, previous_free)
+        if not matched_prev:
+            if target_language == "vi" and "ngochuyennew" in self.voice_catalog_map:
+                self.set_voice_combo_value(self.free_voice_combo, "ngochuyennew")
+            elif target_language == "vi" and "ngochuyen" in self.voice_catalog_map:
+                self.set_voice_combo_value(self.free_voice_combo, "ngochuyen")
+            elif target_language == "vi" and "vi_VN-vais1000-medium" in self.voice_catalog_map:
+                self.set_voice_combo_value(self.free_voice_combo, "vi_VN-vais1000-medium")
+            elif target_language == "en" and "en_US-lessac-medium" in self.voice_catalog_map:
+                # Lessac is the clear, general-purpose US English default.
+                self.set_voice_combo_value(self.free_voice_combo, "en_US-lessac-medium")
+
         if not self._voice_signals_bound:
             self._voice_signals_bound = True
         self.on_voice_tier_changed()

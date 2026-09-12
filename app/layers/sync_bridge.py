@@ -329,6 +329,8 @@ def ensure_v1_a1_tracks(timeline: Timeline, video_path: str, duration: float) ->
             volume=layer.volume,
             muted=layer.muted,
         ) for layer in video_layers]
+
+
     if not isinstance(a1.metadata, dict):
         a1.metadata = {}
     a1.metadata.setdefault("_volume", 50.0)
@@ -372,28 +374,67 @@ def sync_auto_recap_decisions_to_timeline(
 
         end_pos = round(timeline_pos + eff_dur, 3)
 
-        # video_path is the already-rendered recap. Keep timeline layers as
-        # identity slices so effects and speed are not applied a second time.
+        # Build human-readable tags for what was done to this shot
+        tags = []
+        zoom_s = float(getattr(d, "zoom_scale", 1.0) or 1.0)
+        if zoom_s > 1.01:
+            tags.append(f"Zoom {int(round(zoom_s * 100))}%")
+        if getattr(d, "horizontal_flip", False):
+            tags.append("Flip")
+        pan_d = str(getattr(d, "pan_direction", "none") or "none")
+        if pan_d != "none":
+            tags.append(f"Pan {pan_d}")
+        crop_m = str(getattr(d, "crop_mode", "none") or "none")
+        if crop_m != "none":
+            tags.append(f"Crop {crop_m}")
+        speed_v = float(getattr(d, "speed", 1.0) or 1.0)
+        if abs(speed_v - 1.0) > 0.02:
+            tags.append(f"{speed_v:.2f}x")
+        if float(getattr(d, "freeze_duration", 0.0) or 0.0) > 0.05:
+            tags.append(f"Freeze {float(d.freeze_duration):.1f}s")
+        if getattr(d, "color_grade", False):
+            tags.append("Color")
+        if getattr(d, "pitch_shift", False):
+            tags.append("Pitch")
+
+        tag_str = f" [{' · '.join(tags)}]" if tags else f" [{action}]"
+
         v_layer = VideoLayer(
-            name=f"Shot {idx + 1} [{action}]",
+            name=f"Shot {idx + 1}{tag_str}",
             source=video_path,
             start=round(timeline_pos, 3),
             end=end_pos,
             source_start=round(timeline_pos, 3),
             speed=1.0,
-            transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
-            filters={},
+            transform=Transform(x=0, y=0, scale_x=zoom_s, scale_y=zoom_s),
+            filters={
+                "zoom_scale": zoom_s,
+                "color_grade": bool(getattr(d, "color_grade", False)),
+                "horizontal_flip": bool(getattr(d, "horizontal_flip", False)),
+            },
         )
         v_layer.z_index = idx
         v_layer.metadata["_recap_decision"] = {
             "shot_index": idx,
             "action_type": action,
+            "zoom_scale": zoom_s,
+            "pan_direction": pan_d,
+            "crop_mode": crop_m,
+            "speed": speed_v,
+            "horizontal_flip": bool(getattr(d, "horizontal_flip", False)),
             "recap_notes": str(getattr(d, "recap_notes", "")),
         }
         v1.layers.append(v_layer)
 
+        audio_tags = []
+        if abs(speed_v - 1.0) > 0.02:
+            audio_tags.append(f"{speed_v:.2f}x")
+        if getattr(d, "pitch_shift", False):
+            audio_tags.append("Pitch ±2%")
+        a_tag_str = f" [{' · '.join(audio_tags)}]" if audio_tags else ""
+
         a_layer = AudioLayer(
-            name=f"Audio {idx + 1}",
+            name=f"Audio {idx + 1}{a_tag_str}",
             source=video_path,
             start=round(timeline_pos, 3),
             end=end_pos,

@@ -144,6 +144,7 @@ class TestVoiceExportUI(unittest.TestCase):
                 self.rename_current_project = lambda: None
                 self.import_translated_srt = lambda: None
                 self.import_original_srt = lambda: None
+                self.import_voice_audio = lambda: None
                 self.download_subtitle = lambda: None
                 self.download_original_script = lambda: None
                 self.export_voice_audio = lambda: None
@@ -153,6 +154,8 @@ class TestVoiceExportUI(unittest.TestCase):
 
         self.assertTrue(hasattr(win, "export_voice_action"))
         self.assertEqual(win.export_voice_action.text(), "Export Voice Audio (MP3)…")
+        self.assertTrue(hasattr(win, "import_voice_action"))
+        self.assertEqual(win.import_voice_action.text(), "Import Voice Audio…")
 
     def test_refresh_ui_state_enables_export_and_generate_when_translated_text_present(self):
         from PySide6.QtWidgets import QWidget, QTextEdit, QLineEdit, QPushButton, QToolButton
@@ -235,6 +238,168 @@ class TestVoiceExportUI(unittest.TestCase):
         # Generate (run_all_btn) and Export Voice should now be enabled!
         self.assertTrue(gui.run_all_btn.isEnabled())
         self.assertTrue(gui.export_voice_action.isEnabled())
+
+    def test_import_voice_audio_success(self):
+        from unittest.mock import patch, MagicMock
+        from ui.features.voice_subtitle_preview import VoiceSubtitlePreviewMixin
+        from PySide6.QtWidgets import QWidget
+
+        class DummyVoiceGUI(VoiceSubtitlePreviewMixin, QWidget):
+            def __init__(self):
+                super().__init__()
+                self.workspace_root = tempfile.mkdtemp()
+                self.processed_artifacts = {}
+                self.last_voice_vi_path = ""
+                self.timeline = MagicMock()
+                self.audio_tab_btn = MagicMock()
+                self.current_translated_segments = []
+                self.current_segments = []
+
+            def ensure_current_project(self):
+                return None
+
+            def update_project_artifact(self, name, path):
+                self.processed_artifacts[name] = path
+
+            def update_project_step(self, name, status):
+                pass
+
+            def refresh_ui_state(self):
+                pass
+
+            def log(self, msg):
+                pass
+
+        gui = DummyVoiceGUI()
+        sample_audio = os.path.join(gui.workspace_root, "test_voice.mp3")
+        with open(sample_audio, "wb") as f:
+            f.write(b"ID3" + b"\x00" * 100)
+
+        with patch("ui.features.voice_subtitle_preview.QFileDialog.getOpenFileName", return_value=(sample_audio, "Audio Files (*.mp3)")):
+            with patch("ui.features.voice_subtitle_preview.QMessageBox.information"):
+                gui.import_voice_audio()
+
+        self.assertEqual(gui.last_voice_vi_path, sample_audio)
+        self.assertEqual(gui.processed_artifacts.get("voice_vi"), sample_audio)
+        gui.timeline.sync_tts_track.assert_called_once()
+        gui.audio_tab_btn.setEnabled.assert_called_with(True)
+        shutil.rmtree(gui.workspace_root, ignore_errors=True)
+
+
+class TestExportCancellation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not QApplication.instance():
+            cls.app = QApplication([])
+        else:
+            cls.app = QApplication.instance()
+
+    def test_export_progress_dialog_ui_and_signals(self):
+        from ui.widgets.progress_dialog import ExportProgressDialog
+
+        dlg = ExportProgressDialog()
+        self.assertEqual(dlg.windowTitle(), "Exporting Video")
+        self.assertTrue(hasattr(dlg, "cancel_btn"))
+        self.assertTrue(hasattr(dlg, "bg_btn"))
+        self.assertEqual(dlg.cancel_btn.text(), "Cancel")
+        self.assertEqual(dlg.bg_btn.text(), "Run in background")
+
+        # Test value and range
+        dlg.setRange(0, 100)
+        dlg.setValue(45)
+        self.assertEqual(dlg.value(), 45)
+        self.assertEqual(dlg.maximum(), 100)
+
+        # Test label update
+        dlg.setLabelText("Burning subtitles into video (45%)")
+        self.assertIn("45%", dlg.label.text())
+
+        # Test cancel click triggers cancel_requested and changes button text
+        cancel_called = []
+        dlg.cancel_requested.connect(lambda: cancel_called.append(True))
+        dlg.cancel_btn.click()
+
+        self.assertEqual(len(cancel_called), 1)
+        self.assertFalse(dlg.cancel_btn.isEnabled())
+        self.assertEqual(dlg.cancel_btn.text(), "Cancelling...")
+        self.assertIn("Cancelling export", dlg.label.text())
+
+    def test_cancel_video_export_interrupts_worker(self):
+        from unittest.mock import MagicMock
+        from ui.features.workflow_actions import WorkflowActionsMixin
+        from ui.widgets.progress_dialog import ExportProgressDialog
+        from PySide6.QtWidgets import QWidget, QPushButton, QProgressBar
+
+        class DummyGUI(WorkflowActionsMixin, QWidget):
+            def __init__(self):
+                super().__init__()
+                self.export_progress_dialog = ExportProgressDialog(self)
+                self.export_thread = MagicMock()
+                self.export_thread.isRunning.return_value = True
+                self.export_btn = QPushButton("Exporting...")
+                self.progress_bar = QProgressBar()
+                self._pipeline_active = True
+
+            def log(self, msg):
+                pass
+
+            def update_project_step(self, step, status):
+                pass
+
+            def _unregister_progress_dialog(self, dlg):
+                pass
+
+        gui = DummyGUI()
+        gui.cancel_video_export()
+
+        gui.export_thread.requestInterruption.assert_called_once()
+        self.assertEqual(gui.export_progress_dialog.cancel_btn.text(), "Cancelling...")
+
+    def test_on_export_finished_handles_cancellation_gracefully(self):
+        from unittest.mock import MagicMock
+        from ui.controllers.preview_controller import PreviewController
+        from PySide6.QtWidgets import QWidget, QPushButton, QProgressBar
+
+        class DummyMainWindow(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.export_btn = QPushButton("Exporting...")
+                self.progress_bar = QProgressBar()
+                self.progress_bar.setValue(50)
+                self.output_mode_combo = MagicMock()
+                self.output_mode_combo.currentText.return_value = "voice"
+                self.steps = {}
+                self.logs = []
+                self.export_progress_dialog = None
+
+            def _close_export_progress_dialog(self):
+                pass
+
+            def on_output_mode_changed(self, mode):
+                pass
+
+            def update_project_step(self, step, status):
+                self.steps[step] = status
+
+            def log(self, msg):
+                self.logs.append(msg)
+
+            def refresh_ui_state(self):
+                pass
+
+            def show_error(self, title, msg, detail):
+                raise AssertionError("show_error should NOT be called on cancellation!")
+
+        gui = DummyMainWindow()
+        controller = PreviewController(gui)
+
+        controller.on_export_finished("", "Operation cancelled by user")
+
+        self.assertEqual(gui.export_btn.text(), "Export")
+        self.assertTrue(gui.export_btn.isEnabled())
+        self.assertEqual(gui.progress_bar.value(), 0)
+        self.assertEqual(gui.steps.get("export"), "pending")
+        self.assertTrue(any("cancelled" in log.lower() for log in gui.logs))
 
 
 if __name__ == "__main__":

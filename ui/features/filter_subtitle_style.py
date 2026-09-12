@@ -376,6 +376,20 @@ class FilterSubtitleStyleMixin:
                 widget.blockSignals(False)
         self.on_subtitle_position_mode_changed()
 
+    def on_subtitle_font_size_scaled(self, font_size: int):
+        """Commit a scale gesture from the live subtitle overlay to font size controls."""
+        if self._preview_is_playing():
+            return
+        font_size = max(12, min(140, int(font_size)))
+        if hasattr(self, "subtitle_font_size_spin"):
+            self.subtitle_font_size_spin.blockSignals(True)
+            self.subtitle_font_size_spin.setValue(font_size)
+            self.subtitle_font_size_spin.blockSignals(False)
+        self.on_subtitle_style_control_edited()
+        self.update_subtitle_preview_style()
+        if getattr(self, "current_project_state", None) is not None:
+            self.schedule_timeline_project_persist()
+
     def get_subtitle_position_config(self) -> dict:
         alignment_map = {
             "Bottom Left": 1,

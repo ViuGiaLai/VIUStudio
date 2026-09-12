@@ -1126,12 +1126,23 @@ class PreviewConfigurationMixin:
         """
         requested_font = str(requested_font or "Segoe UI").strip() or "Segoe UI"
         try:
-            bundled_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "assets", "fonts"))
-            if not getattr(self, "_bundled_subtitle_fonts_registered", False) and os.path.isdir(bundled_dir):
-                for filename in os.listdir(bundled_dir):
-                    if filename.lower().endswith((".ttf", ".otf")):
-                        QFontDatabase.addApplicationFont(os.path.join(bundled_dir, filename))
-                self._bundled_subtitle_fonts_registered = True
+            if not getattr(self, "_bundled_subtitle_fonts_registered", False):
+                candidates = [
+                    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "fonts")),
+                    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "assets", "fonts")),
+                ]
+                try:
+                    from runtime_paths import asset_path
+                    candidates.insert(0, asset_path("fonts"))
+                except Exception:
+                    pass
+                for bundled_dir in candidates:
+                    if os.path.isdir(bundled_dir):
+                        for filename in os.listdir(bundled_dir):
+                            if filename.lower().endswith((".ttf", ".otf")):
+                                QFontDatabase.addApplicationFont(os.path.join(bundled_dir, filename))
+                        self._bundled_subtitle_fonts_registered = True
+                        break
             resolved = QFontInfo(QFont(requested_font)).family().strip()
             return resolved or requested_font
         except Exception:
@@ -1157,44 +1168,40 @@ class PreviewConfigurationMixin:
         preset = self.get_subtitle_preset_config()
         export_font_size = int(self.subtitle_font_size_spin.value())
         preview_scale = preview_h / source_h
-        preview_text_scale = preview_scale * 0.85
-        # The preview is a scaled view of the source video. Do not impose a
-        # 10px floor here: it made several user-selected sizes render as the
-        # same size and therefore looked as though the control had stopped
-        # updating.
-        # Qt's QFont and libass use different font metric engines. At the
-        # small sizes used by this live preview, QFont advances the bundled
-        # Montserrat glyphs about 15% wider than libass, causing earlier line
-        # wraps and a visibly larger preview. Calibrate the editable layer to
-        # the ASS renderer, while keeping the exported source size unchanged.
-        preview_font_size = max(1, int(round(export_font_size * preview_text_scale)))
+        preview_font_size = max(1, int(round(export_font_size * preview_scale)))
         font_name = self._resolved_subtitle_font_name(
             self.subtitle_font_combo.currentText().strip() or preset.get("font_name", "Segoe UI")
         )
         bg_alpha = float(self.subtitle_bg_alpha_spin.value()) if hasattr(self, "subtitle_bg_alpha_spin") else float(preset.get("background_alpha", 0.0))
         bg_color = QColor(getattr(self, "subtitle_background_color_hex", preset.get("background_color", "#000000")))
         bg_color.setAlpha(max(0, min(255, int(round(bg_alpha * 255.0)))))
+        bg_padding = float(self.subtitle_background_padding_spin.value()) if hasattr(self, "subtitle_background_padding_spin") else float(preset.get("background_padding", 6.0))
+        bg_radius = float(self.subtitle_background_radius_spin.value()) if hasattr(self, "subtitle_background_radius_spin") else float(preset.get("background_radius", 0.0))
+        base_outline = (
+            float(preset.get("outline_width", 2))
+            if not hasattr(self, "subtitle_outline_cb") or self.subtitle_outline_cb.isChecked()
+            else 0.0
+        )
         item.set_style(
             font_name=font_name or preset.get("font_name", "Segoe UI"),
             font_size=preview_font_size,
+            base_font_size=export_font_size,
+            base_outline_width=base_outline,
+            base_padding=bg_padding,
+            base_radius=bg_radius,
             font_color=self._subtitle_color_for_segment(
                 (self.live_preview_segments or self.get_active_segments() or [None])[0]
             ),
-            # Stroke/shadow values are authored for the source video. Scale
-            # them for the smaller Qt preview too; otherwise TikTok's 7px
-            # export outline overwhelms its preview-sized glyphs.
-            outline_width=(
-                float(preset.get("outline_width", 2)) * preview_text_scale
-                if not hasattr(self, "subtitle_outline_cb") or self.subtitle_outline_cb.isChecked()
-                else 0.0
-            ),
+            outline_width=base_outline * preview_scale,
             outline_color=QColor(preset.get("outline_color", "#000000")),
             background_box=bool(self.subtitle_background_cb.isChecked()),
             background_color=bg_color,
+            background_padding=max(1.0, bg_padding * preview_scale),
+            background_radius=max(0.0, bg_radius * preview_scale),
             single_line=bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()),
             bold=bool(self.subtitle_bold_cb.isChecked()),
             shadow_color=QColor(preset.get("shadow_color", "#000000")),
-            shadow_depth=float(preset.get("shadow_depth", 0)) * preview_text_scale,
+            shadow_depth=float(preset.get("shadow_depth", 0)) * preview_scale,
         )
         position = self.get_subtitle_position_config()
         item.set_alignment(position.get("alignment_label", "Bottom"))
@@ -1210,6 +1217,28 @@ class PreviewConfigurationMixin:
         style_segment = segments[selected] if 0 <= selected < len(segments) else (segments[0] if segments else None)
         self._apply_live_subtitle_segment_color(style_segment)
         self._set_live_subtitle_effects(style_segment)
+        if not self._preview_is_playing() and style_segment:
+            if isinstance(style_segment, dict):
+                seg_text = str(
+                    style_segment.get("final_text", "")
+                    or style_segment.get("text", "")
+                    or style_segment.get("subtitle_text", "")
+                    or style_segment.get("raw_translation", "")
+                    or style_segment.get("original_text", "")
+                    or ""
+                ).strip()
+            else:
+                seg_text = str(
+                    getattr(style_segment, "subtitle_text", "")
+                    or getattr(style_segment, "final_text", "")
+                    or getattr(style_segment, "original_text", "")
+                    or getattr(style_segment, "text", "")
+                    or ""
+                ).strip()
+            if seg_text:
+                item.set_text(seg_text)
+            if getattr(item, "current_text", "") and bool(getattr(self, "_subtitle_track_preview_visible", True)):
+                item.show()
         self.video_view.reposition_subtitle()
         self.sync_live_subtitle_preview()
         self.schedule_auto_frame_preview()
@@ -1222,7 +1251,14 @@ class PreviewConfigurationMixin:
         segment = segment or {}
         preset = self.get_subtitle_preset_config()
         if isinstance(segment, dict):
-            text = str(segment.get("text", "") or segment.get("final_text", "") or "")
+            text = str(
+                segment.get("final_text", "")
+                or segment.get("text", "")
+                or segment.get("subtitle_text", "")
+                or segment.get("raw_translation", "")
+                or segment.get("original_text", "")
+                or ""
+            )
             auto_h = list(segment.get("auto_highlights", []) or [])
             manual_h = list(segment.get("manual_highlights", []) or [])
             start = float(segment.get("start", 0.0) or 0.0)

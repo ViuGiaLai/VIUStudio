@@ -19,6 +19,8 @@ class VideoView(QGraphicsView):
     blurEditFinished = Signal()
     subtitlePositionChanged = Signal(int, int)  # x_percent, y_percent
     subtitleDragStarted = Signal()
+    subtitleFontSizeChanged = Signal(int)  # new_base_font_size
+    subtitleClicked = Signal()
     logoMoved = Signal(float, float, float, float)  # x, y, w, h
     logoDeleted = Signal()
     logoEditFinished = Signal()
@@ -72,11 +74,18 @@ class VideoView(QGraphicsView):
         self._logo_visible = True
 
         self.subtitle_item = SubtitleOverlayItem()
+        self.subtitle_item.attach_to_view(self)
         self.subtitle_item.setZValue(10)
         self._scene.addItem(self.subtitle_item)
         self.subtitle_item.hide()
+        self.subtitle_item.positionDragStarted.connect(self.subtitleDragStarted.emit)
+        self.subtitle_item.positionDragFinished.connect(self.subtitlePositionChanged.emit)
+        self.subtitle_item.fontSizeChanged.connect(self.subtitleFontSizeChanged.emit)
+        self.subtitle_item.subtitleClicked.connect(self.subtitleClicked.emit)
         self.video_source_width = 0
         self.video_source_height = 0
+        self.subtitle_render_width = 0
+        self.subtitle_render_height = 0
         self.preview_aspect_key = "source"
         self.preview_scale_mode = "fit"
         self.preview_fill_focus_x = 0.5
@@ -327,7 +336,9 @@ class VideoView(QGraphicsView):
             self.text_overlay.sync_to_view()
 
     def set_subtitle_render_dimensions(self, width: int, height: int):
-        pass
+        self.subtitle_render_width = max(0, int(width or 0))
+        self.subtitle_render_height = max(0, int(height or 0))
+        self.reposition_subtitle()
 
     def set_subtitle_track_visible(self, visible: bool):
         if hasattr(self, "subtitle_item") and self.subtitle_item is not None:
@@ -529,14 +540,30 @@ class VideoView(QGraphicsView):
         if rect.width() <= 0 or rect.height() <= 0:
             return
 
-        source_w = max(1, int(rect.width()))
-        source_h = max(1, int(rect.height()))
+        source_w = max(1, int(self.subtitle_render_width or self.video_source_width or rect.width()))
+        source_h = max(1, int(self.subtitle_render_height or self.video_source_height or rect.height()))
         scale_x = rect.width() / source_w
         scale_y = rect.height() / source_h
         side_margin_px = 60 * scale_x
 
-        desired_width = min(int(rect.width() - 2 * side_margin_px), max(160, int((source_w - 120) * scale_x)))
+        desired_width = max(1, min(int(rect.width() - 2 * side_margin_px), int((source_w - 120) * scale_x)))
         item.set_layout_width(desired_width)
+
+        base_font = getattr(item, "base_font_size", None)
+        if base_font is not None and base_font > 0:
+            preview_font_size = max(1, int(round(base_font * scale_y)))
+            base_outline = getattr(item, "base_outline_width", 2.0)
+            scaled_outline = max(0.0, float(base_outline) * scale_y)
+            base_pad = getattr(item, "base_padding", 4.0)
+            scaled_pad = max(1.0, float(base_pad) * scale_y)
+            base_rad = getattr(item, "base_radius", 0.0)
+            scaled_rad = max(0.0, float(base_rad) * scale_y)
+            item.set_style(
+                font_size=preview_font_size,
+                outline_width=scaled_outline,
+                background_padding=scaled_pad,
+                background_radius=scaled_rad,
+            )
 
         item_w, item_h = item.W, item.H
         left_pad = rect.left() + side_margin_px
@@ -574,15 +601,20 @@ class VideoView(QGraphicsView):
         return content_rect.width() > canvas_rect.width() + 0.5 or content_rect.height() > canvas_rect.height() + 0.5
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._can_drag_framing():
-            pos = QPointF(event.position()) if hasattr(event, "position") else QPointF(event.pos())
-            if self.get_preview_canvas_rect().contains(pos):
-                self._framing_drag_active = True
-                self._framing_drag_start = pos
-                self._framing_drag_focus = self.get_preview_fill_focus()
-                self.viewport().setCursor(Qt.ClosedHandCursor)
-                event.accept()
-                return
+        if event.button() == Qt.LeftButton:
+            pos_p = event.pos() if hasattr(event, "pos") else event.position().toPoint()
+            item = self.itemAt(pos_p)
+            if item is not self.subtitle_item and hasattr(self, "subtitle_item") and self.subtitle_item is not None:
+                self.subtitle_item.set_selected(False)
+            if self._can_drag_framing():
+                pos = QPointF(event.position()) if hasattr(event, "position") else QPointF(event.pos())
+                if self.get_preview_canvas_rect().contains(pos):
+                    self._framing_drag_active = True
+                    self._framing_drag_start = pos
+                    self._framing_drag_focus = self.get_preview_fill_focus()
+                    self.viewport().setCursor(Qt.ClosedHandCursor)
+                    event.accept()
+                    return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):

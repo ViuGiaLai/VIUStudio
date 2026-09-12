@@ -1401,39 +1401,38 @@ def build_preview_panel(gui):
     inspector_header.addWidget(gui.subtitle_inspector_badge)
     inspector_layout.addLayout(inspector_header)
 
-    # --- Compact subtitle actions (Balanced 6-column grid) ---
-    inspector_actions_row = QGridLayout()
-    inspector_actions_row.setHorizontalSpacing(6)
-    inspector_actions_row.setVerticalSpacing(6)
+    # --- Compact subtitle actions (Sleek unified single-row toolbar) ---
+    inspector_actions_row = QHBoxLayout()
+    inspector_actions_row.setSpacing(5)
     inspector_actions_row.setContentsMargins(0, 0, 0, 0)
     gui.rewrite_translation_btn = QPushButton("Rewrite")
     gui.audio_inspector_regenerate_voice_btn = QPushButton("Voice")
     gui.subtitle_editor_btn = QPushButton("Edit")
-    gui.import_translation_btn = QPushButton("Import SRT")
+    gui.import_translation_btn = QPushButton("Import")
     gui.inspector_delete_segment_btn = QPushButton("Delete")
 
-    gui.rewrite_translation_btn.setIcon(load_icon(asset_path("icons/rewrite.svg"), 15))
-    gui.audio_inspector_regenerate_voice_btn.setIcon(load_icon(asset_path("icons/audio_preview.svg"), 15))
-    gui.subtitle_editor_btn.setIcon(load_icon(asset_path("icons/subtitle_edit.svg"), 15))
-    gui.import_translation_btn.setIcon(load_icon(asset_path("icons/import.svg"), 15))
-    gui.inspector_delete_segment_btn.setIcon(load_icon(asset_path("icons/delete.svg"), 15))
+    gui.rewrite_translation_btn.setIcon(load_icon(asset_path("icons/rewrite.svg"), 14))
+    gui.audio_inspector_regenerate_voice_btn.setIcon(load_icon(asset_path("icons/audio_preview.svg"), 14))
+    gui.subtitle_editor_btn.setIcon(load_icon(asset_path("icons/subtitle_edit.svg"), 14))
+    gui.import_translation_btn.setIcon(load_icon(asset_path("icons/import.svg"), 14))
+    gui.inspector_delete_segment_btn.setIcon(load_icon(asset_path("icons/delete.svg"), 14))
 
     action_buttons = (
-        (gui.rewrite_translation_btn, 72, "Rewrite the selected subtitle with AI."),
-        (gui.audio_inspector_regenerate_voice_btn, 64, "Re-generate voice for the selected subtitle."),
-        (gui.subtitle_editor_btn, 52, "Open the full subtitle editor."),
-        (gui.import_translation_btn, 84, "Import subtitles from an SRT file."),
-        (gui.inspector_delete_segment_btn, 70, "Delete the selected subtitle cue."),
+        (gui.rewrite_translation_btn, "Rewrite the selected subtitle with AI."),
+        (gui.audio_inspector_regenerate_voice_btn, "Re-generate voice for the selected subtitle."),
+        (gui.subtitle_editor_btn, "Open the full subtitle editor."),
+        (gui.import_translation_btn, "Import subtitles from an SRT file."),
+        (gui.inspector_delete_segment_btn, "Delete the selected subtitle cue."),
     )
-    for button, preferred_width, tooltip in action_buttons:
+    for button, tooltip in action_buttons:
         button.setObjectName("subtitleInspectorAction")
-        button.setFixedHeight(32)
+        button.setFixedHeight(28)
         button.setMinimumWidth(0)
-        button.setMaximumWidth(preferred_width)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        button.setIconSize(QSize(15, 15))
+        button.setIconSize(QSize(14, 14))
         button.setCursor(Qt.PointingHandCursor)
         button.setToolTip(tooltip)
+        inspector_actions_row.addWidget(button)
 
     gui.inspector_delete_segment_btn.setObjectName("subtitleInspectorDangerAction")
     gui.rewrite_translation_btn.setEnabled(False)
@@ -1443,17 +1442,6 @@ def build_preview_panel(gui):
     gui.subtitle_editor_btn.clicked.connect(gui.open_subtitle_editor)
     gui.inspector_delete_segment_btn.clicked.connect(gui.delete_selected_timeline_segment)
 
-    # Row 0: 3 primary buttons spanning 2 cols each
-    inspector_actions_row.addWidget(gui.rewrite_translation_btn, 0, 0, 1, 2)
-    inspector_actions_row.addWidget(gui.audio_inspector_regenerate_voice_btn, 0, 2, 1, 2)
-    inspector_actions_row.addWidget(gui.subtitle_editor_btn, 0, 4, 1, 2)
-
-    # Row 1: 2 secondary buttons spanning 3 cols each
-    inspector_actions_row.addWidget(gui.import_translation_btn, 1, 0, 1, 3)
-    inspector_actions_row.addWidget(gui.inspector_delete_segment_btn, 1, 3, 1, 3)
-
-    for column in range(6):
-        inspector_actions_row.setColumnStretch(column, 1)
     inspector_layout.addLayout(inspector_actions_row)
 
     # The original transcript is shown immediately above the editable

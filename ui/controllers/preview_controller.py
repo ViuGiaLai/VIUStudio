@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QCheckBox, QFileDialog, QMessageBox
 
 from runtime_paths import bin_path
 from worker_adapters import (
@@ -233,6 +233,11 @@ class PreviewController:
         try:
             self.gui.sync_live_subtitle_preview()
             live_ass_path = str(getattr(self.gui, "live_preview_ass_path", "") or "")
+            if not live_ass_path or not os.path.isfile(live_ass_path):
+                segments = self.gui.live_preview_segments or self.gui.get_active_segments()
+                if segments:
+                    _srt, ass_path = self.gui._write_live_preview_assets(segments)
+                    live_ass_path = ass_path
             if not live_ass_path or not os.path.isfile(live_ass_path):
                 return ""
 
@@ -698,25 +703,94 @@ class PreviewController:
             summary_lines.append(f"Audio Processing: {processing_label}")
         if mode_key in {"voice", "both"} and "Dubbed" in audio_mode:
             summary_lines.append(f"Voice: {self._export_voice_summary()}")
+        is_already_recapped = bool(
+            "_recap" in os.path.basename(video_path).lower()
+            or (hasattr(self.gui, "last_recap_video_path") and self.gui.last_recap_video_path and os.path.normcase(os.path.abspath(video_path)) == os.path.normcase(os.path.abspath(self.gui.last_recap_video_path)))
+        )
+        initial_recap = bool(
+            (hasattr(self.gui, "is_auto_recap_enabled") and self.gui.is_auto_recap_enabled())
+            or (hasattr(self.gui, "anti_duplicate_cb") and self.gui.anti_duplicate_cb.isChecked())
+        )
+        recap_desc = (
+            "Đã áp dụng sẵn trong video nguồn"
+            if is_already_recapped
+            else ("Bật (1-Pass: Lật gương + Zoom YouTube + Dịch cao độ)" if initial_recap else "Tắt")
+        )
+
         summary_lines.extend([
             "",
             "CONTENT",
             f"Subtitles: {'Yes' if has_subtitles else 'No'}",
             f"Layers: {self._active_export_layer_summary()}",
+            "",
+            "CHỐNG TRÙNG LẶP / RECAP",
+            f"Auto Recap: {recap_desc}",
         ])
 
-        box = QMessageBox(self.gui)
-        box.setIcon(QMessageBox.Information)
-        box.setWindowTitle("Export Summary")
-        box.setText("Review export details before starting.")
-        box.setInformativeText("\n".join(summary_lines))
-        start_btn = box.addButton("Start Export", QMessageBox.AcceptRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
-        box.exec()
-        return box.clickedButton() is start_btn
+        from app.anti_duplicate import AntiDuplicateSettings
 
-    def _resolve_export_video_path(self) -> str:
-        """Resolve the imported source, never a rendered preview artifact."""
+        # Load existing custom settings from memory or project state if available
+        existing_ad_settings = getattr(self.gui, "_anti_duplicate_settings", None)
+        if existing_ad_settings is None and hasattr(self.gui, "current_project_state") and self.gui.current_project_state:
+            ps = self.gui.current_project_state
+            saved_dict = None
+            if hasattr(ps, "get_setting"):
+                saved_dict = ps.get_setting("anti_duplicate_custom_settings", None)
+            elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                saved_dict = ps.settings.get("anti_duplicate_custom_settings", None)
+            if saved_dict and isinstance(saved_dict, dict):
+                existing_ad_settings = AntiDuplicateSettings.from_dict(saved_dict)
+
+        try:
+            from ui.dialogs.export_confirm_dialog import ExportConfirmDialog
+            dialog = ExportConfirmDialog(
+                summary_lines,
+                is_already_recapped=is_already_recapped,
+                initial_recap=initial_recap,
+                ad_settings=existing_ad_settings,
+                parent=self.gui,
+            )
+            dialog.exec()
+            confirmed = (dialog.result() == QDialog.Accepted)
+            wants_recap, ad_settings = dialog.get_result()
+            self.gui._anti_duplicate_settings = ad_settings
+            if hasattr(self.gui, "current_project_state") and self.gui.current_project_state:
+                ps = self.gui.current_project_state
+                if hasattr(ps, "set_setting"):
+                    ps.set_setting("anti_duplicate_custom_settings", ad_settings.to_dict())
+                elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                    ps.settings["anti_duplicate_custom_settings"] = ad_settings.to_dict()
+            return confirmed, wants_recap, ad_settings
+        except Exception as exc:
+            # Safe fallback if UI fails to initialize
+            print(f"[Export] ExportConfirmDialog fallback: {exc}")
+            box = QMessageBox(self.gui)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("Export Summary")
+            box.setText("Review export details before starting.")
+            box.setInformativeText("\n".join(summary_lines))
+            recap_cb = QCheckBox("✨ Bật Chống trùng lặp (Auto Recap 1-Pass)", box)
+            recap_cb.setChecked(initial_recap if not is_already_recapped else False)
+            recap_cb.setEnabled(not is_already_recapped)
+            box.setCheckBox(recap_cb)
+            start_btn = box.addButton("Start Export", QMessageBox.AcceptRole)
+            box.addButton("Cancel", QMessageBox.RejectRole)
+            box.exec()
+            confirmed = (box.clickedButton() is start_btn)
+            wants_recap = bool(recap_cb.isChecked()) if not is_already_recapped else False
+            return confirmed, wants_recap, existing_ad_settings
+
+    def _resolve_export_video_path(self, *, prefer_recap: bool = True) -> str:
+        """Resolve the active video path for preview and export.
+
+        When prefer_recap=True and Auto Recap is active with a rendered recap video,
+        returns the recap video path so timeline overlays (logos, text, blur) and
+        previews are rendered on top of the recapped media.
+        """
+        if prefer_recap and hasattr(self.gui, "is_auto_recap_enabled") and self.gui.is_auto_recap_enabled():
+            recap_path = str(getattr(self.gui, "last_recap_video_path", "") or "").strip()
+            if recap_path and os.path.isfile(recap_path):
+                return os.path.abspath(recap_path)
         canonical = getattr(self.gui, "resolve_canonical_video_path", None)
         if callable(canonical):
             resolved = canonical()
@@ -749,6 +823,99 @@ class PreviewController:
             if os.path.isfile(path):
                 return path
         return ""
+
+    def _normalize_export_timeline_clips(
+        self,
+        clips: list[dict],
+        base_video_path: str,
+        is_recap_active: bool,
+    ) -> list[dict]:
+        """Normalize timeline clips for final export.
+
+        When Auto Recap is active, any clips referencing the raw canonical source
+        are updated to point to the rendered recap video. Furthermore, if the
+        sequence of clips forms an uninterrupted, contiguous playback of base_video_path
+        (e.g., unmodified auto recap shots), collapses them into a single continuous
+        clip so FFmpeg can render in a single input pass rather than opening dozens
+        of duplicated file handles.
+        """
+        if not clips:
+            return []
+        norm_base = os.path.normcase(os.path.abspath(base_video_path)) if base_video_path else ""
+        canonical_src = ""
+        if hasattr(self.gui, "resolve_canonical_video_path"):
+            try:
+                resolved = self.gui.resolve_canonical_video_path()
+                if resolved:
+                    canonical_src = os.path.normcase(os.path.abspath(resolved))
+            except Exception:
+                pass
+
+        updated_clips: list[dict] = []
+        for c in clips:
+            c_copy = dict(c)
+            src_str = str(c_copy.get("source", "") or "")
+            src_norm = os.path.normcase(os.path.abspath(src_str)) if src_str else ""
+            if is_recap_active and base_video_path and canonical_src and src_norm == canonical_src:
+                c_copy["source"] = base_video_path
+            updated_clips.append(c_copy)
+
+        # Defensive sanitization: if sequential clips have end times that overlap
+        # past the subsequent clip's start (e.g. legacy timeline corruption),
+        # clamp each clip's end to the next clip's start so total duration remains exact.
+        if len(updated_clips) > 1:
+            for i in range(len(updated_clips) - 1):
+                cur_st = float(updated_clips[i].get("start", 0.0) or 0.0)
+                cur_end = float(updated_clips[i].get("end", 0.0) or 0.0)
+                nxt_st = float(updated_clips[i + 1].get("start", 0.0) or 0.0)
+                if nxt_st > cur_st and cur_end > nxt_st:
+                    updated_clips[i]["end"] = nxt_st
+                    updated_clips[i]["source_duration"] = nxt_st - cur_st
+
+        if len(updated_clips) > 1 and norm_base and os.path.isfile(base_video_path):
+            expected_pos = 0.0
+            is_contiguous = True
+            for i, c in enumerate(updated_clips):
+                c_src = os.path.normcase(os.path.abspath(str(c.get("source", "") or "")))
+                if c_src != norm_base:
+                    is_contiguous = False
+                    break
+                if abs(float(c.get("speed", 1.0) or 1.0) - 1.0) > 0.001:
+                    is_contiguous = False
+                    break
+                if bool(c.get("muted", False)):
+                    is_contiguous = False
+                    break
+                if abs(float(c.get("volume", 1.0) or 1.0) - 1.0) > 0.001:
+                    is_contiguous = False
+                    break
+                start = float(c.get("start", 0.0) or 0.0)
+                source_start = float(c.get("source_start", 0.0) or 0.0)
+                if i == 0 and (abs(start) > 0.05 or abs(source_start) > 0.05):
+                    is_contiguous = False
+                    break
+                if abs(start - expected_pos) > 0.05 or abs(source_start - expected_pos) > 0.05:
+                    is_contiguous = False
+                    break
+                dur = float(c.get("source_duration", 0.0) or (float(c.get("end", 0.0) or 0.0) - start))
+                if dur <= 0:
+                    is_contiguous = False
+                    break
+                expected_pos += dur
+
+            if is_contiguous:
+                return [{
+                    "source": base_video_path,
+                    "source_start": 0.0,
+                    "source_duration": expected_pos,
+                    "start": 0.0,
+                    "end": expected_pos,
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "muted": False,
+                }]
+
+        return updated_clips
 
     def _check_audio_freshness(self, audio_path: str) -> bool:
         """Reject missing or stale generated audio before export."""
@@ -1115,63 +1282,26 @@ class PreviewController:
             QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
             return
 
-        # Auto Edit Recap Export Handler
-        if hasattr(self.gui, "is_auto_recap_enabled") and self.gui.is_auto_recap_enabled():
-            recap_path = str(getattr(self.gui, "last_recap_video_path", "") or "")
-            if recap_path and os.path.exists(recap_path):
-                suggested_path = os.path.join(
-                    os.path.dirname(recap_path),
-                    f"{os.path.splitext(os.path.basename(video_path))[0]}_recap.mp4",
-                )
-                output_path, _ = QFileDialog.getSaveFileName(
-                    self.gui, "Export Recap Video", suggested_path, "Video Files (*.mp4)"
-                )
-                if not output_path:
-                    return
-                if not output_path.lower().endswith(".mp4"):
-                    output_path += ".mp4"
-                try:
-                    if os.path.abspath(recap_path) != os.path.abspath(output_path):
-                        shutil.copy2(recap_path, output_path)
-                    self.on_export_finished(output_path, "")
-                except OSError as exc:
-                    self.on_export_finished("", str(exc))
-                return
-            elif getattr(self.gui, "current_auto_recap_edl", None):
-                default_dir = self.gui.final_output_folder_edit.text().strip() or os.path.dirname(video_path)
-                default_path = os.path.join(
-                    default_dir, f"{os.path.splitext(os.path.basename(video_path))[0]}_recap.mp4"
-                )
-                output_path, _ = QFileDialog.getSaveFileName(
-                    self.gui, "Export Recap Video", default_path, "Video Files (*.mp4)"
-                )
-                if not output_path:
-                    return
-                if not output_path.lower().endswith(".mp4"):
-                    output_path += ".mp4"
-                output_dir = os.path.dirname(output_path)
-                if output_dir:
-                    os.makedirs(output_dir, exist_ok=True)
-                self.gui.log("[Export] Rendering 1-Pass Auto Recap video for export...")
-                self.gui.export_btn.setEnabled(False)
-                self.gui.export_btn.setText("Exporting...")
-                self.gui.export_thread = AutoRecapRenderWorker(
-                    video_path,
-                    output_path,
-                    getattr(self.gui, "auto_recap_config", None),
-                    self.gui.current_auto_recap_edl,
-                    self.gui.get_timeline_video_clips(existing_only=True)
-                    if hasattr(self.gui, "get_timeline_video_clips") else [],
-                )
-                # Route through the QMainWindow receiver so Qt queues the UI
-                # update back onto the main thread.
-                self.gui.export_thread.finished.connect(self.gui.on_auto_recap_export_finished)
-                self.gui.export_thread.finished.connect(self._on_export_thread_done)
-                self.gui.export_thread.start()
-                return
+        # Auto Edit Recap Base Video Preparation
+        is_recap_active = bool(
+            (hasattr(self.gui, "is_auto_recap_enabled") and self.gui.is_auto_recap_enabled())
+            or (hasattr(self.gui, "anti_duplicate_cb") and self.gui.anti_duplicate_cb.isChecked())
+        )
+        canonical_src = (
+            self.gui.resolve_canonical_video_path()
+            if hasattr(self.gui, "resolve_canonical_video_path")
+            else video_path
+        )
+        recap_path = str(getattr(self.gui, "last_recap_video_path", "") or "").strip()
+
+        # If a recap video was already generated on disk (e.g. via Generate button), use it.
+        # Otherwise, the export pipeline will apply the Auto Recap filters directly in 1-Pass!
+        if recap_path and os.path.isfile(recap_path):
+            video_path = recap_path
 
         has_translated_content = bool(
             getattr(self.gui, "current_translated_segments", None)
+            or (hasattr(self.gui, "get_active_segments") and self.gui.get_active_segments())
             or str(self.gui.translated_text.toPlainText() if hasattr(self.gui, "translated_text") else "").strip()
             or (
                 getattr(self.gui, "last_translated_srt_path", "")
@@ -1265,14 +1395,19 @@ class PreviewController:
             return
 
         default_dir = self.gui.final_output_folder_edit.text().strip() or os.path.dirname(video_path)
+        base_title = video_name
+        if is_recap_active and base_title.endswith("_recap"):
+            base_title = base_title[:-6]
+        recap_tag = "_recap" if is_recap_active else ""
+
         if mode == "original":
-            suggested_name = f"{video_name}_original.mp4"
+            suggested_name = f"{base_title}{recap_tag}_final.mp4"
         elif mode == "subtitle":
-            suggested_name = f"{video_name}_sub_vi.mp4"
+            suggested_name = f"{base_title}{recap_tag}_sub_vi.mp4"
         elif mode == "voice":
-            suggested_name = f"{video_name}_voice_vi.mp4"
+            suggested_name = f"{base_title}{recap_tag}_voice_vi.mp4"
         else:
-            suggested_name = f"{video_name}_final_vi.mp4"
+            suggested_name = f"{base_title}{recap_tag}_final_vi.mp4"
 
         default_path = os.path.join(default_dir, suggested_name)
         if automatic:
@@ -1294,13 +1429,27 @@ class PreviewController:
             os.makedirs(chosen_dir, exist_ok=True)
             self.gui.final_output_folder_edit.setText(chosen_dir)
 
-        if not automatic and not self._confirm_export_summary(
-            video_path=video_path,
-            output_path=output_path,
-            mode=mode,
-            audio_path=chosen_audio,
-        ):
-            return
+        wants_recap = is_recap_active
+        custom_ad_settings = getattr(self.gui, "_anti_duplicate_settings", None)
+        if not automatic:
+            confirm_res = self._confirm_export_summary(
+                video_path=video_path,
+                output_path=output_path,
+                mode=mode,
+                audio_path=chosen_audio,
+            )
+            if isinstance(confirm_res, tuple) and len(confirm_res) == 3:
+                confirmed, wants_recap, custom_ad_settings = confirm_res
+            else:
+                confirmed, wants_recap = confirm_res
+            if not confirmed:
+                return
+
+        # Update GUI controls to reflect user's selection
+        if hasattr(self.gui, "anti_duplicate_cb"):
+            self.gui.anti_duplicate_cb.setChecked(wants_recap)
+        if hasattr(self.gui, "auto_recap_cb"):
+            self.gui.auto_recap_cb.setChecked(wants_recap)
 
         # Check if an export is already running — guard against deleted C++ object
         if hasattr(self.gui, 'export_thread') and self.gui.export_thread is not None:
@@ -1330,6 +1479,22 @@ class PreviewController:
         project_state_path = self.gui.project_service.project_file(self.gui.current_project_state.project_root) if self.gui.current_project_state else ""
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         
+        is_already_recapped = bool(
+            "_recap" in os.path.basename(video_path).lower()
+            or (recap_path and os.path.isfile(recap_path) and os.path.normcase(os.path.abspath(video_path)) == os.path.normcase(os.path.abspath(recap_path)))
+        )
+        anti_dup = bool(wants_recap and not is_already_recapped)
+
+        raw_timeline_clips = (
+            self.gui.get_timeline_video_clips(existing_only=True)
+            if hasattr(self.gui, "get_timeline_video_clips") else []
+        )
+        timeline_clips = self._normalize_export_timeline_clips(
+            raw_timeline_clips,
+            base_video_path=video_path,
+            is_recap_active=(is_already_recapped or wants_recap),
+        )
+
         self.gui.export_thread = FinalExportWorker(
             workspace_root=self.gui.workspace_root,
             video_path=video_path,
@@ -1349,12 +1514,11 @@ class PreviewController:
             original_audio_gain_db=original_audio_gain_db,
             project_state_path=project_state_path,
             project_temp_dir=self.gui.get_project_temp_dir("export"),
-            timeline_clips=(
-                self.gui.get_timeline_video_clips(existing_only=True)
-                if hasattr(self.gui, "get_timeline_video_clips") else []
-            ),
+            timeline_clips=timeline_clips,
             export_preset=self.gui.get_export_preset(),
             video_bitrate_kbps=self.gui.get_output_bitrate_kbps(),
+            anti_duplicate_enabled=anti_dup,
+            anti_duplicate_settings=custom_ad_settings if anti_dup else None,
         )
         self.gui.export_thread.progress.connect(self.gui.on_export_progress)
         self.gui.export_thread.finished.connect(self.gui.on_export_finished)
@@ -1608,13 +1772,27 @@ class PreviewController:
                         "text": str(word.get("text", "") or "").strip(),
                     }
                 )
+            seg_text = (
+                seg.get("final_text")
+                or seg.get("text")
+                or seg.get("subtitle_text")
+                or seg.get("raw_translation")
+                or seg.get("original_text")
+                or ""
+            ) if isinstance(seg, dict) else (
+                getattr(seg, "subtitle_text", "")
+                or getattr(seg, "final_text", "")
+                or getattr(seg, "original_text", "")
+                or getattr(seg, "text", "")
+            )
             clipped.append(
                 {
                     "start": max(0.0, seg_start - start_seconds),
                     "end": min(duration_seconds, seg_end - start_seconds),
-                    "text": seg.get("text", ""),
+                    "text": seg_text,
+                    "final_text": seg_text,
                     "words": clipped_words,
-                    "manual_highlights": list(seg.get("manual_highlights", [])),
+                    "manual_highlights": list(seg.get("manual_highlights", []) if isinstance(seg, dict) else getattr(seg, "manual_highlights", [])),
                 }
             )
 
@@ -1643,12 +1821,21 @@ class PreviewController:
         self.gui._close_export_progress_dialog()
         self.gui.export_btn.setEnabled(True)
         self.gui.on_output_mode_changed(self.gui.output_mode_combo.currentText())
-        self.gui.progress_bar.setValue(100)
-
         if error:
+            if "cancelled" in str(error).lower():
+                self.gui.export_btn.setText("Export")
+                if hasattr(self.gui, "progress_bar"):
+                    self.gui.progress_bar.setValue(0)
+                self.gui.update_project_step("export", "pending")
+                self.gui.log("[Export] Video export was cancelled by user.")
+                self.gui.refresh_ui_state()
+                return
+            self.gui.progress_bar.setValue(100)
             self.gui.update_project_step("export", "failed")
             self.gui.show_error("Error", "Final export failed.", error)
             return
+
+        self.gui.progress_bar.setValue(100)
 
         if output_path and os.path.exists(output_path):
             self.gui.last_exported_video_path = output_path

@@ -264,10 +264,8 @@ class EditorTimeline(QGraphicsView):
                 start=0.0, end=max_dur,
                 transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
             ))
-        elif v1 and v1.layers:
-            for l in v1.layers:
-                if max_dur > l.end:
-                    l.end = max_dur
+        elif v1 and len(v1.layers) == 1 and not getattr(v1.layers[0], "source", "") and getattr(v1.layers[0], "name", "") == "V1 Video":
+            v1.layers[0].end = max_dur
 
         if a1 and not a1.layers:
             a1.layers.append(AudioLayer(
@@ -276,10 +274,8 @@ class EditorTimeline(QGraphicsView):
                 start=0.0, end=max_dur,
                 volume=1.0,
             ))
-        elif a1 and a1.layers:
-            for l in a1.layers:
-                if max_dur > l.end:
-                    l.end = max_dur
+        elif a1 and len(a1.layers) == 1 and not getattr(a1.layers[0], "source", "") and getattr(a1.layers[0], "name", "") == "A1 Audio":
+            a1.layers[0].end = max_dur
 
     def set_duration_ms(self, ms: int) -> None:
         new_dur = max(0, ms / 1000.0)

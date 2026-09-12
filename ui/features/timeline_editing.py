@@ -1697,14 +1697,17 @@ class TimelineEditingMixin:
                 # Start/End timing chips with duration
                 timing_meta_layout = QHBoxLayout()
                 timing_meta_layout.setContentsMargins(0, 0, 0, 0)
-                timing_meta_layout.setSpacing(8)
+                timing_meta_layout.setSpacing(6)
                 start_label = QLabel(f"Start  {self.format_timestamp(row['start'])}")
                 start_label.setObjectName("timingChip")
+                start_label.setFixedHeight(24)
                 end_label = QLabel(f"End  {self.format_timestamp(row['end'])}")
                 end_label.setObjectName("timingChip")
+                end_label.setFixedHeight(24)
                 duration_sec = max(0.0, float(row.get('end', 0) or 0) - float(row.get('start', 0) or 0))
                 dur_label = QLabel(f"{duration_sec:.2f}s")
                 dur_label.setObjectName("durationChip")
+                dur_label.setFixedHeight(24)
                 dur_label.setToolTip("Duration of this subtitle cue")
                 timing_meta_layout.addWidget(start_label)
                 timing_meta_layout.addWidget(end_label)
@@ -1715,7 +1718,7 @@ class TimelineEditingMixin:
                 # Speaker & Voice Speed row (unified properties bar)
                 props_row = QHBoxLayout()
                 props_row.setContentsMargins(0, 0, 0, 0)
-                props_row.setSpacing(10)
+                props_row.setSpacing(8)
 
                 speaker_ids = self._detected_speaker_ids()
                 segment_source = self.current_translated_segments or self.current_segments or []
@@ -1736,7 +1739,7 @@ class TimelineEditingMixin:
                     if combo_index >= 0:
                         speaker_combo.setCurrentIndex(combo_index)
                     speaker_combo.setEnabled(True)
-                speaker_combo.setFixedHeight(28)
+                speaker_combo.setFixedHeight(26)
                 speaker_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 speaker_combo.setToolTip(
                     "Assign this subtitle segment to a detected speaker."
@@ -1756,8 +1759,8 @@ class TimelineEditingMixin:
                 speed_spin.setDecimals(1)
                 speed_spin.setValue(float(row.get("voice_speed", 1.0)))
                 speed_spin.setSuffix("x")
-                speed_spin.setFixedHeight(28)
-                speed_spin.setFixedWidth(75)
+                speed_spin.setFixedHeight(26)
+                speed_spin.setFixedWidth(70)
                 speed_spin.valueChanged.connect(
                     lambda val, idx=idx: self.on_segment_voice_speed_changed(idx, val)
                 )
@@ -1923,6 +1926,7 @@ class TimelineEditingMixin:
         if new_text == str(segment.get("text", "") or ""):
             return
         segment["text"] = new_text
+        segment["final_text"] = new_text
         segment["subtitle_vi"] = new_text
         # A subtitle text edit must not keep speaking an earlier manual or AI
         # rewrite. The next TTS run uses the freshly edited subtitle text.

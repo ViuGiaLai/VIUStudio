@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import os
 
+# Anti-duplicate support (optional import — graceful fallback if missing)
+try:
+    from anti_duplicate import AntiDuplicateSettings, build_anti_duplicate_video_chain as _build_ad_video_chain
+    _AD_AVAILABLE = True
+except ImportError:
+    _AD_AVAILABLE = False
+    AntiDuplicateSettings = None  # type: ignore[assignment,misc]
+
 
 FILTER_FIELDS = (
     "brightness",
@@ -125,3 +133,39 @@ def build_video_lut_chain(video_filter_state=None) -> str:
         f"[lutsrc]lut3d=file='{_escape_ffmpeg_filter_path(lut_path)}'[lutapplied];"
         f"[base][lutapplied]blend=all_expr='A*(1-{strength:.4f})+B*{strength:.4f}'"
     )
+
+
+def build_full_video_filter_chain(video_filter_state=None, anti_duplicate_settings=None) -> str:
+    """Xay dung filter chain day du: anti-duplicate (opt-in) + color/LUT.
+
+    Neu anti_duplicate_settings duoc truyen vao va enabled=True, se them
+    cac filter KT#2 (zoom + color grade) va KT#4 (geometric distortion)
+    VAO TRUOC chuoi color/LUT chinh.
+
+    Ket qua co the dung truc tiep thay the build_video_filter_chain() o bat
+    ky noi nao trong codebase.
+
+    Args:
+        video_filter_state: Dict chua cac gia tri color (brightness, contrast...).
+        anti_duplicate_settings: AntiDuplicateSettings object hoac None.
+
+    Returns:
+        Chuoi FFmpeg filter hoan chinh, hoac chuoi rong neu khong co filter nao.
+    """
+    parts = []
+
+    # KT#2 + KT#4: Anti-duplicate prefix (Zoom, Color Grade, Geometric)
+    if _AD_AVAILABLE and anti_duplicate_settings is not None:
+        try:
+            ad_chain = _build_ad_video_chain(anti_duplicate_settings)
+            if ad_chain:
+                parts.append(ad_chain)
+        except Exception:
+            pass  # Graceful fallback — khong lam hong export chinh
+
+    # Color/LUT chain chinh (hien tai)
+    main_chain = build_video_filter_chain(video_filter_state)
+    if main_chain:
+        parts.append(main_chain)
+
+    return ",".join(p for p in parts if p)

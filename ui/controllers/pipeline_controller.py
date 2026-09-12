@@ -360,13 +360,18 @@ class PipelineController:
         if hasattr(self.gui, "_register_progress_dialog"):
             self.gui._register_progress_dialog(self.progress_dialog)
         if workflow == "recap":
+            is_anti_dup = bool(
+                getattr(getattr(self.gui, "auto_recap_config", None), "anti_duplicate", False)
+                or (hasattr(self.gui, "anti_duplicate_cb") and self.gui.anti_duplicate_cb.isChecked())
+            )
+            title = "🛡️ Phân tích && Tạo video Chống trùng lặp" if is_anti_dup else "✨ Tự động cắt ghép Recap"
             if hasattr(self.progress_dialog, "title_label"):
-                self.progress_dialog.title_label.setText("✨ Auto Edit Recap")
-            self.progress_dialog.add_step("analyzing", "Analyzing Video (Effect Shot Boundaries)")
-            self.progress_dialog.add_step("building", "Building Effect Plan (No Content Removal)")
-            self.progress_dialog.add_step("smart_edits", "Applying Smart Edits (Zoom, Pan, Crop & Speed)")
-            self.progress_dialog.add_step("audio", "Processing Audio (Voiceover & Ducking)")
-            self.progress_dialog.add_step("rendering", "Rendering Recap (FFmpeg 1-Pass)")
+                self.progress_dialog.title_label.setText(title)
+            self.progress_dialog.add_step("analyzing", "Phân tích cảnh video (Scene Detection)")
+            self.progress_dialog.add_step("building", "Lập kế hoạch phân đoạn (Giữ nguyên toàn bộ nội dung)")
+            self.progress_dialog.add_step("smart_edits", "Áp dụng hiệu ứng kháng bản quyền (Zoom, Đổi màu, Đổi góc)")
+            self.progress_dialog.add_step("audio", "Xử lý âm thanh & Dịch cao độ kháng Content ID (±2%)")
+            self.progress_dialog.add_step("rendering", "Render video xem trước bằng FFmpeg (1-Pass siêu tốc)")
         else:
             if hasattr(self.progress_dialog, "title_label"):
                 self.progress_dialog.title_label.setText(
@@ -423,7 +428,7 @@ class PipelineController:
         """Run Auto Edit Recap without entering the AI Production pipeline."""
         video_path = self._resolve_pipeline_video_path(video_path)
         if not video_path:
-            QMessageBox.warning(self.gui, "Auto Edit Recap", "Please select a video file first.")
+            QMessageBox.warning(self.gui, "Chống trùng lặp / Recap", "Vui lòng chọn hoặc nạp một file video trước khi chạy.")
             return
         if getattr(self.gui, "_pipeline_active", False):
             return
@@ -433,7 +438,7 @@ class PipelineController:
         self.target_stage = "recap"
         if hasattr(self.gui, "run_all_btn"):
             self.gui.run_all_btn.setEnabled(False)
-            self.gui.run_all_btn.setText("Processing...")
+            self.gui.run_all_btn.setText("Đang xử lý...")
         self._setup_progress_dialog(workflow="recap")
         if self.progress_dialog:
             self.progress_dialog.start_step("analyzing")
@@ -445,12 +450,22 @@ class PipelineController:
         )
         segments = list(self.gui.get_active_segments() or []) if hasattr(self.gui, "get_active_segments") else []
         timeline_clips = self.gui.get_timeline_video_clips(existing_only=True) if hasattr(self.gui, "get_timeline_video_clips") else []
+        recap_cfg = getattr(self.gui, "auto_recap_config", None)
+        if recap_cfg and hasattr(self.gui, "anti_duplicate_cb") and self.gui.anti_duplicate_cb.isChecked():
+            recap_cfg.anti_duplicate = True
         self.gui.auto_recap_worker = AutoRecapWorker(
-            video_path, output_path, getattr(self.gui, "auto_recap_config", None), segments, timeline_clips
+            video_path, output_path, recap_cfg, segments, timeline_clips
         )
         self.gui.auto_recap_worker.stage_started.connect(self._on_auto_recap_stage_started)
+        if hasattr(self.gui.auto_recap_worker, "progress"):
+            self.gui.auto_recap_worker.progress.connect(self._on_auto_recap_progress)
         self.gui.auto_recap_worker.finished.connect(self._on_auto_recap_finished)
         self.gui.auto_recap_worker.start()
+
+    def _on_auto_recap_progress(self, step_id, percent, message):
+        if not self.progress_dialog:
+            return
+        self.progress_dialog.update_step_progress(str(step_id), percent, str(message))
 
     def _on_auto_recap_stage_started(self, step_id, message):
         if not self.progress_dialog:
@@ -460,7 +475,7 @@ class PipelineController:
             self.progress_dialog.finish_step(previous)
         self.gui._pipeline_step = str(step_id)
         self.progress_dialog.start_step(str(step_id))
-        self.progress_dialog.update_step_progress(str(step_id), None, message)
+        self.progress_dialog.update_step_progress(str(step_id), 0, message)
 
     def _on_auto_recap_finished(self, decisions, output_path, error):
         worker = getattr(self.gui, "auto_recap_worker", None)
@@ -472,17 +487,43 @@ class PipelineController:
                 else None,
             )
         if error or not output_path:
-            self.pipeline_fail(f"Auto Edit Recap failed: {error or 'unknown error'}")
+            self.pipeline_fail(f"Tạo video chống trùng lặp thất bại: {error or 'Lỗi không xác định'}")
             return
         self.gui.current_auto_recap_edl = list(decisions or [])
         self.gui.last_recap_video_path = str(output_path)
         if hasattr(self.gui, "persist_auto_recap_project_data"):
             self.gui.persist_auto_recap_project_data(self.gui.current_auto_recap_edl, output_path)
+
+        def _update_recap_ui():
+            try:
+                from PySide6.QtCore import QUrl
+                if hasattr(self.gui, "media_player") and self.gui.media_player is not None:
+                    self.gui.media_player.setSource(QUrl.fromLocalFile(output_path))
+                    if hasattr(self.gui.media_player, "setPosition"):
+                        self.gui.media_player.setPosition(0)
+
+                if hasattr(self.gui, "timeline") and getattr(self.gui.timeline, "_timeline", None):
+                    from app.layers.sync_bridge import sync_auto_recap_decisions_to_timeline
+                    sync_auto_recap_decisions_to_timeline(self.gui.timeline._timeline, decisions, output_path)
+                    self.gui.timeline.set_duration(self.gui.timeline._timeline.duration)
+                    self.gui.timeline._redraw()
+
+                if hasattr(self.gui, "_loaded_live_ass_path"):
+                    self.gui._loaded_live_ass_path = ""
+            except Exception as ex:
+                if hasattr(self.gui, "log"):
+                    self.gui.log(f"[Auto Recap] Cảnh báo cập nhật giao diện: {ex}")
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(150, _update_recap_ui)
+
         if self.progress_dialog:
             self.progress_dialog.finish_step("rendering")
             self.progress_dialog.set_completed()
-            self.progress_dialog.footer.setText("✨ Auto Edit Recap complete! Ready for export.")
-        self.gui.log(f"[Auto Recap] Dedicated recap pipeline complete: {output_path}")
+            self.progress_dialog.footer.setText("✨ Tạo video chống trùng lặp hoàn tất! Đang mở cửa sổ So sánh Video...")
+        self.gui.log(f"[Chống trùng lặp] Hoàn tất tạo video xem trước: {output_path}")
+        if hasattr(self.gui, "open_video_compare_dialog"):
+            QTimer.singleShot(400, self.gui.open_video_compare_dialog)
         self.pipeline_done()
 
     def run_all_pipeline(self, video_path=None, requires_separation=None, target_stage="full"):
@@ -813,10 +854,25 @@ class PipelineController:
                             and float(timeline_clips[0].get("source_start", 0.0) or 0.0) > 0.01
                         )
                     )
+                    def _render_progress_cb(pct, msg=""):
+                        try:
+                            if self.progress_dialog:
+                                self.progress_dialog.update_progress("rendering", int(pct))
+                                if msg:
+                                    self.progress_dialog.footer.setText(str(msg))
+                            from PySide6.QtWidgets import QApplication
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+
                     rendered = (
-                        engine.render_timeline_recap_1pass(timeline_clips, output_path, decisions)
+                        engine.render_timeline_recap_1pass(
+                            timeline_clips, output_path, decisions, on_progress=_render_progress_cb
+                        )
                         if timeline_recap_required
-                        else engine.render_recap_video_1pass(video_path, output_path, decisions)
+                        else engine.render_recap_video_1pass(
+                            video_path, output_path, decisions, on_progress=_render_progress_cb
+                        )
                     )
                     if rendered:
                         self.gui.last_recap_video_path = output_path
@@ -964,21 +1020,27 @@ class PipelineController:
         self._stop_local_worker_server()
         
         if self.progress_dialog:
-            current_step = getattr(self.gui, "_pipeline_step", "prepare")
-            dialog_step = {
-                "prepare": "ai_process",
-                "extract_audio": "ai_process",
-                "extraction": "ai_process",
-                "separation": "ai_process",
-                "diarization": "ai_process",
-                "transcription": "ai_process",
-                "translation": "ai_process",
-            }.get(str(current_step or "").lower(), current_step)
-            detailed_reason = str(reason or "Unknown error").strip()
-            last_activity = str(self.prepare_status_message or "").strip()
-            if dialog_step == "ai_process" and last_activity and last_activity not in detailed_reason:
-                detailed_reason = f"Last activity: {last_activity}\n\n{detailed_reason}"
-            self.progress_dialog.set_error(dialog_step or "ai_process", detailed_reason)
+            try:
+                from shiboken6 import isValid
+                dialog_is_valid = isValid(self.progress_dialog)
+            except Exception:
+                dialog_is_valid = True
+            if dialog_is_valid:
+                current_step = getattr(self.gui, "_pipeline_step", "prepare")
+                dialog_step = {
+                    "prepare": "ai_process",
+                    "extract_audio": "ai_process",
+                    "extraction": "ai_process",
+                    "separation": "ai_process",
+                    "diarization": "ai_process",
+                    "transcription": "ai_process",
+                    "translation": "ai_process",
+                }.get(str(current_step or "").lower(), current_step)
+                detailed_reason = str(reason or "Unknown error").strip()
+                last_activity = str(self.prepare_status_message or "").strip()
+                if dialog_step == "ai_process" and last_activity and last_activity not in detailed_reason:
+                    detailed_reason = f"Last activity: {last_activity}\n\n{detailed_reason}"
+                self.progress_dialog.set_error(dialog_step or "ai_process", detailed_reason)
 
         # Restore UI
         if hasattr(self.gui, "run_all_btn"):

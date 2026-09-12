@@ -1,4 +1,5 @@
 import os
+import shutil
 import re
 import copy
 import threading
@@ -547,6 +548,91 @@ class VoiceSubtitlePreviewMixin:
         worker.finished.connect(on_finished)
         worker.start()
 
+    def import_voice_audio(self):
+        default_dir = (
+            (self.voice_output_folder_edit.text().strip() if hasattr(self, "voice_output_folder_edit") else "")
+            or (self.final_output_folder_edit.text().strip() if hasattr(self, "final_output_folder_edit") else "")
+            or getattr(self, "workspace_root", "")
+            or ""
+        )
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Voice Audio",
+            default_dir,
+            "Audio Files (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.wma);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            QMessageBox.warning(self, "Import Failed", "The selected audio file is invalid or empty.")
+            return
+
+        normalized_path = self._normalize_local_file_path(file_path) if hasattr(self, "_normalize_local_file_path") else os.path.normpath(file_path)
+
+        state = self.ensure_current_project() if hasattr(self, "ensure_current_project") else getattr(self, "current_project_state", None)
+        target_path = normalized_path
+        if state and getattr(state, "project_root", "") and os.path.isdir(state.project_root):
+            audio_dir = os.path.join(state.project_root, "audio")
+            os.makedirs(audio_dir, exist_ok=True)
+            ext = os.path.splitext(normalized_path)[1].lower() or ".mp3"
+            dest = os.path.join(audio_dir, f"imported_voice{ext}")
+            if os.path.abspath(normalized_path) != os.path.abspath(dest):
+                try:
+                    shutil.copy2(normalized_path, dest)
+                    target_path = dest
+                except Exception as exc:
+                    self.log(f"[Import Voice] Notice: Could not copy audio to project directory ({exc}), using original path.")
+                    target_path = normalized_path
+
+        self.last_voice_vi_path = target_path
+        if hasattr(self, "processed_artifacts"):
+            self.processed_artifacts["voice_vi"] = target_path
+        if hasattr(self, "update_project_artifact"):
+            self.update_project_artifact("voice_vi", target_path)
+        if hasattr(self, "update_project_step"):
+            self.update_project_step("generate_tts", "done")
+
+        self._voice_track_partial = False
+        if hasattr(self, "use_generated_audio_radio"):
+            self.use_generated_audio_radio.setChecked(True)
+
+        if hasattr(self, "audio_tab_btn"):
+            self.audio_tab_btn.setEnabled(True)
+
+        if hasattr(self, "timeline"):
+            self.timeline.sync_tts_track(
+                target_path,
+                segments=getattr(self, "current_translated_segments", None) or getattr(self, "current_segments", None),
+            )
+            if hasattr(self, "voice_timing_sync_combo"):
+                self.timeline.set_voice_sync_mode(self.voice_timing_sync_combo.currentText())
+
+        if hasattr(self, "_sync_timeline_mute_to_gui"):
+            self._sync_timeline_mute_to_gui()
+
+        if hasattr(self, "persist_current_timeline_project_data"):
+            self.persist_current_timeline_project_data()
+
+        if hasattr(self, "schedule_timeline_visual_refresh"):
+            self.schedule_timeline_visual_refresh(waveform=True, thumbnails=False)
+
+        if hasattr(self, "sync_preview_audio_track_to_output"):
+            self.sync_preview_audio_track_to_output(apply_to_player=True, force=True)
+
+        if state:
+            state.set_setting("voice_track_partial", False)
+            if hasattr(self, "project_service") and self.project_service:
+                self.project_service.save_project(state)
+
+        self.log(f"[Import] Voice audio loaded: {target_path}")
+        self.refresh_ui_state()
+        QMessageBox.information(
+            self,
+            "Import Success",
+            f"Voice audio imported successfully:\n\n{os.path.basename(target_path)}\n\nYou can now preview or mix with background audio and export.",
+        )
+
     def import_original_srt(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -891,11 +977,11 @@ class VoiceSubtitlePreviewMixin:
                 subtitle_style["custom_position_y"] = max(0.0, min(100.0, (y_canvas - offset_y) * 100.0 / displayed_h))
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
-        signature = (video_path, source_width, source_height, repr(segments), repr(subtitle_style))
+        signature = (video_path, canvas_width, canvas_height, repr(segments), repr(subtitle_style))
         return {
             "segments": copy.deepcopy(list(segments or [])),
-            "video_width": source_width,
-            "video_height": source_height,
+            "video_width": canvas_width,
+            "video_height": canvas_height,
             "style": subtitle_style,
             "signature": signature,
             "preview_dir": self.get_project_temp_dir("preview"),
@@ -979,12 +1065,18 @@ class VoiceSubtitlePreviewMixin:
         self._live_preview_signature = signature
         self.processed_artifacts["subtitle_preview_srt"] = srt_path
         self.processed_artifacts["subtitle_preview_ass"] = ass_path
+        can_render_libass = bool(
+            getattr(self, "_use_libass_live_preview", False)
+            and hasattr(self.media_player, "set_subtitle_file")
+            and hasattr(self.media_player, "_sub_track_id")
+        )
         try:
-            self.media_player.set_subtitle_file(ass_path)
+            if can_render_libass:
+                self.media_player.set_subtitle_file(ass_path)
             self._loaded_live_ass_path = ass_path
             self._loaded_live_ass_signature = signature
             if hasattr(self, "video_view"):
-                self.video_view.subtitle_item.set_text_rendering(False)
+                self.video_view.subtitle_item.set_text_rendering(can_render_libass)
             self.update_playback_subtitle_highlight(int(self.media_player.position() or 0))
         except Exception as exc:
             self.runtime_log_received.emit(f"[Subtitle Background] Could not apply exact layout: {exc}")
@@ -1131,6 +1223,10 @@ class VoiceSubtitlePreviewMixin:
             if transcript_segments:
                 return transcript_segments, "transcript"
 
+        active = self.get_active_segments()
+        if active:
+            return list(active), ("translated" if self.current_translated_segments else "transcript")
+
         return [], ""
 
     def _resolve_live_preview_subtitle_path(self):
@@ -1185,11 +1281,10 @@ class VoiceSubtitlePreviewMixin:
                     previous_boundary = max(previous_boundary, boundary)
                 else:
                     next_boundary = boundary if next_boundary is None else min(next_boundary, boundary)
-            # Subtitle end times are exclusive.  At an exact cue boundary,
-            # selecting the previous cue for one frame makes the Inspector,
-            # overlay and TTS timing appear shifted; the next cue (or no cue
-            # during a gap) must win immediately.
-            if start_s <= position_seconds < end_s:
+            # Subtitle end times are exclusive. Allow 5ms tolerance on start_s
+            # so integer millisecond rounding when seeking to cue start does not
+            # accidentally land before the segment.
+            if (start_s - 0.005) <= position_seconds < end_s:
                 result.append(idx)
         stable_start = previous_boundary
         stable_end = next_boundary if next_boundary is not None else float("inf")
@@ -1315,7 +1410,22 @@ class VoiceSubtitlePreviewMixin:
                         active_lines = []
                         for i in active_indices:
                             s = segments[i]
-                            t = s.get("text", "") if isinstance(s, dict) else (getattr(s, "final_text", "") or getattr(s, "original_text", "") or getattr(s, "text", ""))
+                            if isinstance(s, dict):
+                                t = (
+                                    s.get("final_text")
+                                    or s.get("text")
+                                    or s.get("subtitle_text")
+                                    or s.get("raw_translation")
+                                    or s.get("original_text")
+                                    or ""
+                                )
+                            else:
+                                t = (
+                                    getattr(s, "subtitle_text", "")
+                                    or getattr(s, "final_text", "")
+                                    or getattr(s, "original_text", "")
+                                    or getattr(s, "text", "")
+                                )
                             active_lines.append(str(t or ""))
                         if len(active_lines) == 1:
                             self.video_view.subtitle_item.set_text(active_lines[0])
@@ -1367,9 +1477,22 @@ class VoiceSubtitlePreviewMixin:
         index = selected_index if selected_index in active_indices else active_indices[0]
         target_item = items[index]
         if isinstance(target_item, dict):
-            text = str(target_item.get("text", "") or target_item.get("final_text", "") or "").strip()
+            text = str(
+                target_item.get("final_text", "")
+                or target_item.get("text", "")
+                or target_item.get("subtitle_text", "")
+                or target_item.get("raw_translation", "")
+                or target_item.get("original_text", "")
+                or ""
+            ).strip()
         else:
-            text = str(getattr(target_item, "final_text", "") or getattr(target_item, "original_text", "") or getattr(target_item, "text", "") or "").strip()
+            text = str(
+                getattr(target_item, "subtitle_text", "")
+                or getattr(target_item, "final_text", "")
+                or getattr(target_item, "original_text", "")
+                or getattr(target_item, "text", "")
+                or ""
+            ).strip()
         if not text:
             return
         self.video_view.subtitle_item.set_text(text)
@@ -1378,10 +1501,31 @@ class VoiceSubtitlePreviewMixin:
         self.video_view.subtitle_item.show()
         self.video_view.reposition_subtitle()
 
+    def on_preview_subtitle_clicked(self):
+        """Handle clicking the subtitle on the preview canvas to focus and select it."""
+        if self._preview_is_playing():
+            return
+        try:
+            position_ms = int(getattr(self.media_player, "position", lambda: 0)() or 0)
+        except Exception:
+            position_ms = 0
+        items = list(self.live_preview_segments or self.get_active_segments() or [])
+        active_indices = self._find_active_segment_indices(position_ms, items)
+        if active_indices:
+            self.on_timeline_segment_selected(active_indices[0])
+        elif items:
+            selected_index = int(getattr(self, "_selected_segment_index", -1))
+            if 0 <= selected_index < len(items):
+                self.on_timeline_segment_selected(selected_index)
+        if hasattr(self, "video_view") and hasattr(self.video_view, "subtitle_item"):
+            self.video_view.subtitle_item.set_selected(True)
+            self.video_view.subtitle_item.set_editable(True)
+
     def sync_live_subtitle_preview(self):
         """Synchronize the live subtitle renderer and draggable Qt target."""
         if not hasattr(self, "media_player"):
             return
+        self._playback_subtitle_activity_cache = None
         if not bool(getattr(self, "_subtitle_track_preview_visible", True)):
             self.media_player.clear_subtitle()
             if hasattr(self, "video_view"):
@@ -1434,6 +1578,12 @@ class VoiceSubtitlePreviewMixin:
         self.media_player.clear_subtitle()
         if hasattr(self, "video_view"):
             self.video_view.subtitle_item.set_text_rendering(True)
+        segments, editor_name = self._resolve_live_preview_segments()
+        if segments:
+            self.live_preview_segments = list(segments)
+            self.live_preview_editor_name = editor_name
+        else:
+            self.live_preview_segments = list(self.get_active_segments() or [])
         position = 0
         try:
             position = int(self.media_player.position())

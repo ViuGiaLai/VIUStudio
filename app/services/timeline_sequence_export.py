@@ -73,6 +73,8 @@ def export_timeline_sequence(
     video_bitrate_kbps: int = 2000,
     on_progress=None,
     cancellation_check=None,
+    anti_duplicate_enabled: bool = False,
+    anti_duplicate_settings=None,
 ) -> str:
     """Render sequential V1 clips in one FFmpeg graph, without a merged source file."""
     from video_processor import (
@@ -91,6 +93,17 @@ def export_timeline_sequence(
     valid = [dict(clip) for clip in clips or [] if os.path.isfile(str(clip.get("source", "") or ""))]
     if not valid:
         raise ValueError("Timeline has no readable V1 video clips.")
+
+    # Defensive sanitization: if sequential clips have end times that overlap
+    # past the subsequent clip's start, clamp each clip's duration so total duration remains exact.
+    if len(valid) > 1:
+        for i in range(len(valid) - 1):
+            cur_st = float(valid[i].get("start", 0.0) or 0.0)
+            cur_end = float(valid[i].get("end", 0.0) or 0.0)
+            nxt_st = float(valid[i + 1].get("start", 0.0) or 0.0)
+            if nxt_st > cur_st and cur_end > nxt_st:
+                valid[i]["end"] = nxt_st
+                valid[i]["source_duration"] = nxt_st - cur_st
     first_w, first_h = get_video_dimensions(valid[0]["source"])
     width = max(2, int(target_width or first_w or 1920))
     height = max(2, int(target_height or first_h or 1080))
@@ -175,6 +188,17 @@ def export_timeline_sequence(
         filters.append(f"{''.join(concat_inputs)}concat=n={len(valid)}:v=1:a=0[vcat]")
 
     current = "vcat"
+    if anti_duplicate_enabled:
+        from anti_duplicate import build_anti_duplicate_video_chain, AntiDuplicateSettings
+        ad_cfg = anti_duplicate_settings or AntiDuplicateSettings(
+            enabled=True, continuous_mode=True, allow_horizontal_flip=True,
+            target_width=width, target_height=height,
+        )
+        ad_chain = build_anti_duplicate_video_chain(ad_cfg, target_w=width, target_h=height)
+        if ad_chain:
+            filters.append(f"[{current}]{ad_chain}[vad]")
+            current = "vad"
+
     mapped_blur_regions = _map_normalized_overlays_to_canvas(
         blur_regions, first_w, first_h, width, height, scale_mode, focus_x, focus_y
     )
@@ -210,11 +234,38 @@ def export_timeline_sequence(
         image_label = f"overlay_image_{offset}"
         next_label = f"overlay_video_{offset}"
         if kind == "logo":
-            overlay_w = max(1, int(round(float(layer.get("width", 0.2) or 0.2) * width)))
-            overlay_h = max(1, int(round(float(layer.get("height", 0.2) or 0.2) * height)))
-            x = int(round(float(layer.get("x", 0.0) or 0.0) * width))
-            y = int(round(float(layer.get("y", 0.0) or 0.0) * height))
-            filters.append(f"[{input_index}:v]scale={overlay_w}:{overlay_h},format=rgba,colorchannelmixer=aa={float(layer.get('opacity', 1.0) or 1.0):.4f}[{image_label}]")
+            source_file = str(layer.get("source", "") or "").strip()
+            box_w = max(2, (int(round(float(layer.get("width", 0.2) or 0.2) * width)) // 2) * 2)
+            box_h = max(2, (int(round(float(layer.get("height", 0.2) or 0.2) * height)) // 2) * 2)
+            img_w, img_h = None, None
+            if source_file and os.path.exists(source_file):
+                try:
+                    from PIL import Image
+                    with Image.open(source_file) as img:
+                        img_w, img_h = img.size
+                except Exception:
+                    pass
+            if img_w and img_h and img_w > 0 and img_h > 0:
+                img_aspect = img_w / float(img_h)
+                fit_w = min(box_w, int(round(box_h * img_aspect)))
+                fit_h = min(box_h, int(round(box_w / img_aspect)))
+                overlay_w = max(2, (fit_w // 2) * 2)
+                overlay_h = max(2, (fit_h // 2) * 2)
+            else:
+                overlay_w = box_w
+                overlay_h = box_h
+
+            x = max(0, min(width - overlay_w, (int(round(float(layer.get("x", 0.0) or 0.0) * width)) // 2) * 2))
+            y = max(0, min(height - overlay_h, (int(round(float(layer.get("y", 0.0) or 0.0) * height)) // 2) * 2))
+            rot = float(layer.get("rotation", 0.0) or 0.0)
+            rot_chain = ""
+            if abs(rot) > 0.1:
+                rot_rad = rot * 3.141592653589793 / 180.0
+                rot_chain = f",rotate={rot_rad:.6f}:c=none:ow={overlay_w}:oh={overlay_h}"
+            filters.append(
+                f"[{input_index}:v]format=rgba,scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:flags=lanczos"
+                f"{rot_chain},colorchannelmixer=aa={float(layer.get('opacity', 1.0) or 1.0):.4f}[{image_label}]"
+            )
         else:
             x = int(round(float(layer.get("x", 0.0) or 0.0)))
             y = int(round(float(layer.get("y", 0.0) or 0.0)))
@@ -231,10 +282,18 @@ def export_timeline_sequence(
     if external_audio_index is not None:
         audio_map = f"{external_audio_index}:a:0"
     else:
-        audio_map = "[acat]"
+        current_audio = "acat"
+        if anti_duplicate_enabled:
+            from anti_duplicate import build_anti_duplicate_audio_filter, AntiDuplicateSettings
+            ad_cfg = anti_duplicate_settings or AntiDuplicateSettings(enabled=True, continuous_mode=True)
+            ad_af = build_anti_duplicate_audio_filter(ad_cfg)
+            if ad_af:
+                filters.append(f"[{current_audio}]{ad_af}[aad]")
+                current_audio = "aad"
         if abs(float(original_audio_gain_db or 0.0)) > 0.001:
-            filters.append(f"[acat]volume={float(original_audio_gain_db):.6f}dB[aout]")
-            audio_map = "[aout]"
+            filters.append(f"[{current_audio}]volume={float(original_audio_gain_db):.6f}dB[aout]")
+            current_audio = "aout"
+        audio_map = f"[{current_audio}]"
 
     video_encoder_args = build_export_h264_encoder_args(
         ffmpeg, export_preset, video_bitrate_kbps
@@ -269,7 +328,7 @@ def export_timeline_sequence(
         cancellation_check=cancellation_check,
         output_path_to_clean=output_path,
     )
-    if not ok and "h264_nvenc" in command:
+    if not ok and any(e in command for e in ("h264_nvenc", "h264_qsv", "h264_amf")):
         fallback_args = build_export_h264_encoder_args(
             ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
         )
