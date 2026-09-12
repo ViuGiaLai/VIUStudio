@@ -396,6 +396,125 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         summary2 = s2.summary_text()
         self.assertNotIn("HIDDEN TEXT", summary2, "Khi marquee tắt không hiển thị marquee text trong summary")
 
+    def test_bgm_overlay_filter(self):
+        """KT#14: BGM Overlay (amovie + amix) khi add_bgm_overlay=True."""
+        s = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_bgm_overlay=True,
+            bgm_volume=0.12,
+        )
+        af = build_anti_duplicate_audio_filter(s)
+        self.assertIn("amovie=", af, "BGM filter: amovie phải có mặt khi bật BGM overlay")
+        self.assertIn("volume=0.12", af, "BGM filter: volume=0.12 phải được set đúng")
+        self.assertIn("amix=inputs=2", af, "BGM filter: amix 2 inputs phải có mặt")
+        self.assertIn("normalize=0", af, "BGM filter: normalize=0 phải được set để giữ 100% tiếng gốc")
+        self.assertIn("duration=first", af, "BGM filter: duration=first để giữ đúng thời lượng video")
+
+        # Khi tắt BGM overlay
+        s_off = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_bgm_overlay=False,
+        )
+        af_off = build_anti_duplicate_audio_filter(s_off)
+        self.assertNotIn("amovie=", af_off, "Khi tắt BGM overlay không được có amovie")
+        self.assertNotIn("amix=", af_off, "Khi tắt BGM overlay không được có amix")
+
+    def test_bgm_serialization_and_summary(self):
+        """Kiểm tra lưu/phục hồi BGM settings và hiển thị tóm tắt."""
+        s = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_bgm_overlay=True,
+            bgm_volume=0.15,
+            bgm_file_path=r"D:\my_bgm.mp3",
+        )
+        d = s.to_dict()
+        self.assertTrue(d["add_bgm_overlay"])
+        self.assertEqual(d["bgm_volume"], 0.15)
+        self.assertEqual(d["bgm_file_path"], r"D:\my_bgm.mp3")
+
+        restored = AntiDuplicateSettings.from_dict(d)
+        self.assertTrue(restored.add_bgm_overlay)
+        self.assertEqual(restored.bgm_volume, 0.15)
+        self.assertEqual(restored.bgm_file_path, r"D:\my_bgm.mp3")
+
+        summary = s.summary_text()
+        self.assertIn("BGM lót (15%)", summary)
+
+    def test_punch_zoom_rhythmic_cycle(self):
+        """KT#15: Punch Zoom nhịp điệu 5.5s bẻ gãy mốc quét 7s của YouTube."""
+        s = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_punch_zoom=True,
+            punch_zoom_interval_seconds=5.5,
+        )
+        vc = build_anti_duplicate_video_chain(s, target_w=1920, target_h=1080)
+        self.assertIn("mod(t,11.0)", vc, "Chu kỳ 11.0s (5.5s toàn <-> 5.5s cận) phải có trong crop filter")
+        self.assertIn("5.5,11.0", vc, "Ngưỡng chuyển đổi 5.5s phải có mặt trong crop filter")
+        self.assertIn("flags=fast_bilinear", vc, "Scale filter phải dùng flags=fast_bilinear để đảm bảo tốc độ xuất nhanh nhất")
+
+        # Khi tắt punch zoom: vẫn crop 5% tĩnh nhưng không có biểu thức mod(t,...)
+        s_off = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_punch_zoom=False,
+        )
+        vc_off = build_anti_duplicate_video_chain(s_off, target_w=1920, target_h=1080)
+        self.assertNotIn("mod(t,11.0)", vc_off, "Khi tắt punch zoom không được có chu kỳ 11s")
+
+    def test_punch_zoom_toggle_and_serialization(self):
+        """Kiểm tra lưu/phục hồi và hiển thị tóm tắt cho Punch Zoom."""
+        s = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_punch_zoom=True,
+            punch_zoom_interval_seconds=6.0,
+        )
+        d = s.to_dict()
+        self.assertTrue(d["add_punch_zoom"])
+        self.assertEqual(d["punch_zoom_interval_seconds"], 6.0)
+
+        restored = AntiDuplicateSettings.from_dict(d)
+        self.assertTrue(restored.add_punch_zoom)
+        self.assertEqual(restored.punch_zoom_interval_seconds, 6.0)
+
+        summary = s.summary_text()
+        self.assertIn("Punch Zoom 5.5s", summary)
+
+        s_off = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_punch_zoom=False,
+        )
+        summary_off = s_off.summary_text()
+        self.assertIn("Tắt Punch Zoom", summary_off)
+
+    def test_export_confirm_dialog_default_checked_and_enabled(self):
+        """Kiem tra hop thoai ExportConfirmDialog luon bat mac dinh va cho phep nguoi dung click/tuy chinh."""
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.dialogs.export_confirm_dialog import ExportConfirmDialog
+
+        # Truong hop 1: Khoi tao mac dinh
+        dlg = ExportConfirmDialog(["Video: test.mp4", "Audio: test.mp3"])
+        self.assertTrue(dlg.recap_cb.isEnabled(), "Checkbox chong trung lap phai luon click duoc")
+        self.assertTrue(dlg.recap_cb.isChecked(), "Checkbox chong trung lap phai duoc bat mac dinh")
+        self.assertTrue(dlg.custom_btn.isEnabled(), "Nut tuy chinh phai enabled khi checkbox duoc bat")
+        wants_recap, _ = dlg.get_result()
+        self.assertTrue(wants_recap, "get_result() phai tra ve True khi checkbox dang bat")
+
+        # Truong hop 2: Truyen is_already_recapped=True van khong duoc khoa hay tat cua nguoi dung
+        dlg2 = ExportConfirmDialog(["Video: test_recap.mp4"], is_already_recapped=True, initial_recap=True)
+        self.assertTrue(dlg2.recap_cb.isEnabled(), "Checkbox khong duoc phep bi disabled ke ca khi file co ten _recap")
+        self.assertTrue(dlg2.recap_cb.isChecked(), "Checkbox phai ton trong initial_recap=True")
+        wants_recap2, _ = dlg2.get_result()
+        self.assertTrue(wants_recap2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 APP_NAME = "VIUStudio Video & Auto Edit Recap"
-AUTO_RECAP_VERSION = "1.1.1"
+AUTO_RECAP_VERSION = "1.1.2"
 
-RELEASE_NOTES = """✨ VIUStudio v1.3.1 - Edge TTS Support, SRT-TTS Studio Enhancement & Launcher UI Release
+RELEASE_NOTES = """✨ VIUStudio v1.3.2 - CapCut-Style Subtitle Controls, 1:1 Export Sync & Video Workflow Enhancements
 
 Hạng mục tính năng mới:
-• 🎙️ Edge TTS Integration: Bổ sung hỗ trợ Edge TTS đa dạng giọng đọc truyền cảm, tự động quản lý kết nối và fallback thông minh.
-• 🎛️ SRT-TTS Studio Window Nâng Cấp: Giao diện tạo giọng nói từ phụ đề hoàn chỉnh, chỉnh sửa tốc độ/pitch từng câu, nghe thử giọng tức thì và xuất âm thanh chất lượng cao.
-• 🖥️ Launcher Layout & Responsive Reflow: Bố cục khởi động được tinh chỉnh hiện đại, thẻ dự án tự động co giãn theo kích thước cửa sổ mà không bị lỗi thanh cuộn ngang.
-• ⏱️ Voice Timing & Export Synchronization: Chuẩn hóa thuật toán căn chỉnh thời gian âm thanh, giữ khoảng lặng nguyên bản và đồng bộ timeline video.
-• 🛡️ Test Suite Hardening: Bổ sung bộ kiểm thử Edge TTS và Launcher Layout, đạt 328 tests tự động pass 100%.
+• 🎯 CapCut-Style Subtitle Direct Manipulation: Điều khiển phụ đề trực tiếp trên màn hình xem trước (Live Preview). Bấm chọn hiển thị khung viền nét đứt màu xanh neon (#00E5FF) cùng 4 tay cầm góc; kéo thả tự do mọi vị trí (Drag & Move); kéo góc phóng to/thu nhỏ cỡ chữ mượt mà theo thời gian thực (12px - 140px).
+• 🔄 Đồng bộ 1:1 Tuyệt đối sang Export: Chuẩn hóa thuật toán neo tâm \\an5\\pos(x,y) và cỡ chữ font giữa Preview và xuất video libass/FFmpeg. Khắc phục triệt để hiện tượng kéo trên preview mà xuất video không đổi.
+• 🖥️ Live Preview Display Hardening: Sửa lỗi tắt text rendering trong CPU Mode, triệt tiêu sai số mili-giây khi seek/click timeline segment, loại bỏ dải đen nền 96px, hiển thị phụ đề tức thì khi click chọn đoạn.
+• 🎙️ Import Voice Audio: Bổ sung chức năng nhập trực tiếp file giọng đọc / voiceover vào dự án qua menu More.
+• 🛑 Export Progress Dialog & Cancel: Giao diện tiến trình xuất video hiện đại, bổ sung nút Cancel dừng tác vụ an toàn ngay lập tức.
+• 🛡️ Anti-Duplicate Video Pipeline: Bổ sung pipeline chống trùng lặp video (lật gương, zoom punch, chỉnh màu động, đối chiếu video so sánh trước/sau).
+• 🧪 Automated Test Suite: Đạt 347/347 bài kiểm thử tự động (344 passed, 3 skipped, 0 failed).
 """
 
 

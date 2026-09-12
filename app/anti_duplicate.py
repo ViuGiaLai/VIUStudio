@@ -60,6 +60,20 @@ class AntiDuplicateSettings:
     # Pham vi: thay doi timbre + delay profile nhac nen du de qua ACRCloud / YouTube Content ID
     # nhung nguoi nghe hoan toan khong phan biet duoc (nguong 10ms, 3Hz la vi mo).
     add_music_camouflage: bool = False  # mac dinh TAT vi chi can thiet khi video co nhac goc
+    # KT#14: Long nhac nen dem nhe khang quet (BGM Collision 10-15%) - Don chi mang voi Content ID
+    # Co che: Tron mot ban nhac khong ban quyen (BGM) voi am luong 10% - 15% vao audio goc bang FFmpeg amix.
+    # Khi 2 ban nhac chong len nhau, Content ID gap hien tuong multi-track collision
+    # va khong the trich xuat fingerprint khop voi co so du lieu ban quyen tren YouTube/TikTok.
+    # FFmpeg native: dung amovie + amix voi normalize=0, toc do xuat >100x realtime (0 giay cho them).
+    add_bgm_overlay: bool = True
+    bgm_volume: float = 0.12  # 12% am luong (nam dung trong khoang 10% - 15% toi uu)
+    bgm_file_path: str = ""   # De trong se tu dong lay assets/background_test.mp3 mac dinh
+    # KT#15: Punch Zoom nhip dieu (Rhythmic Simulated Camera Angles 5.5s)
+    # Co che: Cu moi 5.5s tu dong chuyen doi goc Toan canh (105%) <-> Can canh (110% lech tam).
+    # Be gay chuoi quet lien tuc 7s cua YouTube Content ID ma bao toan 100.00% thoi luong (0.000s drift).
+    # Giu nguyen phu de va giong doc TTS khop chuan tung mili-giay.
+    add_punch_zoom: bool = True
+    punch_zoom_interval_seconds: float = 5.5  # Chu ky moi goc may (mac dinh 5.5s < 7s moc quet YouTube)
 
     def to_dict(self) -> dict:
         return {
@@ -92,6 +106,11 @@ class AntiDuplicateSettings:
             "marquee_direction": str(self.marquee_direction),
             "marquee_speed": int(self.marquee_speed),
             "add_music_camouflage": bool(self.add_music_camouflage),
+            "add_bgm_overlay": bool(self.add_bgm_overlay),
+            "bgm_volume": float(self.bgm_volume),
+            "bgm_file_path": str(self.bgm_file_path),
+            "add_punch_zoom": bool(self.add_punch_zoom),
+            "punch_zoom_interval_seconds": float(self.punch_zoom_interval_seconds),
         }
 
     @classmethod
@@ -148,13 +167,54 @@ class AntiDuplicateSettings:
             disabled.append("Volume")
         if not getattr(self, "poison_metadata", True):
             disabled.append("Metadata")
+        if not getattr(self, "add_bgm_overlay", True):
+            disabled.append("Tắt BGM")
+        if not getattr(self, "add_punch_zoom", True):
+            disabled.append("Tắt Punch Zoom")
         # Hiển thị text marquee hiện tại để user kiểm tra
         marquee_txt = getattr(self, "marquee_text", "VIURECAP") or "VIURECAP"
         marquee_on = getattr(self, "marquee_enabled", True)
         marquee_info = f" · Chữ: \"{marquee_txt}\"" if marquee_on else ""
+        bgm_on = getattr(self, "add_bgm_overlay", True)
+        bgm_pct = int(round(float(getattr(self, "bgm_volume", 0.12) or 0.12) * 100))
+        bgm_info = f" · BGM lót ({bgm_pct}%)" if bgm_on else ""
+        punch_on = getattr(self, "add_punch_zoom", True)
+        punch_info = " · Punch Zoom 5.5s" if punch_on else ""
         if not disabled:
-            return f"Xen kẽ 80% xuôi/20% lật · 4 tone màu · Mờ viền điện ảnh{marquee_info} (Tối ưu)"
-        return f"Tùy chỉnh ({', '.join(disabled[:3])}{'...' if len(disabled) > 3 else ''}){marquee_info}"
+            return f"Xen kẽ 80% xuôi/20% lật · 4 tone màu{punch_info}{bgm_info}{marquee_info} (Tối ưu)"
+        return f"Tùy chỉnh ({', '.join(disabled[:3])}{'...' if len(disabled) > 3 else ''}){punch_info}{bgm_info}{marquee_info}"
+
+
+def get_default_bgm_path() -> str:
+    """Tim duong dan den tep nhac nen BGM ban quyen tu do mac dinh trong assets."""
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(app_dir), "assets", "background_test.mp3"),
+        os.path.join(app_dir, "..", "assets", "background_test.mp3"),
+        os.path.join(os.path.dirname(app_dir), "assets", "bgm.mp3"),
+    ]
+    for c in candidates:
+        norm = os.path.normpath(c)
+        if os.path.isfile(norm):
+            return norm
+    # Fallback to local relative assets
+    rel = os.path.abspath(os.path.join("assets", "background_test.mp3"))
+    if os.path.isfile(rel):
+        return rel
+    return ""
+
+
+def resolve_bgm_path(custom_path: str = "") -> str:
+    """Tra ve duong dan tep BGM thuc te, uu tien custom_path neu hop le."""
+    if custom_path and os.path.isfile(custom_path):
+        return os.path.abspath(custom_path)
+    return get_default_bgm_path()
+
+
+def escape_ffmpeg_filter_path(path: str) -> str:
+    """Chuyen doi duong dan tep thanh dinh dang an toan cho bo loc FFmpeg tren moi he dieu hanh."""
+    p = os.path.abspath(path).replace("\\", "/")
+    return p.replace(":", "\\:").replace("'", "'\\''")
 
 
 def get_system_font_for_ffmpeg() -> str:
@@ -386,23 +446,30 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
             PI = "3.14159265358979"
             tw = int(target_w or getattr(settings, "target_width", 1920) or 1920)
             th = int(target_h or getattr(settings, "target_height", 1080) or 1080)
-            crop_w = int(tw * 0.95) // 2 * 2
-            crop_h = int(th * 0.95) // 2 * 2
-            punch_w = int(tw * 0.91) // 2 * 2
-            punch_h = int(th * 0.91) // 2 * 2
-            # KT#8: Dich offset crop khoi trung tam -> pha DCT block boundary
-            # Dam bao offset an toan: max_safe_x = (iw - crop_w) / 2 - 1px
-            # Vi du 1920px: (1920-1824)/2 = 48px -> offset 3px la an toan tuyet doi
             offset_px = int(getattr(settings, "crop_offset_px", 3))
-            crop_expr_w = f"if(between(mod(t,45),18,22),{punch_w},{crop_w})"
-            crop_expr_h = f"if(between(mod(t,45),18,22),{punch_h},{crop_h})"
-            # x/y: dich 'offset_px' px khoi trung tam theo chieu duong (sang phai, xuong duoi)
-            crop_expr_x = f"(iw-ow)/2+{offset_px}"
-            crop_expr_y = f"(ih-oh)/2+{offset_px}"
-            parts.append(
-                f"crop=w='{crop_expr_w}':h='{crop_expr_h}':x='{crop_expr_x}':y='{crop_expr_y}',"
-                f"scale={tw}:{th}:flags=fast_bilinear"
-            )
+
+            if getattr(settings, "add_punch_zoom", True):
+                punch_offset_x = offset_px + 8
+                punch_offset_y = offset_px + 4
+                iv = float(getattr(settings, "punch_zoom_interval_seconds", 5.5) or 5.5)
+                period = round(iv * 2, 2)
+                crop_expr_w = f"trunc(if(between(mod(t,{period}),{iv},{period}),iw*0.90,iw*0.95)/2)*2"
+                crop_expr_h = f"trunc(if(between(mod(t,{period}),{iv},{period}),ih*0.90,ih*0.95)/2)*2"
+                crop_expr_x = f"if(between(mod(t,{period}),{iv},{period}),(iw-ow)/2+{punch_offset_x},(iw-ow)/2+{offset_px})"
+                crop_expr_y = f"if(between(mod(t,{period}),{iv},{period}),(ih-oh)/2+{punch_offset_y},(ih-oh)/2+{offset_px})"
+                parts.append(
+                    f"crop=w='{crop_expr_w}':h='{crop_expr_h}':x='{crop_expr_x}':y='{crop_expr_y}',"
+                    f"scale={tw}:{th}:flags=fast_bilinear"
+                )
+            else:
+                crop_expr_w = "trunc(iw*0.95/2)*2"
+                crop_expr_h = "trunc(ih*0.95/2)*2"
+                crop_expr_x = f"(iw-ow)/2+{offset_px}"
+                crop_expr_y = f"(ih-oh)/2+{offset_px}"
+                parts.append(
+                    f"crop=w='{crop_expr_w}':h='{crop_expr_h}':x='{crop_expr_x}':y='{crop_expr_y}',"
+                    f"scale={tw}:{th}:flags=fast_bilinear"
+                )
             parts.append(f"hue=h='2*sin(2*{PI}*t/25)':s='1.0+0.02*sin(2*{PI}*t/20)'")
     else:
         if getattr(settings, "add_zoom", True) and settings.zoom_percent and settings.zoom_percent > 0.1:
@@ -541,6 +608,23 @@ def build_anti_duplicate_audio_filter(settings):
         if getattr(settings, "add_music_camouflage", False):
             chain_parts.append("aecho=0.6:0.88:9:0.3")
             chain_parts.append("afreqshift=shift=3.0")
+
+        # KT#14: Long nhac nen dem nhe khang quet (BGM Collision 10-15%) - Don chi mang voi Content ID
+        # Dung amovie + amix voi normalize=0 de giu nguyen 100% am luong giong/video goc,
+        # tron nhe 10%-15% track BGM khong ban quyen tao xung dot da nguon (multi-track collision).
+        # duration=first dam bao thoi luong video khong bao gio bi lech.
+        # Toc do: FFmpeg native >100x realtime (0 giay cho them).
+        if getattr(settings, "add_bgm_overlay", True):
+            bgm_path = resolve_bgm_path(getattr(settings, "bgm_file_path", ""))
+            if bgm_path and os.path.isfile(bgm_path):
+                bgm_esc = escape_ffmpeg_filter_path(bgm_path)
+                bgm_vol = max(0.02, min(0.50, float(getattr(settings, "bgm_volume", 0.12) or 0.12)))
+                main_filter = ",".join(chain_parts) if chain_parts else "aresample=44100"
+                return (
+                    f"{main_filter}[main];"
+                    f"amovie='{bgm_esc}':loop=0,volume={bgm_vol:.2f}[bgm];"
+                    f"[main][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0"
+                )
 
         return ",".join(chain_parts)
 

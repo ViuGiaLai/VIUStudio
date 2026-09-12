@@ -25,7 +25,7 @@ class ExportConfirmDialog(QDialog):
         summary_lines: list[str],
         *,
         is_already_recapped: bool = False,
-        initial_recap: bool = False,
+        initial_recap: bool = True,
         ad_settings: AntiDuplicateSettings | None = None,
         parent=None,
     ):
@@ -159,27 +159,29 @@ class ExportConfirmDialog(QDialog):
 
         top_rc = QHBoxLayout()
         self.recap_cb = QCheckBox("✨ Bật Chống trùng lặp (Auto Recap 1-Pass)")
-        if self.is_already_recapped:
-            self.recap_cb.setText("✨ Chống trùng lặp: Đã áp dụng sẵn trong video nguồn")
-            self.recap_cb.setChecked(False)
-            self.recap_cb.setEnabled(False)
-        else:
-            self.recap_cb.setChecked(initial_recap)
-            self.recap_cb.setToolTip("Áp dụng bộ lọc kháng bản quyền ngay trong 1 lần xuất (1-Pass).")
+        self.recap_cb.setChecked(initial_recap)
+        self.recap_cb.setEnabled(True)
+        self.recap_cb.setToolTip(
+            "Áp dụng bộ lọc kháng bản quyền (Punch Zoom 5.5s, Lật gương, 4 Tone màu, BGM lót...) ngay trong 1 lần xuất."
+        )
 
         top_rc.addWidget(self.recap_cb)
         top_rc.addStretch(1)
 
         self.custom_btn = QPushButton("⚙️ Tùy chỉnh bước...")
         self.custom_btn.setObjectName("customBtn")
-        self.custom_btn.setEnabled(not self.is_already_recapped and self.recap_cb.isChecked())
+        self.custom_btn.setEnabled(self.recap_cb.isChecked())
         self.custom_btn.clicked.connect(self._open_custom_dialog)
         top_rc.addWidget(self.custom_btn)
 
         self.recap_cb.toggled.connect(self._on_recap_toggled)
         rc_layout.addLayout(top_rc)
 
-        self.summary_lbl = QLabel(f"Thiết lập: {self.ad_settings.summary_text()}")
+        self.summary_lbl = QLabel(
+            f"Thiết lập: {self.ad_settings.summary_text()}"
+            if self.recap_cb.isChecked()
+            else "Thiết lập: Đang tắt"
+        )
         self.summary_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; margin-left: 26px;")
         rc_layout.addWidget(self.summary_lbl)
 
@@ -202,7 +204,7 @@ class ExportConfirmDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _on_recap_toggled(self, checked: bool):
-        self.custom_btn.setEnabled(checked and not self.is_already_recapped)
+        self.custom_btn.setEnabled(checked)
         if not checked:
             self.summary_lbl.setText("Thiết lập: Đang tắt")
         else:
@@ -215,5 +217,5 @@ class ExportConfirmDialog(QDialog):
             self.summary_lbl.setText(f"Thiết lập: {self.ad_settings.summary_text()}")
 
     def get_result(self) -> tuple[bool, AntiDuplicateSettings]:
-        wants_recap = bool(self.recap_cb.isChecked()) if not self.is_already_recapped else False
+        wants_recap = bool(self.recap_cb.isChecked())
         return wants_recap, self.ad_settings

@@ -703,18 +703,18 @@ class PreviewController:
             summary_lines.append(f"Audio Processing: {processing_label}")
         if mode_key in {"voice", "both"} and "Dubbed" in audio_mode:
             summary_lines.append(f"Voice: {self._export_voice_summary()}")
-        is_already_recapped = bool(
-            "_recap" in os.path.basename(video_path).lower()
-            or (hasattr(self.gui, "last_recap_video_path") and self.gui.last_recap_video_path and os.path.normcase(os.path.abspath(video_path)) == os.path.normcase(os.path.abspath(self.gui.last_recap_video_path)))
-        )
-        initial_recap = bool(
-            (hasattr(self.gui, "is_auto_recap_enabled") and self.gui.is_auto_recap_enabled())
-            or (hasattr(self.gui, "anti_duplicate_cb") and self.gui.anti_duplicate_cb.isChecked())
-        )
+        # Determine initial recap state: default to True per user request, unless explicitly disabled
+        if hasattr(self.gui, "anti_duplicate_cb"):
+            initial_recap = bool(self.gui.anti_duplicate_cb.isChecked())
+        elif hasattr(self.gui, "is_auto_recap_enabled"):
+            initial_recap = bool(self.gui.is_auto_recap_enabled())
+        else:
+            initial_recap = True
+
         recap_desc = (
-            "Đã áp dụng sẵn trong video nguồn"
-            if is_already_recapped
-            else ("Bật (1-Pass: Lật gương + Zoom YouTube + Dịch cao độ)" if initial_recap else "Tắt")
+            "Bật (1-Pass: Punch Zoom 5.5s + Lật gương + 4 Tone màu + BGM)"
+            if initial_recap
+            else "Tắt"
         )
 
         summary_lines.extend([
@@ -745,7 +745,7 @@ class PreviewController:
             from ui.dialogs.export_confirm_dialog import ExportConfirmDialog
             dialog = ExportConfirmDialog(
                 summary_lines,
-                is_already_recapped=is_already_recapped,
+                is_already_recapped=False,
                 initial_recap=initial_recap,
                 ad_settings=existing_ad_settings,
                 parent=self.gui,
@@ -770,14 +770,14 @@ class PreviewController:
             box.setText("Review export details before starting.")
             box.setInformativeText("\n".join(summary_lines))
             recap_cb = QCheckBox("✨ Bật Chống trùng lặp (Auto Recap 1-Pass)", box)
-            recap_cb.setChecked(initial_recap if not is_already_recapped else False)
-            recap_cb.setEnabled(not is_already_recapped)
+            recap_cb.setChecked(initial_recap)
+            recap_cb.setEnabled(True)
             box.setCheckBox(recap_cb)
             start_btn = box.addButton("Start Export", QMessageBox.AcceptRole)
             box.addButton("Cancel", QMessageBox.RejectRole)
             box.exec()
             confirmed = (box.clickedButton() is start_btn)
-            wants_recap = bool(recap_cb.isChecked()) if not is_already_recapped else False
+            wants_recap = bool(recap_cb.isChecked())
             return confirmed, wants_recap, existing_ad_settings
 
     def _resolve_export_video_path(self, *, prefer_recap: bool = True) -> str:
@@ -1479,11 +1479,7 @@ class PreviewController:
         project_state_path = self.gui.project_service.project_file(self.gui.current_project_state.project_root) if self.gui.current_project_state else ""
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         
-        is_already_recapped = bool(
-            "_recap" in os.path.basename(video_path).lower()
-            or (recap_path and os.path.isfile(recap_path) and os.path.normcase(os.path.abspath(video_path)) == os.path.normcase(os.path.abspath(recap_path)))
-        )
-        anti_dup = bool(wants_recap and not is_already_recapped)
+        anti_dup = bool(wants_recap)
 
         raw_timeline_clips = (
             self.gui.get_timeline_video_clips(existing_only=True)
@@ -1492,7 +1488,7 @@ class PreviewController:
         timeline_clips = self._normalize_export_timeline_clips(
             raw_timeline_clips,
             base_video_path=video_path,
-            is_recap_active=(is_already_recapped or wants_recap),
+            is_recap_active=wants_recap,
         )
 
         self.gui.export_thread = FinalExportWorker(

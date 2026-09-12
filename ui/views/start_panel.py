@@ -454,7 +454,7 @@ def build_start_group(gui, left_layout):
     _ad_row = QHBoxLayout()
     _ad_row.setSpacing(6)
     gui.anti_duplicate_cb = QCheckBox("🛡️ Chế độ Chống trùng lặp")
-    gui.anti_duplicate_cb.setChecked(False)
+    gui.anti_duplicate_cb.setChecked(True)
     gui.anti_duplicate_cb.setToolTip(
         "Bật chế độ chống nhận diện video trùng lặp (Content ID):\n"
         "  - 4 phong cách làm mới (Letterbox 2.05:1, Ambient 92%, Ken Burns Pan, Vệt sáng)\n"
@@ -605,6 +605,7 @@ def build_start_group(gui, left_layout):
                 gui.log("[Chống trùng lặp] Đã tắt chế độ chống trùng lặp.")
 
     gui.anti_duplicate_cb.toggled.connect(_on_ad_toggled)
+    _on_ad_toggled(gui.anti_duplicate_cb.isChecked())
     # --- het Anti-Duplicate Mode ---
 
     output_layout.addWidget(output_quality_card)

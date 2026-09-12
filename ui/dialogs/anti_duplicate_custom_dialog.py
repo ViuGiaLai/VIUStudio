@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QPixmap
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -249,12 +251,35 @@ class AntiDuplicateCustomDialog(QDialog):
         fb_layout.addWidget(self.radio_flip_none)
         vg_layout.addWidget(flip_box)
 
-        self.zoom_cb = QCheckBox("🔍 Thu phóng vi mô (Zoom 105% & Punch Zoom chuẩn YouTube)")
+        self.zoom_box = QFrame()
+        self.zoom_box.setStyleSheet("background-color: #0f172a; border: 1px solid #334155; border-radius: 6px;")
+        zb_layout = QVBoxLayout(self.zoom_box)
+        zb_layout.setSpacing(5)
+        zb_layout.setContentsMargins(10, 8, 10, 8)
+
+        self.zoom_cb = QCheckBox("🔍 Thu phóng vi mô (Zoom 105% chuẩn điện ảnh)")
         self.zoom_cb.setChecked(getattr(self.settings, "add_zoom", True))
-        self.zoom_cb.setToolTip("Cắt nhẹ 5% và tạo nhịp punch zoom mỗi 45s để phá vỡ khung hình.")
-        vg_layout.addWidget(self.zoom_cb)
-        lbl_zoom = QLabel("Giúp phá vỡ Visual Hash mà mắt thường không nhận ra viền bị cắt.", objectName="hintLabel")
-        vg_layout.addWidget(lbl_zoom)
+        zb_layout.addWidget(self.zoom_cb)
+
+        self.punch_zoom_cb = QCheckBox("⚡ Punch Zoom nhịp điệu 5.5s (Đổi góc cận/toàn · Bẻ chuỗi 7s quét YouTube)")
+        self.punch_zoom_cb.setChecked(getattr(self.settings, "add_punch_zoom", True))
+        self.punch_zoom_cb.setToolTip(
+            "Cứ mỗi 5.5s tự động đổi giữa góc toàn cảnh (105%) và cận cảnh (110% lệch tâm):\n"
+            "• Bẻ gãy chuỗi nhận diện liên tục 7s của YouTube Content ID\n"
+            "• Bảo toàn 100.00% thời lượng video (0.000s drift) -> Giữ phụ đề & giọng đọc TTS khớp chuẩn 100%\n"
+            "• Tốc độ xuất video siêu nhanh với flags=fast_bilinear."
+        )
+        zb_layout.addWidget(self.punch_zoom_cb)
+        lbl_zoom = QLabel("Đổi góc máy nhịp điệu 5.5s giả lập 2 camera Studio, bẻ gãy Content ID mà không lệch phụ đề.", objectName="hintLabel")
+        zb_layout.addWidget(lbl_zoom)
+
+        def _update_zoom_ui(checked):
+            self.punch_zoom_cb.setEnabled(checked)
+
+        self.zoom_cb.toggled.connect(_update_zoom_ui)
+        _update_zoom_ui(self.zoom_cb.isChecked())
+
+        vg_layout.addWidget(self.zoom_box)
 
         # 1.2 Chế độ màu sắc (Đề xuất 1: Xoay vòng 4 Tone màu điện ảnh mỗi 4 phút)
         color_box = QFrame()
@@ -566,6 +591,128 @@ class AntiDuplicateCustomDialog(QDialog):
         )
         ag_layout.addWidget(lbl_mc)
 
+        # KT#14: Lồng nhạc nền đệm nhẹ (BGM Collision 10-15%)
+        bgm_box = QFrame()
+        bgm_box.setStyleSheet("background-color: #0b1322; border: 1px solid #1e2d44; border-radius: 6px;")
+        bgm_layout = QVBoxLayout(bgm_box)
+        bgm_layout.setSpacing(6)
+        bgm_layout.setContentsMargins(10, 8, 10, 8)
+
+        self.bgm_overlay_cb = QCheckBox("🎵 Lồng nhạc nền đệm nhẹ kháng bản quyền (BGM Collision 10-15%)")
+        self.bgm_overlay_cb.setChecked(getattr(self.settings, "add_bgm_overlay", True))
+        self.bgm_overlay_cb.setToolTip(
+            "Đòn bẩy kháng bản quyền YouTube mạnh nhất:\n"
+            "• Trộn thêm 1 track BGM nhẹ (10% - 15%) vào âm thanh gốc bằng FFmpeg native amix.\n"
+            "• Gây xung đột đa nguồn (Multi-track collision) khiến AI Content ID không thể tách khớp nhạc gốc.\n"
+            "• Tốc độ xuất SIÊU NHANH (không tốn thêm thời gian xuất)."
+        )
+        bgm_layout.addWidget(self.bgm_overlay_cb)
+
+        # Controls row
+        row_bgm_ctrl = QHBoxLayout()
+        row_bgm_ctrl.setSpacing(8)
+
+        lbl_bgm_vol = QLabel("Âm lượng BGM:")
+        lbl_bgm_vol.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        row_bgm_ctrl.addWidget(lbl_bgm_vol)
+
+        self.bgm_vol_combo = QComboBox()
+        self.bgm_vol_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0f172a;
+                color: #f8fafc;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+                min-width: 140px;
+            }
+            QComboBox:focus {
+                border-color: #38bdf8;
+            }
+            QComboBox:disabled {
+                background-color: #0b111c;
+                color: #475569;
+                border-color: #1e293b;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0f172a;
+                color: #f8fafc;
+                selection-background-color: #0284c7;
+            }
+        """)
+        self.bgm_vol_combo.addItem("🍃 Rất nhẹ (8%)", 0.08)
+        self.bgm_vol_combo.addItem("✨ Chuẩn khuyến nghị (12%)", 0.12)
+        self.bgm_vol_combo.addItem("🔊 Vừa phải (15%)", 0.15)
+        self.bgm_vol_combo.addItem("📢 Nổi bật (20%)", 0.20)
+
+        cur_vol = float(getattr(self.settings, "bgm_volume", 0.12) or 0.12)
+        if cur_vol <= 0.09:
+            self.bgm_vol_combo.setCurrentIndex(0)
+        elif cur_vol <= 0.13:
+            self.bgm_vol_combo.setCurrentIndex(1)
+        elif cur_vol <= 0.17:
+            self.bgm_vol_combo.setCurrentIndex(2)
+        else:
+            self.bgm_vol_combo.setCurrentIndex(3)
+
+        row_bgm_ctrl.addWidget(self.bgm_vol_combo)
+
+        self.btn_pick_bgm = QPushButton("📁 Chọn bài khác...")
+        self.btn_pick_bgm.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #38bdf8;
+                border: 1px solid #0284c7;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_pick_bgm.clicked.connect(self._pick_custom_bgm)
+        row_bgm_ctrl.addWidget(self.btn_pick_bgm)
+
+        self.btn_reset_bgm = QPushButton("🔄 Mặc định")
+        self.btn_reset_bgm.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #94a3b8;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #334155;
+                color: #f8fafc;
+            }
+        """)
+        self.btn_reset_bgm.clicked.connect(self._reset_bgm_path)
+        row_bgm_ctrl.addWidget(self.btn_reset_bgm)
+
+        row_bgm_ctrl.addStretch(1)
+        bgm_layout.addLayout(row_bgm_ctrl)
+
+        self.lbl_bgm_current = QLabel(self._format_bgm_label())
+        self.lbl_bgm_current.setStyleSheet("color: #64748b; font-size: 11px; margin-left: 4px;")
+        bgm_layout.addWidget(self.lbl_bgm_current)
+
+        def _update_bgm_ui(checked):
+            self.bgm_vol_combo.setEnabled(checked)
+            self.btn_pick_bgm.setEnabled(checked)
+            self.btn_reset_bgm.setEnabled(checked)
+            self.lbl_bgm_current.setEnabled(checked)
+
+        self.bgm_overlay_cb.toggled.connect(_update_bgm_ui)
+        _update_bgm_ui(self.bgm_overlay_cb.isChecked())
+
+        ag_layout.addWidget(bgm_box)
+
         c_layout.addWidget(audio_group)
 
         # ---------------- Section 3: Metadata ----------------
@@ -607,6 +754,27 @@ class AntiDuplicateCustomDialog(QDialog):
 
         root_layout.addLayout(btn_row)
 
+    def _format_bgm_label(self) -> str:
+        custom_p = getattr(self.settings, "bgm_file_path", "")
+        if custom_p and os.path.isfile(custom_p):
+            return f"🎵 Tệp: {os.path.basename(custom_p)}"
+        return "🎵 Nhạc mặc định: Nhạc nền Recap bản quyền tự do (AudioBay)"
+
+    def _pick_custom_bgm(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn tệp nhạc nền BGM",
+            "",
+            "Audio Files (*.mp3 *.wav *.aac *.m4a *.flac *.ogg)",
+        )
+        if file_path:
+            self.settings.bgm_file_path = file_path
+            self.lbl_bgm_current.setText(self._format_bgm_label())
+
+    def _reset_bgm_path(self):
+        self.settings.bgm_file_path = ""
+        self.lbl_bgm_current.setText(self._format_bgm_label())
+
     def _show_style_preview(self):
         """Hiển thị cửa sổ phóng to ảnh minh chứng 4 phong cách làm mới video."""
         dialog = StylePreviewDialog(self)
@@ -617,6 +785,7 @@ class AntiDuplicateCustomDialog(QDialog):
         self.radio_color_periodic.setChecked(True)
         self.radio_layout_letterbox.setChecked(True)
         self.zoom_cb.setChecked(True)
+        self.punch_zoom_cb.setChecked(True)
         self.vignette_cb.setChecked(True)
         self.grain_cb.setChecked(True)
         self.unsharp_cb.setChecked(True)
@@ -625,6 +794,12 @@ class AntiDuplicateCustomDialog(QDialog):
         self.eq_cb.setChecked(True)
         self.vol_cb.setChecked(True)
         self.music_camouflage_cb.setChecked(False)  # mặc định tắt
+        self.bgm_overlay_cb.setChecked(True)        # mặc định bật lồng BGM
+        idx_bgm = self.bgm_vol_combo.findData(0.12)
+        if idx_bgm >= 0:
+            self.bgm_vol_combo.setCurrentIndex(idx_bgm)
+        self.settings.bgm_file_path = ""
+        self.lbl_bgm_current.setText(self._format_bgm_label())
         self.meta_cb.setChecked(True)
         self.marquee_cb.setChecked(True)
         self.marquee_text_edit.setText("VIURECAP")
@@ -668,6 +843,7 @@ class AntiDuplicateCustomDialog(QDialog):
             self.settings.visual_layout_mode = "letterbox"
 
         self.settings.add_zoom = self.zoom_cb.isChecked()
+        self.settings.add_punch_zoom = self.punch_zoom_cb.isChecked()
         self.settings.geometric_mode = "both" if self.vignette_cb.isChecked() else "none"
         self.settings.add_grain_noise = self.grain_cb.isChecked()
         self.settings.add_unsharp = self.unsharp_cb.isChecked()
@@ -676,6 +852,9 @@ class AntiDuplicateCustomDialog(QDialog):
         self.settings.add_eq_audio = self.eq_cb.isChecked()
         self.settings.add_volume_level = self.vol_cb.isChecked()
         self.settings.add_music_camouflage = self.music_camouflage_cb.isChecked()
+        self.settings.add_bgm_overlay = self.bgm_overlay_cb.isChecked()
+        self.settings.bgm_volume = float(self.bgm_vol_combo.currentData() or 0.12)
+        # bgm_file_path is already set when user picks or resets
         self.settings.poison_metadata = self.meta_cb.isChecked()
 
         self.settings.marquee_enabled = self.marquee_cb.isChecked()
