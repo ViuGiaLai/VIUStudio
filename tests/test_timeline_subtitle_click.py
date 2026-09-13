@@ -58,8 +58,19 @@ class TimelineSubtitleClickTests(unittest.TestCase):
         timing_changed_spy = QSignalSpy(widget.segmentTimingChanged)
         layer_changed_spy = QSignalSpy(widget.layerTimingChanged)
 
-        # V1 and A1 occupy the first two rows; TS1 is the third row.
-        ts1_y = widget.RULER_HEIGHT + 80 + 80 + 40
+        # V1 and A1 occupy the first two rows; click the live centre of TS1
+        # so the test follows the editor's compact track density.
+        tracks = [
+            track for track in widget._timeline.tracks
+            if widget.is_track_shown_on_timeline(track)
+        ]
+        ts1_index = next(
+            index for index, track in enumerate(tracks)
+            if widget._is_subtitle_track(track)
+        )
+        preceding_height = sum(widget._track_display_height(track) for track in tracks[:ts1_index])
+        ts1_height = widget._track_display_height(tracks[ts1_index])
+        ts1_y = widget.RULER_HEIGHT + preceding_height + ts1_height // 2
         cue_x = widget.CONTENT_LEFT_PAD + int(3.0 * widget.pixels_per_second)
         QTest.mouseClick(
             widget.viewport(),

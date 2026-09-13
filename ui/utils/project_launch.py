@@ -49,6 +49,13 @@ def initialize_editor_from_selection(window, selection) -> None:
         window.load_project_context(state)
         _mark("timeline and subtitle state")
 
+    # Project restoration performs layout passes after the window is shown.
+    # Restore this project's saved divider after those passes; projects that
+    # have never been resized receive the normal 64/36 default.
+    reset_workspace_split = getattr(window, "_set_default_preview_timeline_sizes", None)
+    if callable(reset_workspace_split):
+        QTimer.singleShot(0, lambda: reset_workspace_split(True))
+
     clips = window.get_timeline_video_clips(existing_only=True) if hasattr(window, "get_timeline_video_clips") else []
     if not clips and selected_video and hasattr(window, "timeline"):
         duration = float(window.timeline._probe_video_duration(selected_video))

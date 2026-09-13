@@ -232,12 +232,12 @@ class WorkflowActionsMixin:
                 self.timeline_alt_transcribe_btn.setEnabled(selection_exists and not bool(getattr(self, "_alternate_range_transcription_worker", None)))
         if hasattr(self, "inspector_stack"):
             self.inspector_stack.setEnabled(not review_mode)
-        # Lock only the layout handle while playing.  The splitter's child
-        # widgets remain enabled so playback/seek controls still work.
+        # Layout remains user-resizable in every mode, including playback.
+        # Preview overlays now follow resize events and stay canvas-bound.
         splitter = getattr(self, "preview_timeline_splitter", None)
         if splitter is not None:
             try:
-                splitter.handle(1).setEnabled(not review_mode)
+                splitter.handle(1).setEnabled(True)
             except Exception:
                 pass
 

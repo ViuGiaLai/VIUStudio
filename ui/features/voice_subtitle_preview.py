@@ -666,7 +666,8 @@ class VoiceSubtitlePreviewMixin:
         self.transcript_text.setText(srt_text)
         self.last_original_srt_path = file_path
         self.processed_artifacts["srt_original"] = file_path
-        self._commit_subtitle_mutation()
+        self._commit_subtitle_mutation(selected_index=0)
+        self._focus_first_imported_subtitle()
         state = self.ensure_current_project()
         if state:
             state.set_setting("transcription_signature", "")
@@ -794,8 +795,9 @@ class VoiceSubtitlePreviewMixin:
         self.last_translated_srt_path = file_path
         self.processed_artifacts["srt_translated"] = file_path
         self._commit_subtitle_mutation(
-            selected_index=getattr(self, "_selected_segment_index", None),
+            selected_index=0,
         )
+        self._focus_first_imported_subtitle()
         # Rebuild speaker UI/colors after replacing the translated cues.  The
         # imported SRT itself cannot contain speaker metadata, so the merge
         # above is the source of truth for these project-only fields.
@@ -845,6 +847,40 @@ class VoiceSubtitlePreviewMixin:
     # -----------------------------
     # Subtitle source handling
     # -----------------------------
+    def _focus_first_imported_subtitle(self):
+        """Reveal a newly imported track and preview its first real cue.
+
+        Imported SRT files commonly begin a few seconds after 00:00. Keeping
+        the old playhead at zero makes a successful import look broken because
+        time-authoritative preview correctly hides every future cue. Selecting
+        and seeking to cue 1 gives immediate visual confirmation without ever
+        drawing subtitle text outside its authored time range.
+        """
+        segments = list(self.get_active_segments() or [])
+        if not segments:
+            return
+
+        if not bool(getattr(self, "_subtitle_track_preview_visible", True)):
+            if hasattr(self, "on_track_subtitle_toggled"):
+                self.on_track_subtitle_toggled("TS1", True)
+            else:
+                self._subtitle_track_preview_visible = True
+        elif hasattr(self, "video_view") and hasattr(self.video_view, "set_subtitle_track_visible"):
+            self.video_view.set_subtitle_track_visible(True)
+
+        # Reuse the normal timeline-selection path so the player, timeline,
+        # Inspector and live overlay all move to the exact same timestamp.
+        if hasattr(self, "on_timeline_segment_selected"):
+            self.on_timeline_segment_selected(0)
+            return
+
+        try:
+            start_ms = max(0, int(round(float(segments[0].get("start", 0.0) or 0.0) * 1000.0)))
+        except (AttributeError, TypeError, ValueError):
+            start_ms = 0
+        if hasattr(self, "set_position"):
+            self.set_position(start_ms)
+
     def get_active_segments(self):
         base = self.current_translated_segments or self.current_segments or []
         if base and bool(getattr(self, "subtitle_single_line_cb", None) and self.subtitle_single_line_cb.isChecked()):

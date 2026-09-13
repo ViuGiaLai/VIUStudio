@@ -255,13 +255,13 @@ class WindowUiMixin:
 
         # The fixed minimums are intentionally reduced only on short displays.
         # Timeline tracks remain available through their own scrollbars.
-        workspace_min = 350
-        timeline_min = 360
-        video_min = 270
+        workspace_min = 270
+        timeline_min = 190
+        video_min = 150
         if compact_height:
-            workspace_min, timeline_min, video_min = 260, 255, 190
+            workspace_min, timeline_min, video_min = 235, 165, 125
         if tight_height:
-            workspace_min, timeline_min, video_min = 220, 210, 170
+            workspace_min, timeline_min, video_min = 210, 145, 105
         self._responsive_workspace_minimum_height = workspace_min
         self._responsive_timeline_minimum_height = timeline_min
         workspace = getattr(self, "preview_workspace_widget", None)

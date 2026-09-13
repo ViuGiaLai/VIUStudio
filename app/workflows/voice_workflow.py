@@ -1493,7 +1493,21 @@ class VoiceWorkflow:
                         future.result()
                         if self._probe_wav_duration_seconds(job["staging_path"]) <= 0:
                             raise ValueError("Generated voice is empty.")
-                        os.replace(job["staging_path"], seg_wav)
+                        try:
+                            os.replace(job["staging_path"], seg_wav)
+                        except PermissionError:
+                            import shutil, time
+                            time.sleep(0.05)
+                            try:
+                                if os.path.exists(seg_wav):
+                                    os.remove(seg_wav)
+                                os.replace(job["staging_path"], seg_wav)
+                            except Exception:
+                                shutil.copyfile(job["staging_path"], seg_wav)
+                                try:
+                                    os.remove(job["staging_path"])
+                                except Exception:
+                                    pass
                     except Exception as exc:
                         try:
                             if os.path.exists(job["staging_path"]):

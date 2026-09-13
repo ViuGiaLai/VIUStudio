@@ -43,11 +43,13 @@ class EditorTimeline(QGraphicsView):
     # separate fixed widget, so this is content padding rather than header
     # width.
     CONTENT_LEFT_PAD = 8
-    TRACK_LABEL_H = 24
-    TRACK_MIN_H = 32
-    TRACK_DEFAULT_H = 56
-    REGION_TRACK_ROW_H = 60
-    CHILD_TRACK_H = 48
+    TRACK_LABEL_H = 22
+    TRACK_MIN_H = 28
+    TRACK_DEFAULT_H = 44
+    VIDEO_TRACK_H = 58
+    AUDIO_TRACK_H = 46
+    REGION_TRACK_ROW_H = 44
+    CHILD_TRACK_H = 38
     CHROME_H = 24
     HANDLE_W = 8
     MIN_DUR = 0.1
@@ -147,8 +149,8 @@ class EditorTimeline(QGraphicsView):
     def _init_default_tracks(self) -> None:
         self._timeline = Timeline(duration=self._duration)
         self._timeline.tracks = [
-            Track(name="V1 Video", type=LayerType.VIDEO, height=80),
-            Track(name="A1 Audio", type=LayerType.AUDIO, height=80),
+            Track(name="V1 Video", type=LayerType.VIDEO, height=self.VIDEO_TRACK_H),
+            Track(name="A1 Audio", type=LayerType.AUDIO, height=self.AUDIO_TRACK_H),
         ]
         for t in self._timeline.tracks:
             self._track_heights[t.id] = t.height
@@ -739,7 +741,16 @@ class EditorTimeline(QGraphicsView):
             visible_sorted = sorted(visible, key=lambda l: float(getattr(l, "start", 0.0)))
             _, num_rows = self._compute_overlap_rows(visible_sorted, track_id=track.id)
             return self.CHILD_TRACK_H * max(1, num_rows)
-        return base
+        if self._is_subtitle_track(track):
+            return self.CHILD_TRACK_H
+        track_type = getattr(track, "type", None)
+        if track_type == LayerType.VIDEO:
+            return self.VIDEO_TRACK_H
+        if track_type == LayerType.AUDIO:
+            return self.AUDIO_TRACK_H
+        # Old projects commonly persisted 80px rows. Display those projects
+        # with the new compact density without mutating their source data.
+        return max(self.TRACK_MIN_H, min(base, self.TRACK_DEFAULT_H))
 
     @staticmethod
     def _is_blur_track(track) -> bool:

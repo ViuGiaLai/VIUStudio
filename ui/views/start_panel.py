@@ -389,9 +389,15 @@ def build_start_group(gui, left_layout):
     gui.output_quality_combo.addItem("1440p (2K)", "1440p")
     gui.output_quality_combo.addItem("2160p (4K)", "2160p")
     output_quality_layout.addWidget(gui.output_quality_combo)
+    lbl_style = "color: #94a3b8; font-size: 11px; font-weight: 600;"
+
     output_preset_row = QVBoxLayout()
-    output_preset_row.addWidget(QLabel("Export preset"))
+    output_preset_row.setSpacing(4)
+    output_preset_lbl = QLabel("Export preset")
+    output_preset_lbl.setStyleSheet(lbl_style)
+    output_preset_row.addWidget(output_preset_lbl)
     gui.output_preset_combo = QComboBox()
+    gui.output_preset_combo.setMinimumHeight(32)
     gui.output_preset_combo.addItem("Fast (stream copy / ultrafast)", "fast")
     gui.output_preset_combo.addItem("Balanced (veryfast)", "balanced")
     gui.output_preset_combo.addItem("Maximum quality (medium)", "max")
@@ -401,9 +407,14 @@ def build_start_group(gui, left_layout):
     )
     output_preset_row.addWidget(gui.output_preset_combo)
     output_quality_layout.addLayout(output_preset_row)
+
     bitrate_row = QHBoxLayout()
-    bitrate_row.addWidget(QLabel("Video bitrate"))
+    bitrate_lbl = QLabel("Video bitrate")
+    bitrate_lbl.setStyleSheet(lbl_style)
+    bitrate_row.addWidget(bitrate_lbl)
+    bitrate_row.addStretch(1)
     gui.output_bitrate_spin = QSpinBox()
+    gui.output_bitrate_spin.setMinimumHeight(30)
     gui.output_bitrate_spin.setRange(500, 50000)
     gui.output_bitrate_spin.setSingleStep(500)
     gui.output_bitrate_spin.setValue(2000)
@@ -411,8 +422,12 @@ def build_start_group(gui, left_layout):
     gui.output_bitrate_spin.setToolTip("Target bitrate; 2000 kbps is a good Auto Recap starting point.")
     bitrate_row.addWidget(gui.output_bitrate_spin)
     output_quality_layout.addLayout(bitrate_row)
+
     output_fps_row = QVBoxLayout()
-    output_fps_row.addWidget(QLabel("Frame rate"))
+    output_fps_row.setSpacing(4)
+    output_fps_lbl = QLabel("Frame rate")
+    output_fps_lbl.setStyleSheet(lbl_style)
+    output_fps_row.addWidget(output_fps_lbl)
     gui.output_fps_combo = QComboBox()
     gui.output_fps_combo.setMinimumHeight(32)
     gui.output_fps_combo.addItem("Source (Recommended)", "source")
@@ -421,8 +436,12 @@ def build_start_group(gui, left_layout):
     gui.output_fps_combo.addItem("60 FPS", "60")
     output_fps_row.addWidget(gui.output_fps_combo)
     output_quality_layout.addLayout(output_fps_row)
+
     output_ratio_row = QVBoxLayout()
-    output_ratio_row.addWidget(QLabel("Ratio"))
+    output_ratio_row.setSpacing(4)
+    output_ratio_lbl = QLabel("Ratio")
+    output_ratio_lbl.setStyleSheet(lbl_style)
+    output_ratio_row.addWidget(output_ratio_lbl)
     gui.output_ratio_combo = QComboBox()
     gui.output_ratio_combo.setMinimumHeight(32)
     gui.output_ratio_combo.addItem("Source (Recommended)", "source")
@@ -433,8 +452,12 @@ def build_start_group(gui, left_layout):
     gui.output_ratio_combo.currentIndexChanged.connect(gui.on_output_ratio_changed)
     output_ratio_row.addWidget(gui.output_ratio_combo)
     output_quality_layout.addLayout(output_ratio_row)
+
     output_scale_row = QVBoxLayout()
-    output_scale_row.addWidget(QLabel("Canvas"))
+    output_scale_row.setSpacing(4)
+    output_scale_lbl = QLabel("Canvas")
+    output_scale_lbl.setStyleSheet(lbl_style)
+    output_scale_row.addWidget(output_scale_lbl)
     gui.output_scale_mode_combo = QComboBox()
     gui.output_scale_mode_combo.setMinimumHeight(32)
     gui.output_scale_mode_combo.addItem("Fit", "fit")
@@ -448,25 +471,33 @@ def build_start_group(gui, left_layout):
     output_scale_row.addWidget(gui.reset_framing_btn)
     output_quality_layout.addLayout(output_scale_row)
 
-    # --- Anti-Duplicate Mode (chong nhan dien Content ID) ---
-    _ad_sep = QFrame()
-    _ad_sep.setFrameShape(QFrame.HLine)
+    output_layout.addWidget(output_quality_card)
+
+    # --- Anti-Duplicate Mode Card ---
+    anti_dup_card, anti_dup_layout = _section_card()
+    anti_dup_title = QLabel("Anti-Duplicate (Chống trùng)")
+    anti_dup_title.setObjectName("sectionTitle")
+    anti_dup_layout.addWidget(anti_dup_title)
+
     _ad_row = QHBoxLayout()
     _ad_row.setSpacing(6)
-    gui.anti_duplicate_cb = QCheckBox("🛡️ Chế độ Chống trùng lặp")
+    _ad_row.setContentsMargins(0, 0, 0, 0)
+    gui.anti_duplicate_cb = QCheckBox("🛡️ Bật Chống trùng lặp")
     gui.anti_duplicate_cb.setChecked(True)
     gui.anti_duplicate_cb.setToolTip(
         "Bật chế độ chống nhận diện video trùng lặp (Content ID):\n"
         "  - 4 phong cách làm mới (Letterbox 2.05:1, Ambient 92%, Ken Burns Pan, Vệt sáng)\n"
+        "  - Watermark mờ động: Chữ thương hiệu bóng nảy 2D chạy ngẫu nhiên khắp video\n"
         "  - Xen kẽ 4p xuôi / 1p lật thông minh\n"
         "  - Xoay vòng 4 tone màu điện ảnh mỗi 4 phút\n"
-        "  - Zoom 105% & Punch Zoom, Grain noise, Unsharp, Pitch shift\n\n"
+        "  - Zoom 105% chuẩn điện ảnh (cố định tâm), Grain noise, Unsharp, Pitch shift\n\n"
         "Nên bật khi upload video recap/dịch lên YouTube / TikTok / Facebook."
     )
     _ad_row.addWidget(gui.anti_duplicate_cb)
     _ad_row.addStretch(1)
 
     gui.anti_duplicate_config_btn = QPushButton("⚙️ Tùy chỉnh...")
+    gui.anti_duplicate_config_btn.setFixedHeight(26)
     gui.anti_duplicate_config_btn.setToolTip("Mở bảng tùy chỉnh: Chọn 4 phong cách làm mới khung hình, chế độ lật gương, tone màu...")
     gui.anti_duplicate_config_btn.setStyleSheet("""
         QPushButton {
@@ -474,7 +505,7 @@ def build_start_group(gui, left_layout):
             color: #38bdf8;
             border: 1px solid #334155;
             border-radius: 5px;
-            padding: 3px 8px;
+            padding: 2px 8px;
             font-size: 11px;
             font-weight: 600;
         }
@@ -510,35 +541,41 @@ def build_start_group(gui, left_layout):
                     ps.set_setting("anti_duplicate_custom_settings", dlg.settings.to_dict())
                 elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
                     ps.settings["anti_duplicate_custom_settings"] = dlg.settings.to_dict()
+                if hasattr(ps, "set_setting"):
+                    ps.set_setting("anti_duplicate_enabled", True)
+                elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                    ps.settings["anti_duplicate_enabled"] = True
+                if hasattr(gui, "project_service") and gui.project_service:
+                    gui.project_service.save_project(ps)
 
     gui.anti_duplicate_config_btn.clicked.connect(_open_ad_custom)
     _ad_row.addWidget(gui.anti_duplicate_config_btn)
-    output_quality_layout.addLayout(_ad_row)
+    anti_dup_layout.addLayout(_ad_row)
 
-    gui.run_anti_duplicate_btn = QPushButton("⚡ Phân tích && Tạo video Chống trùng\n(Xem trước ngay)")
-    gui.run_anti_duplicate_btn.setMinimumHeight(44)
+    gui.run_anti_duplicate_btn = QPushButton("⚡ Phân tích && Tạo video (Xem trước ngay)")
+    gui.run_anti_duplicate_btn.setMinimumHeight(38)
     gui.run_anti_duplicate_btn.setToolTip(
         "Tự động phân tích cảnh (Scene Detection), áp dụng Zoom kháng hash (≥105%), chỉnh màu tự động per-shot, "
         "dịch cao độ audio (±2%) và tạo video xem trước ngay trên Preview Player & Timeline!"
     )
     gui.run_anti_duplicate_btn.setStyleSheet("""
         QPushButton {
-            background-color: #1e3a5f;
-            color: #93c5fd;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1d4ed8, stop:1 #2563eb);
+            color: #ffffff;
             border: 1px solid #3b82f6;
-            border-radius: 8px;
+            border-radius: 6px;
             font-size: 11px;
             font-weight: 700;
-            padding: 4px 8px;
+            padding: 6px 8px;
             text-align: center;
         }
         QPushButton:hover {
-            background-color: #2563eb;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #3b82f6);
             color: #ffffff;
             border-color: #60a5fa;
         }
         QPushButton:pressed {
-            background-color: #1d4ed8;
+            background-color: #1e40af;
         }
     """)
     def _on_run_anti_dup_clicked():
@@ -551,10 +588,10 @@ def build_start_group(gui, left_layout):
         elif hasattr(gui, "pipeline_controller") and hasattr(gui.pipeline_controller, "run_auto_recap_pipeline"):
             gui.pipeline_controller.run_auto_recap_pipeline()
     gui.run_anti_duplicate_btn.clicked.connect(_on_run_anti_dup_clicked)
-    output_quality_layout.addWidget(gui.run_anti_duplicate_btn)
+    anti_dup_layout.addWidget(gui.run_anti_duplicate_btn)
 
     gui.compare_anti_duplicate_btn = QPushButton("🔍 So sánh Video Gốc vs Đã xử lý")
-    gui.compare_anti_duplicate_btn.setMinimumHeight(34)
+    gui.compare_anti_duplicate_btn.setMinimumHeight(32)
     gui.compare_anti_duplicate_btn.setToolTip("Mở cửa sổ so sánh song song 2 video để trực tiếp kiểm tra hình ảnh và âm thanh thay đổi.")
     gui.compare_anti_duplicate_btn.setStyleSheet("""
         QPushButton {
@@ -574,7 +611,7 @@ def build_start_group(gui, left_layout):
     """)
     if hasattr(gui, "open_video_compare_dialog"):
         gui.compare_anti_duplicate_btn.clicked.connect(gui.open_video_compare_dialog)
-    output_quality_layout.addWidget(gui.compare_anti_duplicate_btn)
+    anti_dup_layout.addWidget(gui.compare_anti_duplicate_btn)
 
     gui.anti_duplicate_hint = QLabel(
         "Khi bật: Bấm nút bên trên để xử lý ngay (0% ➔ 100%), xem trước trên Preview và xem chi tiết hiệu ứng trên Timeline; hoặc áp dụng khi 'Export'.",
@@ -582,14 +619,15 @@ def build_start_group(gui, left_layout):
     )
     gui.anti_duplicate_hint.setObjectName("helperLabel")
     gui.anti_duplicate_hint.setWordWrap(True)
-    output_quality_layout.addWidget(gui.anti_duplicate_hint)
+    gui.anti_duplicate_hint.setStyleSheet("font-size: 11px; color: #64748b; line-height: 1.3;")
+    anti_dup_layout.addWidget(gui.anti_duplicate_hint)
 
     def _on_ad_toggled(checked: bool):
         if checked:
             gui.anti_duplicate_hint.setText(
-                "🛡️ ĐÃ BẬT: Bấm nút 'Phân tích && Tạo video' để xem trước ngay hoặc bấm 'Export' để xuất file cuối."
+                "🛡️ ĐÃ BẬT: Bấm nút 'Phân tích & Tạo video' để xem trước ngay hoặc bấm 'Export' để xuất file cuối."
             )
-            gui.anti_duplicate_hint.setStyleSheet("color: #4ade80; font-weight: 500;")
+            gui.anti_duplicate_hint.setStyleSheet("color: #4ade80; font-size: 11px; font-weight: 500;")
             if hasattr(gui, "auto_recap_config") and gui.auto_recap_config:
                 gui.auto_recap_config.anti_duplicate = True
             if hasattr(gui, "log"):
@@ -598,17 +636,29 @@ def build_start_group(gui, left_layout):
             gui.anti_duplicate_hint.setText(
                 "Khi bật: Bấm nút bên trên để xử lý ngay (0% ➔ 100%), xem trước trên Preview và xem chi tiết hiệu ứng trên Timeline; hoặc áp dụng khi 'Export'."
             )
-            gui.anti_duplicate_hint.setStyleSheet("")
+            gui.anti_duplicate_hint.setStyleSheet("font-size: 11px; color: #64748b;")
             if hasattr(gui, "auto_recap_config") and gui.auto_recap_config:
                 gui.auto_recap_config.anti_duplicate = False
             if hasattr(gui, "log"):
                 gui.log("[Chống trùng lặp] Đã tắt chế độ chống trùng lặp.")
 
+        # Keep the project setting in sync even when the user only toggles the
+        # checkbox and does not open the custom-settings dialog afterward.
+        ps = getattr(gui, "current_project_state", None)
+        if ps is not None:
+            if hasattr(ps, "set_setting"):
+                ps.set_setting("anti_duplicate_enabled", bool(checked))
+            elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                ps.settings["anti_duplicate_enabled"] = bool(checked)
+            schedule_persist = getattr(gui, "schedule_timeline_project_persist", None)
+            if callable(schedule_persist):
+                schedule_persist()
+
     gui.anti_duplicate_cb.toggled.connect(_on_ad_toggled)
     _on_ad_toggled(gui.anti_duplicate_cb.isChecked())
     # --- het Anti-Duplicate Mode ---
 
-    output_layout.addWidget(output_quality_card)
+    output_layout.addWidget(anti_dup_card)
 
 
     audio_cleanup_card, audio_cleanup_layout = _section_card()

@@ -188,16 +188,6 @@ def export_timeline_sequence(
         filters.append(f"{''.join(concat_inputs)}concat=n={len(valid)}:v=1:a=0[vcat]")
 
     current = "vcat"
-    if anti_duplicate_enabled:
-        from anti_duplicate import build_anti_duplicate_video_chain, AntiDuplicateSettings
-        ad_cfg = anti_duplicate_settings or AntiDuplicateSettings(
-            enabled=True, continuous_mode=True, allow_horizontal_flip=True,
-            target_width=width, target_height=height,
-        )
-        ad_chain = build_anti_duplicate_video_chain(ad_cfg, target_w=width, target_h=height)
-        if ad_chain:
-            filters.append(f"[{current}]{ad_chain}[vad]")
-            current = "vad"
 
     mapped_blur_regions = _map_normalized_overlays_to_canvas(
         blur_regions, first_w, first_h, width, height, scale_mode, focus_x, focus_y
@@ -225,6 +215,18 @@ def export_timeline_sequence(
     if lut_chain:
         filters.append(f"[{current}]{lut_chain}[vlut]")
         current = "vlut"
+
+    if anti_duplicate_enabled:
+        from anti_duplicate import build_anti_duplicate_video_chain, AntiDuplicateSettings
+        ad_cfg = anti_duplicate_settings or AntiDuplicateSettings(
+            enabled=True, continuous_mode=True, allow_horizontal_flip=True,
+            target_width=width, target_height=height,
+        )
+        ad_chain = build_anti_duplicate_video_chain(ad_cfg, target_w=width, target_h=height)
+        if ad_chain:
+            filters.append(f"[{current}]{ad_chain}[vad]")
+            current = "vad"
+
     if ass_path and os.path.isfile(ass_path) and mode in {"subtitle", "both"}:
         filters.append(f"[{current}]{_ass_filter_expression(ass_path)}[vsub]")
         current = "vsub"

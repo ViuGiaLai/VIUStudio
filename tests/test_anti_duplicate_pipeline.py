@@ -32,7 +32,7 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         # New KT#6-9 fields
         self.assertTrue(s.add_grain_noise)
         self.assertTrue(s.add_micro_speed)
-        self.assertEqual(s.crop_offset_px, 3)
+        self.assertEqual(s.crop_offset_px, 0)
         self.assertTrue(s.add_eq_audio)
         # New KT#10-11 fields
         self.assertTrue(s.add_unsharp)
@@ -40,6 +40,8 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         # 4-Tone Periodic Color Grading fields
         self.assertEqual(s.color_grading_mode, "periodic")
         self.assertEqual(s.color_cycle_seconds, 240)
+        # Punch Zoom mặc định tắt (camera đứng yên 100%)
+        self.assertFalse(s.add_punch_zoom)
 
     def test_video_chain_generation(self):
         s = AntiDuplicateSettings(enabled=True)
@@ -77,6 +79,62 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         self.assertIn("-map_metadata", cmd)
         self.assertIn("-af", cmd)
 
+    def test_audio_filter_applies_without_bgm(self):
+        s = AntiDuplicateSettings(enabled=True, continuous_mode=True)
+        cmd = [
+            "ffmpeg",
+            "-i", "input.mp4",
+            "-i", "logo.png",
+            "-filter_complex", "[0:v][1:v]overlay=0:0[final]",
+            "-map", "[final]",
+            "-map", "0:a?",
+            "-c:v", "h264_qsv",
+            "-c:a", "aac",
+            "out.mp4",
+        ]
+
+        apply_anti_duplicate_to_command(cmd, s, output_path="out.mp4")
+
+        self.assertEqual(cmd[-1], "out.mp4")
+        self.assertNotIn("-stream_loop", cmd)
+        self.assertIn("-af", cmd)
+        af_index = cmd.index("-af")
+        af = cmd[af_index + 1]
+        self.assertIn("aresample=44100", af)
+        self.assertIn("equalizer=f=1200", af)
+        self.assertIn("volume=0.97", af)
+        self.assertNotIn("amovie=", af)
+        self.assertNotIn("amix=", af)
+
+    def test_existing_audio_gain_is_merged_with_anti_duplicate(self):
+        s = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+        )
+        cmd = [
+            "ffmpeg",
+            "-i", "input.mp4",
+            "-filter_complex", "[0:v]null[final]",
+            "-map", "[final]",
+            "-map", "0:a?",
+            "-af", "volume=-3.0000dB",
+            "-c:v", "h264_qsv",
+            "-c:a", "aac",
+            "out.mp4",
+        ]
+
+        apply_anti_duplicate_to_command(
+            cmd,
+            s,
+            output_path="out.mp4",
+            has_existing_af=True,
+        )
+
+        self.assertIn("-af", cmd)
+        af = cmd[cmd.index("-af") + 1]
+        self.assertTrue(af.startswith("volume=-3.0000dB,aresample=44100"))
+        self.assertIn("equalizer=f=1200", af)
+
     def test_export_workflow_run_signature(self):
         import inspect
         sig = inspect.signature(ExportWorkflow.run)
@@ -91,15 +149,44 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         self.assertIn("scale=1920:1080", chain)
         self.assertIn("hue=h=", chain)
         self.assertIn("setsar=1", chain)
-        # KT#8: Crop offset 3px (x/y dich khoi trung tam)
-        self.assertIn("+3", chain)
+        # KT#8: Camera co dinh 100% chinh tam (iw-ow)/2, khong nhay lech sang nay sang kia
+        self.assertIn("x='(iw-ow)/2'", chain)
+        self.assertIn("y='(ih-oh)/2'", chain)
         # KT#6: Grain noise
         self.assertIn("noise=alls=8", chain)
         self.assertIn("allf=t+u", chain)
         # KT#10: Unsharp nhe
-        self.assertIn("unsharp=3:3:0.5:3:3:0", chain)
+        self.assertIn("cas=strength=0.15:planes=1", chain)
         # KT#7: Micro speed variation
         self.assertIn("setpts=0.9999*PTS", chain)
+
+    def test_continuous_zoom_avoids_redundant_geometric_rescale(self):
+        s = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_zoom=True,
+            geometric_mode="both",
+        )
+        chain = build_anti_duplicate_video_chain(s, target_w=1920, target_h=1080)
+
+        # Punch Zoom already crops and restores the 1920x1080 canvas. Keep the
+        # requested vignette, but do not add the old second 3.5% crop/scale.
+        self.assertIn("crop=w=", chain)
+        self.assertIn("vignette=angle=PI/8", chain)
+        self.assertNotIn("crop=iw*0.965", chain)
+
+        # If Zoom is disabled, the explicit geometric crop is still honored.
+        without_zoom = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            add_zoom=False,
+            geometric_mode="both",
+        )
+        chain_without_zoom = build_anti_duplicate_video_chain(
+            without_zoom, target_w=1920, target_h=1080
+        )
+        self.assertIn("crop=iw*0.965", chain_without_zoom)
+        self.assertIn("vignette=angle=PI/8", chain_without_zoom)
 
     def test_continuous_auto_recap_audio_filter(self):
         s = AntiDuplicateSettings(enabled=True, continuous_mode=True)
@@ -174,7 +261,7 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         # Nhung cac filter khac van hoat dong day du
         self.assertIn("crop=w=", chain)
         self.assertIn("noise=alls=8", chain)
-        self.assertIn("unsharp=3:3:0.5:3:3:0", chain)
+        self.assertIn("cas=strength=0.15:planes=1", chain)
 
     def test_custom_disable_zoom_and_pitch(self):
         # Khi user tat zoom va tat pitch shift
@@ -234,15 +321,12 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         self.assertNotIn("eq=", chain2)
 
     def test_visual_layout_modes(self):
-        # 1. Letterbox (Chuan dien anh 2.05:1 Univisium - Mo nhe chuyen tiep, BỎ HẾT ĐƯỜNG VIỀN)
+        # 1. Letterbox (Dải đen điện ảnh mỏng 5% trên và dưới)
         s_letterbox = AntiDuplicateSettings(enabled=True, continuous_mode=True, visual_layout_mode="letterbox")
         chain_lb = build_anti_duplicate_video_chain(s_letterbox, target_w=1920, target_h=1080)
-        # Bar height = 1080 * 0.0667 = 72px (chi 6.6% moi ben, mo nhe chuyen tiep 30% -> 18% -> 6%)
-        self.assertIn("color=black@0.30:t=fill", chain_lb)
-        self.assertIn("color=black@0.18:t=fill", chain_lb)
-        self.assertIn("color=black@0.06:t=fill", chain_lb)
-        # Bo hoan toan cac duong vien mau vang cam sac canh
-        self.assertNotIn("0xf59e0b", chain_lb)
+        # Bar height = round(1080 * 0.050) = 54px (dải đen 75% trên và dưới)
+        self.assertIn("drawbox=y=0:w=1920:h=54:color=black@0.75:t=fill", chain_lb)
+        self.assertIn("drawbox=y=1026:w=1920:h=54:color=black@0.75:t=fill", chain_lb)
 
         # 2. Ambient Frame (Bo goc 92% + vien Slate/Cyan)
         s_ambient = AntiDuplicateSettings(enabled=True, continuous_mode=True, visual_layout_mode="ambient_frame")
@@ -314,7 +398,23 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         self.assertIn("drawtext=", chain_ltr)
         self.assertIn("-text_w+mod(t*120", chain_ltr)
 
-        # 3. Marquee disabled
+        # 3. Bouncing 2D Watermark (Default)
+        s_bounce = AntiDuplicateSettings(
+            enabled=True,
+            continuous_mode=True,
+            marquee_enabled=True,
+            marquee_text="VIURECAP",
+            marquee_direction="bouncing",
+            marquee_speed=22,
+            marquee_opacity=0.40,
+        )
+        chain_bounce = build_anti_duplicate_video_chain(s_bounce, target_w=1920, target_h=1080)
+        self.assertIn("drawtext=", chain_bounce)
+        self.assertIn("white@0.40", chain_bounce)
+        self.assertIn("mod(t*22", chain_bounce)
+        self.assertNotIn("borderw=", chain_bounce)
+
+        # 4. Marquee disabled
         s_off = AntiDuplicateSettings(
             enabled=True,
             continuous_mode=True,
@@ -325,7 +425,9 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
 
     def test_marquee_serialization(self):
         s_default = AntiDuplicateSettings()
-        self.assertEqual(s_default.marquee_speed, 70)
+        self.assertEqual(s_default.marquee_speed, 22)
+        self.assertEqual(s_default.marquee_direction, "bouncing")
+        self.assertEqual(s_default.marquee_opacity, 0.40)
 
         s = AntiDuplicateSettings(
             enabled=True,
@@ -333,46 +435,21 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
             marquee_text="TEST MARQUEE",
             marquee_direction="left_to_right",
             marquee_speed=45,
+            marquee_opacity=0.45,
         )
         d = s.to_dict()
         self.assertTrue(d["marquee_enabled"])
         self.assertEqual(d["marquee_text"], "TEST MARQUEE")
         self.assertEqual(d["marquee_direction"], "left_to_right")
         self.assertEqual(d["marquee_speed"], 45)
+        self.assertEqual(d["marquee_opacity"], 0.45)
 
         restored = AntiDuplicateSettings.from_dict(d)
         self.assertTrue(restored.marquee_enabled)
         self.assertEqual(restored.marquee_text, "TEST MARQUEE")
         self.assertEqual(restored.marquee_direction, "left_to_right")
         self.assertEqual(restored.marquee_speed, 45)
-
-    def test_music_camouflage_filter(self):
-        """KT#13: Music Camouflage (aecho + afreqshift) khi add_music_camouflage=True."""
-        # Khi bật: audio filter phải chứa aecho và afreqshift
-        s = AntiDuplicateSettings(
-            enabled=True,
-            continuous_mode=True,
-            add_music_camouflage=True,
-        )
-        af = build_anti_duplicate_audio_filter(s)
-        self.assertIn("aecho", af, "Music camouflage: aecho filter phải có mặt khi bật")
-        self.assertIn("afreqshift", af, "Music camouflage: afreqshift filter phải có mặt khi bật")
-
-        # Khi tắt (mặc định): không có aecho/afreqshift
-        s_off = AntiDuplicateSettings(
-            enabled=True,
-            continuous_mode=True,
-            add_music_camouflage=False,
-        )
-        af_off = build_anti_duplicate_audio_filter(s_off)
-        self.assertNotIn("aecho", af_off, "Khi tắt music camouflage không được có aecho")
-        self.assertNotIn("afreqshift", af_off, "Khi tắt music camouflage không được có afreqshift")
-
-        # Serialization
-        d = s.to_dict()
-        self.assertTrue(d["add_music_camouflage"])
-        restored = AntiDuplicateSettings.from_dict(d)
-        self.assertTrue(restored.add_music_camouflage)
+        self.assertEqual(restored.marquee_opacity, 0.45)
 
     def test_summary_text_shows_marquee_text(self):
         """summary_text() phải hiển thị marquee_text để user kiểm tra trước khi xuất."""
@@ -384,7 +461,7 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         )
         summary = s.summary_text()
         self.assertIn("MY BRAND", summary, "summary_text() phải hiển thị marquee_text")
-        self.assertIn("Chữ:", summary)
+        self.assertIn("Chữ", summary)
 
         # Khi marquee tắt: không hiển thị text
         s2 = AntiDuplicateSettings(
@@ -396,55 +473,9 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         summary2 = s2.summary_text()
         self.assertNotIn("HIDDEN TEXT", summary2, "Khi marquee tắt không hiển thị marquee text trong summary")
 
-    def test_bgm_overlay_filter(self):
-        """KT#14: BGM Overlay (amovie + amix) khi add_bgm_overlay=True."""
-        s = AntiDuplicateSettings(
-            enabled=True,
-            continuous_mode=True,
-            add_bgm_overlay=True,
-            bgm_volume=0.12,
-        )
-        af = build_anti_duplicate_audio_filter(s)
-        self.assertIn("amovie=", af, "BGM filter: amovie phải có mặt khi bật BGM overlay")
-        self.assertIn("volume=0.12", af, "BGM filter: volume=0.12 phải được set đúng")
-        self.assertIn("amix=inputs=2", af, "BGM filter: amix 2 inputs phải có mặt")
-        self.assertIn("normalize=0", af, "BGM filter: normalize=0 phải được set để giữ 100% tiếng gốc")
-        self.assertIn("duration=first", af, "BGM filter: duration=first để giữ đúng thời lượng video")
-
-        # Khi tắt BGM overlay
-        s_off = AntiDuplicateSettings(
-            enabled=True,
-            continuous_mode=True,
-            add_bgm_overlay=False,
-        )
-        af_off = build_anti_duplicate_audio_filter(s_off)
-        self.assertNotIn("amovie=", af_off, "Khi tắt BGM overlay không được có amovie")
-        self.assertNotIn("amix=", af_off, "Khi tắt BGM overlay không được có amix")
-
-    def test_bgm_serialization_and_summary(self):
-        """Kiểm tra lưu/phục hồi BGM settings và hiển thị tóm tắt."""
-        s = AntiDuplicateSettings(
-            enabled=True,
-            continuous_mode=True,
-            add_bgm_overlay=True,
-            bgm_volume=0.15,
-            bgm_file_path=r"D:\my_bgm.mp3",
-        )
-        d = s.to_dict()
-        self.assertTrue(d["add_bgm_overlay"])
-        self.assertEqual(d["bgm_volume"], 0.15)
-        self.assertEqual(d["bgm_file_path"], r"D:\my_bgm.mp3")
-
-        restored = AntiDuplicateSettings.from_dict(d)
-        self.assertTrue(restored.add_bgm_overlay)
-        self.assertEqual(restored.bgm_volume, 0.15)
-        self.assertEqual(restored.bgm_file_path, r"D:\my_bgm.mp3")
-
-        summary = s.summary_text()
-        self.assertIn("BGM lót (15%)", summary)
 
     def test_punch_zoom_rhythmic_cycle(self):
-        """KT#15: Punch Zoom nhịp điệu 5.5s bẻ gãy mốc quét 7s của YouTube."""
+        """KT#15: Khi add_punch_zoom=True sinh chu kỳ 11s, mặc định add_punch_zoom=False sinh crop tĩnh đứng yên."""
         s = AntiDuplicateSettings(
             enabled=True,
             continuous_mode=True,
@@ -452,21 +483,22 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
             punch_zoom_interval_seconds=5.5,
         )
         vc = build_anti_duplicate_video_chain(s, target_w=1920, target_h=1080)
-        self.assertIn("mod(t,11.0)", vc, "Chu kỳ 11.0s (5.5s toàn <-> 5.5s cận) phải có trong crop filter")
-        self.assertIn("5.5,11.0", vc, "Ngưỡng chuyển đổi 5.5s phải có mặt trong crop filter")
+        self.assertIn("mod(t,11.0)", vc, "Chu kỳ 11.0s (5.5s toàn <-> 5.5s cận) phải có trong crop filter khi bật")
+        self.assertIn("5.5,11.0", vc, "Ngưỡng chuyển đổi 5.5s phải có mặt trong crop filter khi bật")
         self.assertIn("flags=fast_bilinear", vc, "Scale filter phải dùng flags=fast_bilinear để đảm bảo tốc độ xuất nhanh nhất")
 
-        # Khi tắt punch zoom: vẫn crop 5% tĩnh nhưng không có biểu thức mod(t,...)
-        s_off = AntiDuplicateSettings(
+        # Mặc định: camera đứng yên êm ru, crop 5% tĩnh cố định tâm, không có biểu thức mod(t,...)
+        s_default = AntiDuplicateSettings(
             enabled=True,
             continuous_mode=True,
-            add_punch_zoom=False,
         )
-        vc_off = build_anti_duplicate_video_chain(s_off, target_w=1920, target_h=1080)
-        self.assertNotIn("mod(t,11.0)", vc_off, "Khi tắt punch zoom không được có chu kỳ 11s")
+        self.assertFalse(s_default.add_punch_zoom)
+        vc_default = build_anti_duplicate_video_chain(s_default, target_w=1920, target_h=1080)
+        self.assertNotIn("mod(t,11.0)", vc_default, "Mặc định không được có chu kỳ nhảy 11s")
+        self.assertIn("trunc(iw*0.95/2)*2", vc_default, "Mặc định dùng crop tĩnh 95% chính giữa tâm")
 
     def test_punch_zoom_toggle_and_serialization(self):
-        """Kiểm tra lưu/phục hồi và hiển thị tóm tắt cho Punch Zoom."""
+        """Kiểm tra lưu/phục hồi add_punch_zoom và summary_text đồng bộ sạch sẽ."""
         s = AntiDuplicateSettings(
             enabled=True,
             continuous_mode=True,
@@ -481,16 +513,11 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         self.assertTrue(restored.add_punch_zoom)
         self.assertEqual(restored.punch_zoom_interval_seconds, 6.0)
 
-        summary = s.summary_text()
-        self.assertIn("Punch Zoom 5.5s", summary)
-
-        s_off = AntiDuplicateSettings(
-            enabled=True,
-            continuous_mode=True,
-            add_punch_zoom=False,
-        )
-        summary_off = s_off.summary_text()
-        self.assertIn("Tắt Punch Zoom", summary_off)
+        # Summary text mặc định không bị rác bởi Punch Zoom đã bỏ
+        s_default = AntiDuplicateSettings(enabled=True, continuous_mode=True)
+        summary = s_default.summary_text()
+        self.assertNotIn("Punch Zoom", summary, "Summary mặc định không chứa Punch Zoom")
+        self.assertNotIn("Tắt Punch Zoom", summary, "Summary mặc định không chứa thông báo Tắt Punch Zoom thừa")
 
     def test_export_confirm_dialog_default_checked_and_enabled(self):
         """Kiem tra hop thoai ExportConfirmDialog luon bat mac dinh va cho phep nguoi dung click/tuy chinh."""
@@ -513,8 +540,39 @@ class TestAntiDuplicatePipeline(unittest.TestCase):
         wants_recap2, _ = dlg2.get_result()
         self.assertTrue(wants_recap2)
 
+    def test_blur_chain_executed_before_anti_duplicate_chain(self):
+        """Kiem tra lop Blur/Mask luon duoc chay truoc AntiDuplicate (Zoom/Flip) de khong bi lech toa do."""
+        ad_cfg = AntiDuplicateSettings(enabled=True, continuous_mode=True, zoom_percent=5.0)
+        blur_dummy = "crop=100:100:0:0,boxblur=10:1[b];[0:v][b]overlay=0:0"
+        cmd = _build_logo_overlay_command(
+            ffmpeg="ffmpeg",
+            video_path="dummy.mp4",
+            ass_path="dummy.ass",
+            output_path="out.mp4",
+            logo_layers=[],
+            blur_region=None,
+            mask_regions=[],
+            video_w=1920,
+            video_h=1080,
+            scale_chain="",
+            blur_chain=blur_dummy,
+            mask_chain="",
+            output_fps=30.0,
+            video_filter_state=None,
+            anti_duplicate_settings=ad_cfg,
+        )
+        self.assertIn("-filter_complex", cmd)
+        fc_idx = cmd.index("-filter_complex")
+        filter_complex = cmd[fc_idx + 1]
+
+        # Blur phai xuat hien tren [0:v] truoc khi vao [ad_filtered]
+        self.assertIn(blur_dummy, filter_complex)
+        blur_pos = filter_complex.find("boxblur")
+        ad_pos = filter_complex.find("[ad_filtered]")
+        self.assertGreater(blur_pos, -1)
+        self.assertGreater(ad_pos, -1)
+        self.assertLess(blur_pos, ad_pos, "Blur phai duoc ap dung TRUOC Anti-Duplicate de khoa chat vao hardsub goc")
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

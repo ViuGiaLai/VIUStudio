@@ -264,6 +264,22 @@ def build_export_h264_encoder_args(
     return ["-c:v", "libx264", "-preset", cpu_preset, *quality_args, "-threads", "0", "-pix_fmt", "yuv420p"]
 
 
+def _hardware_decode_args(video_encoder_args: list[str]) -> list[str]:
+    """Use automatic hardware decode when the selected encoder is hardware-backed."""
+    hardware_encoders = {"h264_nvenc", "h264_qsv", "h264_amf"}
+    return ["-hwaccel", "auto"] if any(arg in hardware_encoders for arg in video_encoder_args) else []
+
+
+def _remove_auto_hwaccel(command: list[str]) -> None:
+    """Remove our decode hint before a conservative CPU retry."""
+    index = 0
+    while index < len(command) - 1:
+        if command[index:index + 2] == ["-hwaccel", "auto"]:
+            del command[index:index + 2]
+            continue
+        index += 1
+
+
 def _escape_path_for_filter(path):
     """Escape a file path for use inside an FFmpeg -vf filter value."""
     clean = path.replace("\\", "/")
@@ -966,6 +982,7 @@ def run_ffmpeg_with_progress(
     err_thread.start()
 
     last_percent = 0
+    last_speed = ""
 
     def _invoke_prog(pct, msg, cur=0.0, tot=0.0):
         if not callable(progress_callback):
@@ -1002,6 +1019,14 @@ def run_ffmpeg_with_progress(
             return False
 
     try:
+        codec_index = cmd.index("-c:v")
+        encoder_label = str(cmd[codec_index + 1])
+    except (ValueError, IndexError):
+        encoder_label = ""
+    if encoder_label:
+        _invoke_prog(0, f"Starting video encoder: {encoder_label}")
+
+    try:
         if proc.stdout is not None:
             for line in proc.stdout:
                 line_str = line.strip()
@@ -1027,6 +1052,9 @@ def run_ffmpeg_with_progress(
                     key, _, val = line_str.partition("=")
                     key = key.strip()
                     val = val.strip()
+                    if key == "speed":
+                        last_speed = val if val and val != "N/A" else ""
+                        continue
                     if key in ("out_time", "out_time_us", "out_time_ms"):
                         try:
                             sec = 0.0
@@ -1041,7 +1069,8 @@ def run_ffmpeg_with_progress(
                                 pct = max(1, min(99, int(sec * 100.0 / total_duration_seconds)))
                                 if pct > last_percent:
                                     last_percent = pct
-                                _invoke_prog(last_percent, f"Rendering video… {sec:.1f}s / {total_duration_seconds:.1f}s ({last_percent}%)", cur=sec, tot=total_duration_seconds)
+                                speed_suffix = f" · {last_speed}" if last_speed else ""
+                                _invoke_prog(last_percent, f"Rendering video… {sec:.1f}s / {total_duration_seconds:.1f}s ({last_percent}%){speed_suffix}", cur=sec, tot=total_duration_seconds)
                                 if _check_cancelled():
                                     try:
                                         proc.terminate()
@@ -2027,7 +2056,7 @@ def _append_text_image_filter_parts(filter_parts, current_label, text_image_laye
     return current_label
 
 
-def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, fast=False, export_preset="balanced", video_bitrate_kbps=0, progress_callback=None, cancellation_check=None, anti_duplicate_settings=None):
+def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blur_region=None, mask_regions=None, logo_layers=None, text_ass_path="", text_image_layers=None, target_width=None, target_height=None, output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, output_fps=None, video_filter_state=None, audio_gain_db=0.0, audio_input_path="", fast=False, export_preset="balanced", video_bitrate_kbps=0, progress_callback=None, cancellation_check=None, anti_duplicate_settings=None):
     """Burn subtitles into video using an already-prepared ASS file."""
     print(f"[FFmpeg] embed_ass_subtitles called with mask_regions={mask_regions}, logo_layers={logo_layers}")
     ffmpeg = _ffmpeg_path(ffmpeg_path)
@@ -2083,33 +2112,28 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             output_fps, video_filter_state, text_ass_path, text_image_layers,
             source_width=source_w, source_height=source_h,
             audio_gain_db=audio_gain_db,
+            audio_input_path=audio_input_path,
             export_preset=("fast" if fast else export_preset),
             video_bitrate_kbps=video_bitrate_kbps,
             anti_duplicate_settings=anti_duplicate_settings,
         )
     else:
         # Simple filter chain (no logos)
+        external_audio = str(audio_input_path or "").strip()
+        has_external_audio = bool(external_audio and os.path.isfile(external_audio))
+        audio_map_value = '1:a:0' if has_external_audio else '0:a?'
+        audio_input_label = '1:a' if has_external_audio else '0:a'
+        text_image_input_start = 2 if has_external_audio else 1
         filter_parts = []
         current_label = "[0:v]"
-
-        # Apply anti-duplicate video filter (Zoom 105%, Random Color Grade, Geometric Distortion, Auto Recap continuous)
-        if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
-            v_dur = get_video_duration(video_path) if video_path and os.path.exists(video_path) else None
-            ad_chain = _build_ad_video_chain(
-                anti_duplicate_settings,
-                target_w=canvas_w or source_w or 1920,
-                target_h=canvas_h or source_h or 1080,
-                total_duration=v_dur,
-            )
-            if ad_chain:
-                filter_parts.append(f"{current_label}{ad_chain}[ad_filtered]")
-                current_label = "[ad_filtered]"
 
         filter_video_chain = _build_video_color_chain(video_filter_state)
         if filter_video_chain:
             filter_parts.append(f"{current_label}{filter_video_chain}[filtered]")
             current_label = "[filtered]"
         
+        # Apply Blur then Mask directly on the source video so they stay locked
+        # to the hardsubs/watermarks and transform (zoom 105%, hflip) in lockstep.
         if blur_chain:
             filter_parts.append(f"{current_label}{blur_chain}[blurred]")
             current_label = "[blurred]"
@@ -2125,6 +2149,21 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         if lut_chain:
             filter_parts.append(f"{current_label}{lut_chain}[lut_filtered]")
             current_label = "[lut_filtered]"
+
+        # Apply anti-duplicate video filter (Zoom 105%, Random Color Grade, Geometric Distortion, Auto Recap continuous)
+        # AFTER Blur, Mask, and Color adjustments so that hardsubs covered by blur/mask stay locked
+        # and transform (zoom 105%, hflip) together with the underlying video instead of getting displaced.
+        if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
+            v_dur = get_video_duration(video_path) if video_path and os.path.exists(video_path) else None
+            ad_chain = _build_ad_video_chain(
+                anti_duplicate_settings,
+                target_w=canvas_w or source_w or 1920,
+                target_h=canvas_h or source_h or 1080,
+                total_duration=v_dur,
+            )
+            if ad_chain:
+                filter_parts.append(f"{current_label}{ad_chain}[ad_filtered]")
+                current_label = "[ad_filtered]"
         
         if scale_chain:
             filter_parts.append(f"{current_label}{scale_chain}[scaled]")
@@ -2138,7 +2177,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             filter_parts.append(f"[{current_label}]{_ass_filter_expression(text_ass_path)}[text_ass]")
             current_label = "text_ass"
         current_label = _append_text_image_filter_parts(
-            filter_parts, current_label, text_image_layers, 1
+            filter_parts, current_label, text_image_layers, text_image_input_start
         )
         filter_parts.append(f"[{current_label}]null[out]")
         filter_complex = ";".join(part for part in filter_parts if part)
@@ -2157,14 +2196,21 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             # application log.
             'verbose',
             '-y',
+            *_hardware_decode_args(video_encoder_args),
             '-i', video_path,
+        ]
+        if has_external_audio:
+            command += ['-i', external_audio]
+        command += [
             '-map', '[out]',
-            '-map', '0:a?',
+            '-map', audio_map_value,
             '-filter_complex', filter_complex,
             *video_encoder_args,
             '-c:a', 'aac', '-b:a', '192k',
-            '-movflags', '+faststart',
         ]
+        if has_external_audio:
+            command += ['-shortest']
+        command += ['-movflags', '+faststart']
         # FFmpeg needs a looping image stream so each static text bitmap can
         # remain available for its entire timed overlay interval.
         insert_at = command.index('-map')
@@ -2196,7 +2242,15 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
         if _AD_AVAILABLE and _ad_settings is not None and getattr(_ad_settings, "enabled", False):
             print(_ad_describe(_ad_settings))
             command += [output_path]
-            _apply_ad_to_cmd(command, _ad_settings, output_path=output_path, has_audio=True, has_existing_af=_has_af)
+            _apply_ad_to_cmd(
+                command,
+                _ad_settings,
+                output_path=output_path,
+                has_audio=True,
+                has_existing_af=_has_af,
+                audio_input_label=audio_input_label,
+                audio_map_value=audio_map_value,
+            )
         else:
             command += [output_path]
 
@@ -2236,6 +2290,7 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
                 video_bitrate_kbps,
                 allow_hardware=False,
             )
+            _remove_auto_hwaccel(command)
             video_arg_index = command.index('-c:v')
             audio_arg_index = command.index('-c:a', video_arg_index)
             command[video_arg_index:audio_arg_index] = fallback_args
@@ -2266,10 +2321,15 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
                                  scale_chain, blur_chain, mask_chain,
                                  output_fps, video_filter_state, text_ass_path="", text_image_layers=None,
                                  source_width=None, source_height=None, audio_gain_db=0.0,
+                                 audio_input_path="",
                                  export_preset="balanced", video_bitrate_kbps=0,
                                  anti_duplicate_settings=None):
     """Build FFmpeg command with logo overlay using filter_complex."""
     
+    video_encoder_args = build_export_h264_encoder_args(
+        ffmpeg, export_preset, video_bitrate_kbps
+    )
+
     # Start building the command with video input
     command = [
         ffmpeg,
@@ -2277,6 +2337,7 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         '-loglevel',
         'error',
         '-y',
+        *_hardware_decode_args(video_encoder_args),
         '-i', video_path,
     ]
     
@@ -2288,6 +2349,15 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     text_image_layers = _valid_text_image_layers(text_image_layers)
     for layer in text_image_layers:
         command += ['-loop', '1', '-framerate', '30', '-i', str(layer['path'])]
+    external_audio = str(audio_input_path or "").strip()
+    if external_audio and os.path.isfile(external_audio):
+        audio_input_index = sum(1 for arg in command if arg == '-i')
+        command += ['-i', external_audio]
+        audio_map_value = f'{audio_input_index}:a:0'
+        audio_input_label = f'{audio_input_index}:a'
+    else:
+        audio_map_value = '0:a?'
+        audio_input_label = '0:a'
     
     # Build filter_complex
     filter_parts = []
@@ -2297,26 +2367,14 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     # after scaling because they are authored in output-canvas coordinates.
     main_label = "0:v"
     
-    # Apply anti-duplicate video filter (Zoom 105%, Random Color Grade, Geometric Distortion, Auto Recap continuous)
-    if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
-        v_dur = get_video_duration(video_path) if video_path and os.path.exists(video_path) else None
-        ad_chain = _build_ad_video_chain(
-            anti_duplicate_settings,
-            target_w=video_w or source_width or 1920,
-            target_h=video_h or source_height or 1080,
-            total_duration=v_dur,
-        )
-        if ad_chain:
-            filter_parts.append(f"[{main_label}]{ad_chain}[ad_filtered]")
-            main_label = "ad_filtered"
-
-    # Apply video filter chain
+    # Apply video filter chain directly on source video
     filter_video_chain = _build_video_color_chain(video_filter_state)
     if filter_video_chain:
         filter_parts.append(f"[{main_label}]{filter_video_chain}[filtered]")
         main_label = "filtered"
     
-    # Apply Blur then Mask, matching the managed MPV graph.
+    # Apply Blur then Mask directly on the source video so they stay locked
+    # to the hardsubs/watermarks and transform (zoom 105%, hflip) in lockstep.
     if blur_chain:
         filter_parts.append(f"[{main_label}]{blur_chain}[blurred]")
         main_label = "blurred"
@@ -2334,6 +2392,21 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     if lut_chain:
         filter_parts.append(f"[{main_label}]{lut_chain}[lut_filtered]")
         main_label = "lut_filtered"
+
+    # Apply anti-duplicate video filter (Zoom 105%, Random Color Grade, Geometric Distortion, Auto Recap continuous)
+    # AFTER Blur, Mask, and Color adjustments so that hardsubs covered by blur/mask stay locked
+    # and transform (zoom 105%, hflip) together with the underlying video instead of getting displaced.
+    if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
+        v_dur = get_video_duration(video_path) if video_path and os.path.exists(video_path) else None
+        ad_chain = _build_ad_video_chain(
+            anti_duplicate_settings,
+            target_w=video_w or source_width or 1920,
+            target_h=video_h or source_height or 1080,
+            total_duration=v_dur,
+        )
+        if ad_chain:
+            filter_parts.append(f"[{main_label}]{ad_chain}[ad_filtered]")
+            main_label = "ad_filtered"
 
     if scale_chain:
         filter_parts.append(f"[{main_label}]{scale_chain}[scaled]")
@@ -2425,17 +2498,16 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     filter_complex = ";".join(filter_parts)
     
     # Complete the command
-    video_encoder_args = build_export_h264_encoder_args(
-        ffmpeg, export_preset, video_bitrate_kbps
-    )
     command += [
         '-filter_complex', filter_complex,
         '-map', '[final]',
-        '-map', '0:a?',
+        '-map', audio_map_value,
         *video_encoder_args,
         '-c:a', 'aac', '-b:a', '192k',
-        '-movflags', '+faststart',
     ]
+    if external_audio and os.path.isfile(external_audio):
+        command += ['-shortest']
+    command += ['-movflags', '+faststart']
     try:
         gain_db = float(audio_gain_db or 0.0)
         if gain_db <= -59.0:
@@ -2456,7 +2528,15 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
     if _AD_AVAILABLE and anti_duplicate_settings and getattr(anti_duplicate_settings, "enabled", False):
         command += [output_path]
         _has_af = "-af" in command
-        _apply_ad_to_cmd(command, anti_duplicate_settings, output_path=output_path, has_audio=True, has_existing_af=_has_af)
+        _apply_ad_to_cmd(
+            command,
+            anti_duplicate_settings,
+            output_path=output_path,
+            has_audio=True,
+            has_existing_af=_has_af,
+            audio_input_label=audio_input_label,
+            audio_map_value=audio_map_value,
+        )
     else:
         command += [output_path]
     return command
@@ -2518,15 +2598,16 @@ def embed_subtitles(video_path, srt_path, output_path,
                     logo_layers=None,
                     text_ass_path="",
                     text_image_layers=None,
-                     target_width=None,
-                     target_height=None,
-                     output_scale_mode="fit",
-                     output_fill_focus_x=0.5,
-                     output_fill_focus_y=0.5,
-                     output_fps=None,
-                     ffmpeg_path=None,
+                    target_width=None,
+                    target_height=None,
+                    output_scale_mode="fit",
+                    output_fill_focus_x=0.5,
+                    output_fill_focus_y=0.5,
+                    output_fps=None,
+                    ffmpeg_path=None,
                     video_filter_state=None,
                     audio_gain_db=0.0,
+                    audio_input_path="",
                     fast=False,
                     export_preset="balanced",
                     video_bitrate_kbps=0,
@@ -2598,6 +2679,7 @@ def embed_subtitles(video_path, srt_path, output_path,
         output_fps=output_fps,
         video_filter_state=video_filter_state,
         audio_gain_db=audio_gain_db,
+        audio_input_path=audio_input_path,
         fast=fast,
         export_preset=export_preset,
         video_bitrate_kbps=video_bitrate_kbps,

@@ -79,6 +79,7 @@ class BlurPreviewTests(unittest.TestCase):
 
         self.assertEqual(harness._deferred_effect_layer_id_for("blur"), "")
 
+
     def test_qt_fallback_renders_blur_without_mpv(self):
         view = VideoView()
         view.resize(640, 360)

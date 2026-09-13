@@ -1,9 +1,9 @@
-﻿import json
+import json
 import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path[:0] = [os.path.join(ROOT, "ui"), os.path.join(ROOT, "app"), ROOT]
@@ -16,6 +16,9 @@ from app.layers.text import TextLayer
 from app.layers.timeline import Timeline, Track
 from app.workflows.export_workflow import ExportWorkflow
 from core.state.project_state import ProjectState
+from app.anti_duplicate import AntiDuplicateSettings
+from PySide6.QtWidgets import QDialog
+from controllers.preview_controller import PreviewController
 
 
 class MockPreviewController:
@@ -31,6 +34,83 @@ class MockPreviewController:
 
 
 class TestAutoRecapExportFlow(unittest.TestCase):
+    def test_export_confirmation_keeps_disabled_settings_and_persists_them(self):
+        gui = MagicMock()
+        gui.get_output_quality_key.return_value = "source"
+        gui.get_output_fps_key.return_value = "source"
+        gui.get_output_scale_mode_key.return_value = "fit"
+        gui.get_output_fill_focus.return_value = (0.5, 0.5)
+        gui.get_target_language_code.return_value = "vi"
+        gui.get_output_ratio_key.return_value = "source"
+        gui.has_active_video_filters.return_value = False
+        gui.get_export_preset.return_value = "fast"
+        gui.get_output_bitrate_kbps.return_value = 2000
+        gui.audio_a1_volume_slider.value.return_value = 100
+        gui.audio_a2_volume_slider.value.return_value = 100
+        gui.anti_duplicate_cb.isChecked.return_value = True
+        gui.current_translated_segments = []
+        gui.last_translated_srt_path = ""
+        gui.media_player.duration.return_value = 1000
+
+        state = ProjectState(project_id="p1", project_root="C:/project", input_video="input.mp4")
+        gui.current_project_state = state
+        disabled = AntiDuplicateSettings(
+            enabled=True,
+            allow_horizontal_flip=False,
+            flip_mode="none",
+            add_zoom=False,
+            random_color_grade=False,
+            color_grading_mode="none",
+            visual_layout_mode="none",
+            geometric_mode="none",
+            add_grain_noise=False,
+            add_unsharp=False,
+            add_micro_speed=False,
+            add_pitch_shift=False,
+            add_eq_audio=False,
+            add_volume_level=False,
+            poison_metadata=False,
+            marquee_enabled=False,
+        )
+
+        class AcceptedDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def exec(self):
+                return QDialog.Accepted
+
+            def result(self):
+                return QDialog.Accepted
+
+            def get_result(self):
+                return True, disabled
+
+        controller = PreviewController(gui)
+        controller._probe_source_fps = MagicMock(return_value=30)
+        controller._video_has_audio_stream = MagicMock(return_value=True)
+        controller._resolve_export_resolution_label = MagicMock(return_value="1920x1080")
+        controller._active_export_layer_summary = MagicMock(return_value="None")
+
+        with patch(
+            "ui.dialogs.export_confirm_dialog.ExportConfirmDialog",
+            AcceptedDialog,
+        ):
+            confirmed, enabled, settings = controller._confirm_export_summary(
+                video_path="input.mp4",
+                output_path="output.mp4",
+                mode="original",
+                audio_path="",
+            )
+
+        self.assertTrue(confirmed)
+        self.assertTrue(enabled)
+        self.assertIs(settings, disabled)
+        persisted = state.get_setting("anti_duplicate_custom_settings")
+        self.assertFalse(persisted["add_zoom"])
+        self.assertFalse(persisted["add_pitch_shift"])
+        gui.project_service.save_project.assert_called_once_with(state)
+
     def test_normalize_clips_repoints_canonical_source_to_recap(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             orig_video = os.path.join(tmpdir, "original.mp4")

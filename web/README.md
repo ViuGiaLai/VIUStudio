@@ -74,3 +74,4 @@ Worker API runs locally at `http://127.0.0.1:8787`.
 npm run typecheck
 npm run build
 ```
+python.exe ui\gui.py

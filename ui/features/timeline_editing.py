@@ -53,7 +53,12 @@ class TimelineEditingMixin:
         if selected_index is not None:
             self.set_selected_segment_index(int(selected_index), sync_ui=True)
             if hasattr(self, "timeline"):
-                self.timeline.set_active_segment_index(int(selected_index))
+                # set_selected_segment_index() clamps stale values such as
+                # -1 after the first SRT import.  Use that effective value
+                # here too; otherwise the Inspector selects cue 1 while the
+                # timeline is immediately told that no subtitle is active.
+                effective_index = int(getattr(self, "_selected_segment_index", -1))
+                self.timeline.set_active_segment_index(effective_index)
 
         self._invalidate_dubbed_output_after_subtitle_edit(changed_indices=changed_indices)
 
@@ -2483,10 +2488,9 @@ class TimelineEditingMixin:
         splitter = getattr(self, "preview_timeline_splitter", None)
         if splitter is not None:
             try:
-                # Review Mode keeps the preview geometry stable so native
-                # overlays and MPV effects cannot be disturbed mid-playback.
-                # Disable only the handle; never disable the child widgets.
-                splitter.handle(1).setEnabled(not is_playing)
+                # Keep the CapCut-style workspace resize available during
+                # playback; every preview overlay resyncs on geometry change.
+                splitter.handle(1).setEnabled(True)
             except Exception:
                 pass
         # Sync the timeline's "playing" flag to the real player state.

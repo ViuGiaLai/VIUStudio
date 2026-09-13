@@ -271,6 +271,12 @@ class ProjectStateMixin:
             },
             "subtitle_style_controls": self._current_subtitle_style_controls_state(),
             "video_filter_state": self.get_video_filter_state() if hasattr(self, "get_video_filter_state") else {},
+            "anti_duplicate_enabled": bool(self.anti_duplicate_cb.isChecked()) if hasattr(self, "anti_duplicate_cb") else False,
+            "anti_duplicate_custom_settings": (
+                self._anti_duplicate_settings.to_dict()
+                if getattr(self, "_anti_duplicate_settings", None) is not None
+                else state.get_setting("anti_duplicate_custom_settings", None)
+            ),
         }
         for k, v in proj_settings.items():
             state.set_setting(k, v)
@@ -593,6 +599,16 @@ class ProjectStateMixin:
                 self.output_bitrate_spin.setValue(int(st.get("output_bitrate_kbps")))
             except (TypeError, ValueError):
                 pass
+
+        if hasattr(self, "anti_duplicate_cb") and "anti_duplicate_enabled" in st:
+            self.anti_duplicate_cb.setChecked(bool(st.get("anti_duplicate_enabled")))
+        saved_ad_settings = st.get("anti_duplicate_custom_settings")
+        if isinstance(saved_ad_settings, dict):
+            try:
+                from app.anti_duplicate import AntiDuplicateSettings
+                self._anti_duplicate_settings = AntiDuplicateSettings.from_dict(saved_ad_settings)
+            except Exception as exc:
+                self.log(f"[Project Open] Could not restore Anti-Duplicate settings: {exc}")
 
         saved_fps = st.get("output_fps")
         if saved_fps and hasattr(self, "output_fps_combo"):

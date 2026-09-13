@@ -466,6 +466,8 @@ class VideoView(QGraphicsView):
             return aspect_map[aspect_key]
         if self.video_source_width and self.video_source_height:
             return self.video_source_width / self.video_source_height
+        if self.subtitle_render_width and self.subtitle_render_height:
+            return self.subtitle_render_width / self.subtitle_render_height
         return None
 
     def get_preview_canvas_rect(self) -> QRectF:
@@ -587,9 +589,11 @@ class VideoView(QGraphicsView):
             else:
                 y_pos = rect.bottom() - item_h - (item.bottom_offset * scale_y)
 
-        x_pos = max(left_pad - item_w, min(x_pos, rect.right() + item_w)) # Allow slightly off-screen
-        y_min = rect.top() - item_h
-        y_max = rect.bottom()
+        # Keep the rendered subtitle inside the canvas. This mirrors the MPV
+        # backend and prevents the transport/timeline from covering low cues.
+        x_pos = max(rect.left(), min(x_pos, rect.right() - item_w))
+        y_min = rect.top()
+        y_max = rect.bottom() - item_h
         y_pos = max(y_min, min(y_pos, y_max))
         item.setPos(QPointF(x_pos, y_pos))
 

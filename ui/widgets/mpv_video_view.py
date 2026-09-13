@@ -1862,6 +1862,11 @@ class MpvVideoView(QWidget):
             return aspect_map[aspect_key]
         if self.video_source_width and self.video_source_height:
             return self.video_source_width / self.video_source_height
+        # Output/subtitle dimensions are available earlier than MPV metadata
+        # on some files. Use them so the first frame is never stretched and
+        # subtitle coordinates remain stable while the video is opening.
+        if self.subtitle_render_width and self.subtitle_render_height:
+            return self.subtitle_render_width / self.subtitle_render_height
         return None
 
     def get_preview_canvas_rect(self) -> QRectF:
@@ -1970,16 +1975,15 @@ class MpvVideoView(QWidget):
                 y_pos = rect.bottom() - item_h - (item.bottom_offset * scale_y)
 
         if item.custom_position_enabled:
-            # Match the drag anchor rule above: a subtitle may be positioned
-            # anywhere across the canvas, including flush to an edge.  The
-            # wide wrap widget is allowed to extend beyond the canvas so it
-            # does not artificially restrict the anchor to the centre.
+            # Never let the timeline/transport cover the subtitle. Previously
+            # a 100% Y position deliberately put half the overlay below the
+            # canvas, which made low captions disappear after a resize.
             x_pos = max(rect.left() - item_w / 2.0, min(x_pos, rect.right() - item_w / 2.0))
-            y_pos = max(rect.top() - item_h / 2.0, min(y_pos, rect.bottom() - item_h / 2.0))
+            y_pos = max(rect.top(), min(y_pos, rect.bottom() - item_h))
         else:
-            x_pos = max(left_pad - item_w, min(x_pos, rect.right() + item_w))
-            y_min = rect.top() - item_h
-            y_max = rect.bottom()
+            x_pos = max(rect.left(), min(x_pos, rect.right() - item_w))
+            y_min = rect.top()
+            y_max = rect.bottom() - item_h
             y_pos = max(y_min, min(y_pos, y_max))
 
         # The subtitle uses a top-level overlay so it stays above MPV's

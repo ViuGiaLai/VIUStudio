@@ -240,13 +240,15 @@ class TestStudioShellIntegration(unittest.TestCase):
             self.window.timeline._duration = timeline.duration
             self.window.current_segments = []
             self.window.current_translated_segments = []
+            self.window._subtitle_track_preview_visible = False
 
             with patch.object(self.window, "resolve_canonical_video_path", return_value=str(video_path)), \
                  patch("features.voice_subtitle_preview.QFileDialog.getOpenFileName", return_value=(str(srt_path), "Subtitle Files (*.srt)")), \
                  patch("features.voice_subtitle_preview.QMessageBox.information"), \
                  patch.object(self.window, "schedule_timeline_visual_refresh"), \
                  patch.object(self.window, "sync_live_subtitle_preview"), \
-                 patch.object(self.window, "schedule_live_subtitle_preview_refresh"):
+                 patch.object(self.window, "schedule_live_subtitle_preview_refresh"), \
+                 patch.object(self.window, "set_position") as seek_preview:
                 self.window.refresh_ui_state()
                 self.assertTrue(self.window.import_subtitle_action.isEnabled())
                 self.window.import_subtitle_action.trigger()
@@ -260,6 +262,9 @@ class TestStudioShellIntegration(unittest.TestCase):
             self.assertEqual(len(subtitle_tracks), 1)
             self.assertEqual(len(subtitle_tracks[0].layers), 2)
             self.assertEqual(subtitle_tracks[0].layers[0].text, "Xin chào")
+            self.assertEqual(self.window._selected_segment_index, 0)
+            self.assertTrue(self.window._subtitle_track_preview_visible)
+            seek_preview.assert_called_once_with(1000)
 
     def test_original_transcript_enables_translation_exchange_editor(self):
         self.window.current_segments = [

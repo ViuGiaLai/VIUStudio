@@ -215,6 +215,18 @@ def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str 
     if not str(language or "vi").strip().lower().startswith("vi"):
         return value
 
+    # Pre-clean: strip leading dots/symbols and replace ellipsis with natural pause
+    value = re.sub(r'(?<=\w)\s*[\.]{2,}\s*(?=\w)', ', ', value)
+    value = re.sub(r'(?<=\w)\s*…\s*(?=\w)', ', ', value)
+    value = re.sub(r'^[\s\.\,…\-\–\—\:\;\"\'\“\”\‘\’]+', '', value)
+    value = re.sub(r'[\.]{2,}$', '.', value)
+    value = re.sub(r'…$', '.', value)
+    value = re.sub(r'[\.]{2,}', ' ', value)
+    value = value.replace('…', ' ')
+    value = ' '.join(value.split()).strip()
+    if not any(c.isalnum() for c in value):
+        return ""
+
     global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
     if _VIETNAMESE_NORMALIZER is None:
         try:
@@ -281,13 +293,24 @@ def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str 
         except Exception:
             _VIETNAMESE_NORMALIZER = False
             _VIETNAMESE_NORMALIZER_DATA_DIR = ""
+
     if _VIETNAMESE_NORMALIZER is False:
-        return value
-    try:
-        normalized = _VIETNAMESE_NORMALIZER.normalize(value)
-        return " ".join(str(normalized or "").replace("\n", " ").split()).strip() or value
-    except Exception:
-        return value
+        out = value
+    else:
+        try:
+            normalized = _VIETNAMESE_NORMALIZER.normalize(value)
+            out = " ".join(str(normalized or "").replace("\n", " ").split()).strip() or value
+        except Exception:
+            out = value
+
+    # Post-clean: eliminate prefix dots or isolated dots that cause Piper/espeak-ng to speak 'chấm'
+    out = re.sub(r'^[\s\.\,…\-\–\—\:\;\"\'\“\”\‘\’]+', '', out)
+    out = re.sub(r'(?<=\s)\.(?=\s|$)', '', out)
+    out = re.sub(r'\.(?=[a-zA-Z\u00C0-\u1EF9])', ' ', out)
+    out = ' '.join(out.split()).strip()
+    if not any(c.isalnum() for c in out):
+        return ""
+    return out
 
 
 
@@ -320,6 +343,17 @@ def piper_tts_to_wav_16k_mono(
 
     # Normalize text
     normalized_text = normalize_text_for_tts(text, provider="piper", language=language)
+
+    if not any(c.isalnum() for c in (normalized_text or "")):
+        sample_rate = 16000
+        frame_count = max(1, int(round(0.05 * sample_rate)))
+        with wave.open(wav_path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(b"\x00\x00" * frame_count)
+        _validate_generated_wav(wav_path)
+        return wav_path
 
     # Load Piper voice
     voice = _get_cached_piper_voice(model_path=model_path, on_progress=on_progress)

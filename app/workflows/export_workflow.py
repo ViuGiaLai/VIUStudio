@@ -282,7 +282,12 @@ class ExportWorkflow:
     ) -> str:
         """Frame-accurate trim without the heavyweight timeline filter graph."""
         from runtime_paths import bin_path
-        from video_processor import build_export_h264_encoder_args, run_ffmpeg_with_progress
+        from video_processor import (
+            _hardware_decode_args,
+            _remove_auto_hwaccel,
+            build_export_h264_encoder_args,
+            run_ffmpeg_with_progress,
+        )
 
         source = os.path.abspath(str(clip.get("source", "") or ""))
         start = max(0.0, float(clip.get("source_start", 0.0) or 0.0))
@@ -298,6 +303,7 @@ class ExportWorkflow:
         )
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            *_hardware_decode_args(encoder_args),
             "-ss", f"{start:.6f}", "-i", source,
         ]
         if mode == "voice":
@@ -334,6 +340,7 @@ class ExportWorkflow:
             fallback_args = build_export_h264_encoder_args(
                 ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
             )
+            _remove_auto_hwaccel(command)
             video_arg_index = command.index("-c:v")
             audio_arg_index = command.index("-c:a", video_arg_index)
             command[video_arg_index:audio_arg_index] = fallback_args
@@ -372,6 +379,7 @@ class ExportWorkflow:
         text_ass_path="",
         text_image_layers=None,
         original_audio_gain_db=0.0,
+        audio_input_path="",
         export_preset="balanced",
         video_bitrate_kbps=0,
         progress_callback=None,
@@ -400,6 +408,7 @@ class ExportWorkflow:
                 output_fps=output_fps,
                 video_filter_state=video_filter_state,
                 audio_gain_db=original_audio_gain_db,
+                audio_input_path=audio_input_path,
                 export_preset=export_preset,
                 video_bitrate_kbps=video_bitrate_kbps,
                 progress_callback=progress_callback,
@@ -423,6 +432,7 @@ class ExportWorkflow:
                 output_fps=output_fps,
                 video_filter_state=video_filter_state,
                 audio_gain_db=original_audio_gain_db,
+                audio_input_path=audio_input_path,
                 export_preset=export_preset,
                 video_bitrate_kbps=video_bitrate_kbps,
                 progress_callback=progress_callback,
@@ -1205,9 +1215,25 @@ class ExportWorkflow:
             except Exception:
                 dubbed_ad_settings = anti_duplicate_settings
         def _make_ffmpeg_progress_cb(start_pct: int, end_pct: int, label: str):
-            def _cb(cur, tot, pct):
+            def _cb(*args):
+                if len(args) == 1 and hasattr(args[0], "percent"):
+                    event = args[0]
+                    pct = int(getattr(event, "percent", 0) or 0)
+                    detail = str(getattr(event, "message", "") or "")
+                elif len(args) >= 3:
+                    pct = int(args[2] or 0)
+                    detail = ""
+                else:
+                    return
                 scaled = int(start_pct + (pct / 100.0) * (end_pct - start_pct))
-                self._emit_progress(on_progress, scaled, f"{ad_prefix}{label} ({pct}%)", substage="ffmpeg_encode")
+                if detail.startswith("Starting video encoder:"):
+                    message = f"{ad_prefix}{detail}"
+                else:
+                    speed_suffix = detail.rsplit(" · ", 1)[-1] if " · " in detail else ""
+                    message = f"{ad_prefix}{label} ({pct}%)"
+                    if speed_suffix:
+                        message += f" · {speed_suffix}"
+                self._emit_progress(on_progress, scaled, message, substage="ffmpeg_encode")
             return _cb
 
         try:
@@ -1248,36 +1274,10 @@ class ExportWorkflow:
                     anti_duplicate_settings=anti_duplicate_settings,
                 )
             elif mode == "voice":
-                self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
-                # Voice-only exports normally skip the ASS pass. Keep that
-                # fast path when there is no Text layer, but burn text after
-                # muxing when the editor contains text overlays.
-                voice_output = output_path
-                has_overlays = bool(text_image_layers or logo_layers or mask_regions or blur_regions)
-                if has_overlays:
-                    tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
-                    voice_output = tmp_mux_path
-                self.engine_runtime.mux_audio_for_preview(
-                    video_path,
-                    audio_path,
-                    voice_output,
-                    # The subsequent Text/overlay pass owns scaling and the
-                    # color grade, so keep this intermediate audio mux a
-                    # stream-copy video pass.  Otherwise the filters would
-                    # be applied once here and once again below.
-                    target_width=None if voice_output != output_path else target_w,
-                    target_height=None if voice_output != output_path else target_h,
-                    output_scale_mode=output_scale_mode,
-                    focus_x=output_fill_focus_x,
-                    focus_y=output_fill_focus_y,
-                    output_fps=None if voice_output != output_path else target_fps,
-                    video_filter_state={} if voice_output != output_path else video_filter_state,
-                )
-                if cancellation_check and cancellation_check():
-                    raise InterruptedError("Export cancelled by user")
-                if voice_output != output_path:
+                if requires_video_render:
+                    self._emit_progress(on_progress, 25, "Rendering Vietnamese audio and visual effects...")
                     self._export_subtitle_video(
-                        video_path=voice_output,
+                        video_path=video_path,
                         srt_path=srt_path,
                         ass_path=visual_ass_path or ass_path,
                         output_path=output_path,
@@ -1293,6 +1293,7 @@ class ExportWorkflow:
                         logo_layers=logo_layers,
                         blur_regions=blur_regions,
                         text_image_layers=text_image_layers,
+                        audio_input_path=audio_path,
                         export_preset=export_preset,
                         video_bitrate_kbps=video_bitrate_kbps,
                         progress_callback=_make_ffmpeg_progress_cb(40, 95, "Rendering visual overlays"),
@@ -1301,25 +1302,22 @@ class ExportWorkflow:
                         # de khong bien dang pitch/EQ/volume cua giong doc.
                         anti_duplicate_settings=dubbed_ad_settings,
                     )
+                else:
+                    self._emit_progress(on_progress, 25, "Muxing Vietnamese audio into the video...")
+                    self.engine_runtime.mux_audio_for_preview(
+                        video_path,
+                        audio_path,
+                        output_path,
+                        output_scale_mode=output_scale_mode,
+                        focus_x=output_fill_focus_x,
+                        focus_y=output_fill_focus_y,
+                    )
             elif mode == "both":
-                tmp_mux_path = self._build_temp_mux_path(project_temp_dir)
-                self._emit_progress(on_progress, 18, "Muxing Vietnamese audio with the source video...")
-                # Keep this mux fast (no scaling). Scaling happens in the subtitle-burn step.
-                self.engine_runtime.mux_audio_for_preview(
-                    video_path,
-                    audio_path,
-                    tmp_mux_path,
-                    output_scale_mode=output_scale_mode,
-                    focus_x=output_fill_focus_x,
-                    focus_y=output_fill_focus_y,
-                    output_fps=target_fps,
-                )
-                if cancellation_check and cancellation_check():
-                    raise InterruptedError("Export cancelled by user")
+                self._emit_progress(on_progress, 20, "Preparing subtitles and Vietnamese audio...")
                 burn_both_label = f"{ad_prefix}Rendering final video with subtitles & audio..." if anti_duplicate_enabled else "Burning styled subtitles into the final video..."
-                self._emit_progress(on_progress, 40, burn_both_label)
+                self._emit_progress(on_progress, 25, burn_both_label)
                 self._export_subtitle_video(
-                    video_path=tmp_mux_path,
+                    video_path=video_path,
                     srt_path=srt_path,
                     ass_path=visual_ass_path or ass_path,
                     output_path=output_path,
@@ -1335,12 +1333,13 @@ class ExportWorkflow:
                     logo_layers=logo_layers,
                     blur_regions=blur_regions,
                     text_image_layers=text_image_layers,
+                    audio_input_path=audio_path,
                     export_preset=export_preset,
                     video_bitrate_kbps=video_bitrate_kbps,
-                    progress_callback=_make_ffmpeg_progress_cb(40, 95, "Burning styled subtitles into final video"),
+                    progress_callback=_make_ffmpeg_progress_cb(25, 95, "Burning styled subtitles into final video"),
                     cancellation_check=cancellation_check,
-                    # tmp_mux_path da chua TTS audio - dung dubbed_ad_settings (skip_audio_filter=True)
-                    # de khong bien dang pitch/EQ/volume cua giong doc TTS.
+                    # The external track is already the final A1/A2 mix. Keep
+                    # anti-duplicate voice processing disabled for this pass.
                     anti_duplicate_settings=dubbed_ad_settings,
                 )
             else:

@@ -31,8 +31,8 @@ class AntiDuplicateSettings:
     add_grain_noise: bool = True
     # KT#7: Micro speed variation 0.01% (pha nhip thoi gian / scene cut signature)
     add_micro_speed: bool = True
-    # KT#8: Crop offset (px) - dich khung cat khoi trung tam -> pha DCT block boundary
-    crop_offset_px: int = 3
+    # KT#8: Crop offset (px) - mac dinh 0px: co dinh 100% o chinh giua tam, khong nhay lech
+    crop_offset_px: int = 0
     # KT#9: Audio EQ nhe (pha Chromaprint / Shazam audio fingerprint)
     add_eq_audio: bool = True
     # KT#10: Unsharp nhe (pha perceptual hash pixel-level - cạnh sắc nét hon 1 chut)
@@ -46,34 +46,19 @@ class AntiDuplicateSettings:
     # "letterbox" (Chuan dien anh 2.05:1 - vien am 6.6%), "ambient_frame" (Bo goc 92%),
     # "ken_burns" (Lia may cham), "light_leak" (Vet sang quang hoc), "none" (16:9 goc)
     visual_layout_mode: str = "letterbox"
-    # Tuy chon bat/tat thu phong (Zoom 105% & Punch Zoom)
+    # Tuy chon bat/tat thu phong (Zoom 105% co dinh 100% chinh tam)
     add_zoom: bool = True
     # Tuy chon bat/tat dich cao do audio goc (+1.5% Pitch Shift)
     add_pitch_shift: bool = True
-    # KT#12: Chay chu thuong hieu tren dai vien mo (Marquee Running Banner)
+    # KT#12: Chay chu thuong hieu / Watermark mo dong (Bong nay 2D hoac Marquee)
     marquee_enabled: bool = True
     marquee_text: str = "VIURECAP"
-    marquee_direction: str = "right_to_left"  # "right_to_left" (Phai -> Trai) hoac "left_to_right" (Trai -> Phai)
-    marquee_speed: int = 70  # toc do pixel / giay (mac dinh 70px/s: em ai, cham rai, sang trong)
-    # KT#13: Nguy trang nhac nen (Music Camouflage) - pha nhan dien Content ID cho nhac nen
-    # Dung aecho (vi echo ~9ms) + afreqshift (+3Hz) - FFmpeg native, khong anh huong toc do xuat.
-    # Pham vi: thay doi timbre + delay profile nhac nen du de qua ACRCloud / YouTube Content ID
-    # nhung nguoi nghe hoan toan khong phan biet duoc (nguong 10ms, 3Hz la vi mo).
-    add_music_camouflage: bool = False  # mac dinh TAT vi chi can thiet khi video co nhac goc
-    # KT#14: Long nhac nen dem nhe khang quet (BGM Collision 10-15%) - Don chi mang voi Content ID
-    # Co che: Tron mot ban nhac khong ban quyen (BGM) voi am luong 10% - 15% vao audio goc bang FFmpeg amix.
-    # Khi 2 ban nhac chong len nhau, Content ID gap hien tuong multi-track collision
-    # va khong the trich xuat fingerprint khop voi co so du lieu ban quyen tren YouTube/TikTok.
-    # FFmpeg native: dung amovie + amix voi normalize=0, toc do xuat >100x realtime (0 giay cho them).
-    add_bgm_overlay: bool = True
-    bgm_volume: float = 0.12  # 12% am luong (nam dung trong khoang 10% - 15% toi uu)
-    bgm_file_path: str = ""   # De trong se tu dong lay assets/background_test.mp3 mac dinh
-    # KT#15: Punch Zoom nhip dieu (Rhythmic Simulated Camera Angles 5.5s)
-    # Co che: Cu moi 5.5s tu dong chuyen doi goc Toan canh (105%) <-> Can canh (110% lech tam).
-    # Be gay chuoi quet lien tuc 7s cua YouTube Content ID ma bao toan 100.00% thoi luong (0.000s drift).
-    # Giu nguyen phu de va giong doc TTS khop chuan tung mili-giay.
-    add_punch_zoom: bool = True
-    punch_zoom_interval_seconds: float = 5.5  # Chu ky moi goc may (mac dinh 5.5s < 7s moc quet YouTube)
+    marquee_direction: str = "bouncing"  # "bouncing" (Bóng nảy 2D ngẫu nhiên), "right_to_left", "left_to_right"
+    marquee_speed: int = 22  # toc do pixel / giay (mac dinh 22px/s: cuc cham, em ai)
+    marquee_opacity: float = 0.40  # do mo ban trong suot mau trang khong vien (mac dinh 40%)
+    # KT#15: Punch Zoom (Da loai bo khoi UI va mac dinh tat de dam bao khung hinh dung yen 100%)
+    add_punch_zoom: bool = False
+    punch_zoom_interval_seconds: float = 5.5  # Chu ky moi goc may (legacy)
 
     def to_dict(self) -> dict:
         return {
@@ -105,10 +90,7 @@ class AntiDuplicateSettings:
             "marquee_text": str(self.marquee_text),
             "marquee_direction": str(self.marquee_direction),
             "marquee_speed": int(self.marquee_speed),
-            "add_music_camouflage": bool(self.add_music_camouflage),
-            "add_bgm_overlay": bool(self.add_bgm_overlay),
-            "bgm_volume": float(self.bgm_volume),
-            "bgm_file_path": str(self.bgm_file_path),
+            "marquee_opacity": float(self.marquee_opacity),
             "add_punch_zoom": bool(self.add_punch_zoom),
             "punch_zoom_interval_seconds": float(self.punch_zoom_interval_seconds),
         }
@@ -167,48 +149,15 @@ class AntiDuplicateSettings:
             disabled.append("Volume")
         if not getattr(self, "poison_metadata", True):
             disabled.append("Metadata")
-        if not getattr(self, "add_bgm_overlay", True):
-            disabled.append("Tắt BGM")
-        if not getattr(self, "add_punch_zoom", True):
-            disabled.append("Tắt Punch Zoom")
         # Hiển thị text marquee hiện tại để user kiểm tra
         marquee_txt = getattr(self, "marquee_text", "VIURECAP") or "VIURECAP"
         marquee_on = getattr(self, "marquee_enabled", True)
-        marquee_info = f" · Chữ: \"{marquee_txt}\"" if marquee_on else ""
-        bgm_on = getattr(self, "add_bgm_overlay", True)
-        bgm_pct = int(round(float(getattr(self, "bgm_volume", 0.12) or 0.12) * 100))
-        bgm_info = f" · BGM lót ({bgm_pct}%)" if bgm_on else ""
-        punch_on = getattr(self, "add_punch_zoom", True)
-        punch_info = " · Punch Zoom 5.5s" if punch_on else ""
+        marquee_dir = getattr(self, "marquee_direction", "bouncing")
+        dir_lbl = "Bóng nảy 2D" if marquee_dir == "bouncing" else ("L ➔ R" if marquee_dir == "left_to_right" else "R ➔ L")
+        marquee_info = f" · Chữ ({dir_lbl}): \"{marquee_txt}\"" if marquee_on else ""
         if not disabled:
-            return f"Xen kẽ 80% xuôi/20% lật · 4 tone màu{punch_info}{bgm_info}{marquee_info} (Tối ưu)"
-        return f"Tùy chỉnh ({', '.join(disabled[:3])}{'...' if len(disabled) > 3 else ''}){punch_info}{bgm_info}{marquee_info}"
-
-
-def get_default_bgm_path() -> str:
-    """Tim duong dan den tep nhac nen BGM ban quyen tu do mac dinh trong assets."""
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(os.path.dirname(app_dir), "assets", "background_test.mp3"),
-        os.path.join(app_dir, "..", "assets", "background_test.mp3"),
-        os.path.join(os.path.dirname(app_dir), "assets", "bgm.mp3"),
-    ]
-    for c in candidates:
-        norm = os.path.normpath(c)
-        if os.path.isfile(norm):
-            return norm
-    # Fallback to local relative assets
-    rel = os.path.abspath(os.path.join("assets", "background_test.mp3"))
-    if os.path.isfile(rel):
-        return rel
-    return ""
-
-
-def resolve_bgm_path(custom_path: str = "") -> str:
-    """Tra ve duong dan tep BGM thuc te, uu tien custom_path neu hop le."""
-    if custom_path and os.path.isfile(custom_path):
-        return os.path.abspath(custom_path)
-    return get_default_bgm_path()
+            return f"Xen kẽ 80% xuôi/20% lật · 4 tone màu{marquee_info} (Tối ưu)"
+        return f"Tùy chỉnh ({', '.join(disabled[:3])}{'...' if len(disabled) > 3 else ''}){marquee_info}"
 
 
 def escape_ffmpeg_filter_path(path: str) -> str:
@@ -233,54 +182,93 @@ def get_system_font_for_ffmpeg() -> str:
 
 def build_marquee_text_filter(
     text: str = "VIURECAP",
-    direction: str = "right_to_left",
-    speed: int = 150,
+    direction: str = "bouncing",
+    speed: int = 22,
     target_w: int = 1920,
     target_h: int = 1080,
+    opacity: float = 0.40,
 ) -> str:
-    """Tao bo loc drawtext de chay chu thuong hieu o dai vien tren (vung duong vien top).
+    """Tao bo loc drawtext chay chu thuong hieu / watermark mo ao.
     
-    direction: 'right_to_left' (Phai sang Trai) hoac 'left_to_right' (Trai sang Phai).
-    speed: toc do cuon pixel moi giay (mac dinh 150px/s).
+    direction:
+      - 'bouncing' (Mac dinh): Bong nay 2D cuc cham rai, ngau nhien khap man hinh video
+        (Dung ty le vang phi ~ 0.618 de quy dao phu kin toan bo video, khong bao gio lap lai).
+      - 'right_to_left': Chay ngang dai vien tren tu Phai sang Trai.
+      - 'left_to_right': Chay ngang dai vien tren tu Trai sang Phai.
+    speed: toc do pixel / giay (mac dinh 22px/s cho bouncing: cuc cham, em ai).
+    opacity: do mo ban trong suot mau trang khong vien (mac dinh 0.40: trang sang, khong vien den).
     """
     tw = int(target_w or 1920)
     th = int(target_h or 1080)
-    bar_h = max(24, int(th * 0.0667))
-    font_size = max(16, min(28, int(bar_h * 0.36)))
-    y_pos = max(8, int((bar_h - font_size) / 2))
     
     clean_text = (text or "VIURECAP").strip()
     if not clean_text:
         clean_text = "VIURECAP"
-    escaped_text = clean_text.replace("'", "'\\''").replace(":", "\\:")
+    escaped_text = clean_text.replace("'", "'\\''").replace(":", "\\:").replace("%", "\\%")
     
     font_arg = ""
     font_file = get_system_font_for_ffmpeg()
     if font_file:
         font_arg = f"fontfile='{font_file}':"
     
-    spd = max(30, min(600, int(speed or 70)))
-    dir_mode = str(direction or "right_to_left").strip().lower()
+    dir_mode = str(direction or "bouncing").strip().lower()
+    op = max(0.15, min(0.95, float(opacity or 0.40)))
     
-    if dir_mode == "left_to_right":
-        x_expr = f"-text_w+mod(t*{spd}\\,w+text_w)"
-    else:
-        # right_to_left
-        x_expr = f"w-mod(t*{spd}\\,w+text_w)"
+    if dir_mode == "bouncing" or "bounce" in dir_mode or "ball" in dir_mode:
+        # Font size ti le voi chieu cao video (chuan 1080p -> 30px, 720p -> 20px, 4K -> 60px)
+        font_size = max(18, min(48, int(th * 0.028)))
         
-    return (
-        f"drawtext={font_arg}text='{escaped_text}':fontsize={font_size}:"
-        f"fontcolor=white@0.88:shadowcolor=black@0.65:shadowx=1:shadowy=1:"
-        f"y={y_pos}:x='{x_expr}'"
-    )
+        # Toc do cuc cham (mac dinh 22px/s)
+        spd_x = max(8, min(200, int(speed or 22)))
+        # Dung ty le vang phi ~ 0.618 de quy dao nay 2D khong bi trung lap chu ky
+        spd_y = max(5, int(round(spd_x * 0.618)))
+        
+        # Le an toan (tranh sat mep va tranh de len vung phu de duoi day)
+        pad_x = max(20, int(tw * 0.025))
+        pad_y_top = max(25, int(th * 0.035))
+        pad_y_bot = max(70, int(th * 0.12))  # Khoang trong cho subtitle ben duoi
+        
+        span_x_val = f"(w-text_w-{2 * pad_x})"
+        span_y_val = f"(h-text_h-{pad_y_top + pad_y_bot})"
+        
+        # Thuat toan song tam giac (Triangle wave billiard bouncing)
+        x_expr = f"{pad_x}+{span_x_val}-abs(mod(t*{spd_x}\\,2*{span_x_val})-{span_x_val})"
+        y_expr = f"{pad_y_top}+{span_y_val}-abs(mod(t*{spd_y}\\,2*{span_y_val})-{span_y_val})"
+        
+        # Mau trang tinh khiet KHONG VIEN (Pure white, no border, no shadow)
+        return (
+            f"drawtext={font_arg}text='{escaped_text}':"
+            f"fontsize={font_size}:fontcolor=white@{op:.2f}:"
+            f"x='{x_expr}':y='{y_expr}'"
+        )
+    else:
+        # Chay ngang dai vien tren (Legacy border banner)
+        bar_h = max(20, int(round(th * 0.050)))
+        font_size = max(14, min(24, int(bar_h * 0.38)))
+        y_pos = max(6, int((bar_h - font_size) / 2))
+        spd = max(30, min(600, int(speed or 70)))
+        
+        if dir_mode == "left_to_right":
+            # Trai sang Phai: bat dau ngoai le trai (-text_w), chay sang phai (+text_w)
+            x_expr = f"-text_w+mod(t*{spd}\\,w+text_w)"
+        else:
+            # Phai sang Trai (mac dinh): bat dau ngoai le phai (w), chay sang trai (-text_w)
+            x_expr = f"w-mod(t*{spd}\\,w+text_w)"
+            
+        return (
+            f"drawtext={font_arg}text='{escaped_text}':"
+            f"fontsize={font_size}:fontcolor=white@0.85:"
+            f"shadowcolor=black@0.60:shadowx=1:shadowy=1:"
+            f"x='{x_expr}':y={y_pos}"
+        )
 
 
 def build_visual_layout_filter(layout_mode: str, target_w: int = 1920, target_h: int = 1080) -> list[str]:
     """Sinh bo loc bien doi bo cuc lam moi video (>= 40% visual refresh).
     
-    1. 'letterbox': Chuan dien anh 2.05:1 (Univisium - Mo nhe chuyen tiep, khong vien)
-       - Mo nhe nhang (Soft Translucent Mist) 72px moi ben (~6.6% chieu cao), an toan tuyet doi cho tran & phu de.
-       - Bo hoan toan cac duong vien mau vang/cam sac canh de hinh anh tu nhien, sang trong.
+    1. 'letterbox': Dải đen điện ảnh mỏng 5% trên và dưới (Khuyên dùng)
+       - Dải đen bán trong suốt black@0.75 độ cao 5.0% (54px ở 1080p) ở đỉnh và đáy video.
+       - Vừa che khuyết điểm/chữ cũ mép viền, vừa tạo hiệu ứng chuẩn rạp phim sang trọng, giữ 90% diện tích video nguyên vẹn.
     2. 'ambient_frame': Bo goc noi khoi 92% + Vien Ambient Slate/Cyan
        - Thu nho 92% (1766x994), dem nen Slate #0f172a, vien chi Cyan 2px.
     3. 'ken_burns': Cu lia may gia lap (Dynamic Slow Pan & Micro Drift)
@@ -294,17 +282,10 @@ def build_visual_layout_filter(layout_mode: str, target_w: int = 1920, target_h:
     th = int(target_h or 1080)
     
     if mode == "letterbox":
-        bar_h = max(24, int(th * 0.0667))
-        h1 = int(bar_h * 0.70)
-        h2 = int(bar_h * 0.18)
-        h3 = bar_h - h1 - h2
+        bar_h = max(20, int(round(th * 0.050)))
         return [
-            f"drawbox=y=0:w={tw}:h={h1}:color=black@0.30:t=fill",
-            f"drawbox=y={h1}:w={tw}:h={h2}:color=black@0.18:t=fill",
-            f"drawbox=y={h1+h2}:w={tw}:h={h3}:color=black@0.06:t=fill",
-            f"drawbox=y={th-bar_h}:w={tw}:h={h3}:color=black@0.06:t=fill",
-            f"drawbox=y={th-bar_h+h3}:w={tw}:h={h2}:color=black@0.18:t=fill",
-            f"drawbox=y={th-bar_h+h3+h2}:w={tw}:h={h1}:color=black@0.30:t=fill",
+            f"drawbox=y=0:w={tw}:h={bar_h}:color=black@0.75:t=fill",
+            f"drawbox=y={th-bar_h}:w={tw}:h={bar_h}:color=black@0.75:t=fill",
         ]
     elif mode == "ambient_frame":
         sw = int(tw * 0.92) // 2 * 2
@@ -388,7 +369,9 @@ def build_geometric_distortion_filter(mode):
     if mode in ("crop", "both"):
         parts.append("crop=iw*0.965:ih*0.965:iw*0.02:ih*0.02,scale=trunc(iw/0.965/2)*2:trunc(ih/0.965/2)*2")
     if mode in ("vignette", "both"):
-        parts.append("vignette=angle=PI/8")
+        # This is a static vignette. Dithering every full-HD frame is costly
+        # and brings no visible benefit at this deliberately subtle strength.
+        parts.append("vignette=angle=PI/8:dither=0")
     return ",".join(parts)
 
 
@@ -400,7 +383,8 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
     KT#8: Crop offset 3px - pha DCT block boundary.
 
     Tra ve chuoi rong neu settings.enabled=False.
-    Them vao filter_complex TRUOC cac filter chinh (color, blur, ass).
+    Them vao filter_complex SAU cac filter che/blur/mau goc (color, blur, mask)
+    de lop che di chuyen dong bo 100% voi video khi zoom/lat, va TRUOC phu de moi (ass).
     """
     if not settings.enabled:
         return ""
@@ -440,23 +424,21 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
         else:
             parts.append(f"hflip=enable='between(mod(t,{period}),{normal_s},{period})'")
 
-    # 1. Zoom & Crop: Neu la continuous mode (Auto Recap), dung chuan YouTube 16:9 crop 5% + punch zoom
+    # 1. Zoom & Crop: Neu la continuous mode (Auto Recap), dung chuan YouTube 16:9 crop 5% co dinh 100% chinh tam
     if getattr(settings, "continuous_mode", False):
         if getattr(settings, "add_zoom", True):
             PI = "3.14159265358979"
             tw = int(target_w or getattr(settings, "target_width", 1920) or 1920)
             th = int(target_h or getattr(settings, "target_height", 1080) or 1080)
-            offset_px = int(getattr(settings, "crop_offset_px", 3))
+            offset_px = int(getattr(settings, "crop_offset_px", 0) or 0)
+            crop_expr_x = f"(iw-ow)/2+{offset_px}" if offset_px else "(iw-ow)/2"
+            crop_expr_y = f"(ih-oh)/2+{offset_px}" if offset_px else "(ih-oh)/2"
 
-            if getattr(settings, "add_punch_zoom", True):
-                punch_offset_x = offset_px + 8
-                punch_offset_y = offset_px + 4
+            if getattr(settings, "add_punch_zoom", False):
                 iv = float(getattr(settings, "punch_zoom_interval_seconds", 5.5) or 5.5)
                 period = round(iv * 2, 2)
                 crop_expr_w = f"trunc(if(between(mod(t,{period}),{iv},{period}),iw*0.90,iw*0.95)/2)*2"
                 crop_expr_h = f"trunc(if(between(mod(t,{period}),{iv},{period}),ih*0.90,ih*0.95)/2)*2"
-                crop_expr_x = f"if(between(mod(t,{period}),{iv},{period}),(iw-ow)/2+{punch_offset_x},(iw-ow)/2+{offset_px})"
-                crop_expr_y = f"if(between(mod(t,{period}),{iv},{period}),(ih-oh)/2+{punch_offset_y},(ih-oh)/2+{offset_px})"
                 parts.append(
                     f"crop=w='{crop_expr_w}':h='{crop_expr_h}':x='{crop_expr_x}':y='{crop_expr_y}',"
                     f"scale={tw}:{th}:flags=fast_bilinear"
@@ -464,8 +446,6 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
             else:
                 crop_expr_w = "trunc(iw*0.95/2)*2"
                 crop_expr_h = "trunc(ih*0.95/2)*2"
-                crop_expr_x = f"(iw-ow)/2+{offset_px}"
-                crop_expr_y = f"(ih-oh)/2+{offset_px}"
                 parts.append(
                     f"crop=w='{crop_expr_w}':h='{crop_expr_h}':x='{crop_expr_x}':y='{crop_expr_y}',"
                     f"scale={tw}:{th}:flags=fast_bilinear"
@@ -490,8 +470,19 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
                 parts.append(color_f)
 
     # 3. Geometric distortion (vignette, ...)
-    if getattr(settings, "geometric_mode", "both") not in ("none", "", None):
-        geo_f = build_geometric_distortion_filter(settings.geometric_mode)
+    geo_mode = getattr(settings, "geometric_mode", "both")
+    if geo_mode not in ("none", "", None):
+        # Continuous Zoom/Punch Zoom above already crops 5-10% and scales back
+        # to the target canvas.  Applying the legacy 3.5% geometric crop after
+        # it performs a second full-HD scale, which is visually redundant and
+        # was the largest CPU bottleneck in export.  Preserve the vignette part
+        # of "both"; when Zoom is disabled, keep the requested crop unchanged.
+        if getattr(settings, "continuous_mode", False) and getattr(settings, "add_zoom", True):
+            if geo_mode == "both":
+                geo_mode = "vignette"
+            elif geo_mode == "crop":
+                geo_mode = "none"
+        geo_f = build_geometric_distortion_filter(geo_mode)
         if geo_f:
             parts.append(geo_f)
 
@@ -504,18 +495,22 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
         if layout_filters:
             parts.extend(layout_filters)
 
-    # 4b. Chạy chữ thương hiệu trên dải viền mờ (Marquee Running Text)
+    # 4b. Chạy chữ thương hiệu / Watermark mờ động (Bóng nảy 2D hoặc viền mờ)
     if getattr(settings, "marquee_enabled", False):
         tw = int(target_w or getattr(settings, "target_width", 1920) or 1920)
         th = int(target_h or getattr(settings, "target_height", 1080) or 1080)
         _marquee_text_actual = getattr(settings, "marquee_text", "VIURECAP")
-        print(f"[AntiDup] Marquee text being applied: '{_marquee_text_actual}' | dir={getattr(settings, 'marquee_direction', 'right_to_left')} | speed={getattr(settings, 'marquee_speed', 70)}")
+        _marquee_dir = getattr(settings, "marquee_direction", "bouncing")
+        _marquee_spd = getattr(settings, "marquee_speed", 22)
+        _marquee_op = getattr(settings, "marquee_opacity", 0.40)
+        print(f"[AntiDup] Marquee text being applied: '{_marquee_text_actual}' | dir={_marquee_dir} | speed={_marquee_spd} | opacity={_marquee_op}")
         m_filter = build_marquee_text_filter(
             text=_marquee_text_actual,
-            direction=getattr(settings, "marquee_direction", "right_to_left"),
-            speed=getattr(settings, "marquee_speed", 70),
+            direction=_marquee_dir,
+            speed=_marquee_spd,
             target_w=tw,
             target_h=th,
+            opacity=_marquee_op,
         )
         if m_filter:
             parts.append(m_filter)
@@ -530,13 +525,13 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
         if getattr(settings, "add_grain_noise", True):
             parts.append("noise=alls=8:allf=t+u")
 
-        # KT#10: Unsharp nhe - pha perceptual hash pixel-level
-        # luma_amount=0.5: tang nhe do sac net cua kenh sang (Y) -> thay doi edge gradient
-        # chroma_amount=0: khong cham den mau (giu mau tu nhien)
+        # KT#10: Contrast-adaptive sharpen nhe - pha perceptual hash pixel-level.
+        # CAS supports slice threading and is substantially faster than the
+        # old full-frame unsharp convolution while keeping chroma untouched.
         # Mat thuong: nhin "sac net" hon nho hon. AI Content ID: edge fingerprint khac hoan toan.
         # Khong thay doi thoi luong video.
         if getattr(settings, "add_unsharp", True):
-            parts.append("unsharp=3:3:0.5:3:3:0")
+            parts.append("cas=strength=0.15:planes=1")
 
         # KT#7: Micro speed variation - dich nhip thoi gian 0.01%
         # setpts=0.9999*PTS: video nhanh hon 0.01% -> thoi luong ngan hon 0.01%
@@ -549,24 +544,21 @@ def build_anti_duplicate_video_chain(settings, target_w=None, target_h=None, tot
 
     return ",".join(f for f in parts if f)
 
-def build_anti_duplicate_audio_filter(settings):
-    """KT#5 + KT#9 + KT#7: Tra ve FFmpeg -af filter de pha audio fingerprint.
+def build_anti_duplicate_audio_filter(settings, *, include_bgm_overlay=False, **kwargs):
+    """KT#5 + KT#9 + KT#11 + KT#7: Trả về FFmpeg -af filter để phá audio fingerprint.
 
-    KT#5: Dich pitch +1.5% bang asetrate + resample + atempo compensate.
-    KT#9: Audio EQ nhe (equalizer filter) - pha audio fingerprint Chromaprint/Shazam.
-          - 1200Hz +0.8dB: tang nhe dai trung (giong noi robusts)
-          - 5500Hz -0.6dB: cat nhe dai cao (overtone)
-          Nguoi nghe: khong phan biet duoc. AI quet: spectrum khac hoan toan.
-    KT#7: Bu tru toc do 0.01% (atempo=1.0001) tuong ung voi setpts=0.9999*PTS tren video.
-          Dam bao video va audio dong bo, thoi luong cuoi cung khong thay doi.
+    KT#5: Dịch pitch vi mô +1.5% bằng asetrate + resample + atempo compensate.
+    KT#9: Audio EQ nhẹ (1200Hz +0.8dB, 5500Hz -0.6dB) - phá Chromaprint / Shazam.
+    KT#11: Giảm âm lượng 3% (volume=0.97 / -0.26dB) - phá audio level fingerprint.
+    KT#7: Bù trừ vi tốc độ 0.01% (atempo=1.0001) tương ứng với setpts=0.9999*PTS trên video.
 
-    Content ID / Shazam: spectrogram khac hoan toan -> khong match.
-    Tra ve chuoi rong neu settings.enabled=False.
+    Người xem / nghe phim hoàn toàn tự nhiên, không chát tai, giữ nguyên chất phim điện ảnh.
+    Trả về chuỗi rỗng nếu settings.enabled=False hoặc skip_audio_filter=True.
     """
     if not settings.enabled:
         return ""
-    # Audio track da la TTS/dub: khong duoc bien dang pitch/EQ/volume.
-    # Chi pha nhan dien VIDEO, con audio giu nguyen de nguoi nghe khong phan biet.
+    # Audio track đã là TTS/dub: không được biến dạng pitch/EQ/volume.
+    # Chỉ phá nhận diện VIDEO, còn audio giữ nguyên để người nghe không phân biệt.
     if getattr(settings, "skip_audio_filter", False):
         return ""
     if getattr(settings, "continuous_mode", False):
@@ -576,55 +568,20 @@ def build_anti_duplicate_audio_filter(settings):
             tempo_comp = round(1.0 / 1.015, 6)    # 0.985222
             chain_parts.append(f"aresample=44100,asetrate={pitch_rate},aresample=44100,atempo={tempo_comp}")
 
-        # KT#9: EQ nhe - pha Chromaprint/Shazam audio fingerprint
+        # KT#9: EQ nhẹ - phá Chromaprint/Shazam audio fingerprint
         if getattr(settings, "add_eq_audio", True):
             chain_parts.append(
                 "equalizer=f=1200:width_type=o:width=2:g=0.8"
                 ",equalizer=f=5500:width_type=o:width=2:g=-0.6"
             )
 
-        # KT#11: Volume -0.3dB (volume=0.97) - pha audio level fingerprint
-        # Giam am luong 3% (tuong duong -0.26dB):
-        # - Tai nguoi: khong the phan biet duoc (nguong nghe ~1dB)
-        # - AI Shazam / ACRCloud: so sanh muc PCM -> level khac -> khong khop fingerprint
-        # Khong thay doi thoi luong, khong thay doi pitch, khong thay doi nhip.
+        # KT#11: Volume -0.3dB (volume=0.97) - phá audio level fingerprint
         if getattr(settings, "add_volume_level", True):
             chain_parts.append("volume=0.97")
 
-        # KT#7: Bu tru micro speed (tuong ung setpts=0.9999*PTS tren video)
-        # atempo=1.0001: audio nhanh hon 0.01% -> dong bo voi video da duoc setpts=0.9999
-        # Thoi luong output = 99.99% thoi luong goc -> khong dang ke (0.012s voi video 2 phut)
+        # KT#7: Bù trừ micro speed (tương ứng setpts=0.9999*PTS trên video)
         if getattr(settings, "add_micro_speed", True):
             chain_parts.append("atempo=1.0001")
-
-        # KT#13: Nguy trang nhac nen (Music Camouflage) - chi khi bat tuong minh
-        # Muc tieu: nhan dien nhac nen co ban quyen (YouTube Content ID / ACRCloud / Shazam)
-        #   - aecho=0.6:0.88:9:0.3  -> Micro-echo 9ms, gain 0.3 (nguoi nghe: khong nghe ro)
-        #     Thay doi delay profile cua nhac -> ACRCloud mat fingerprint match
-        #   - afreqshift=shift=3.0  -> Dich tan so +3Hz (nguoi nghe: <0.1 cent, vo cam)
-        #     Thay doi pitch reference cua Shazam, qua ACRCloud frequency fingerprint
-        # Ket hop 2 filter: bao phu ca time-domain va frequency-domain fingerprint.
-        # FFmpeg native: toc do xuat giu nguyen (chi them ~0.5% CPU nhe).
-        if getattr(settings, "add_music_camouflage", False):
-            chain_parts.append("aecho=0.6:0.88:9:0.3")
-            chain_parts.append("afreqshift=shift=3.0")
-
-        # KT#14: Long nhac nen dem nhe khang quet (BGM Collision 10-15%) - Don chi mang voi Content ID
-        # Dung amovie + amix voi normalize=0 de giu nguyen 100% am luong giong/video goc,
-        # tron nhe 10%-15% track BGM khong ban quyen tao xung dot da nguon (multi-track collision).
-        # duration=first dam bao thoi luong video khong bao gio bi lech.
-        # Toc do: FFmpeg native >100x realtime (0 giay cho them).
-        if getattr(settings, "add_bgm_overlay", True):
-            bgm_path = resolve_bgm_path(getattr(settings, "bgm_file_path", ""))
-            if bgm_path and os.path.isfile(bgm_path):
-                bgm_esc = escape_ffmpeg_filter_path(bgm_path)
-                bgm_vol = max(0.02, min(0.50, float(getattr(settings, "bgm_volume", 0.12) or 0.12)))
-                main_filter = ",".join(chain_parts) if chain_parts else "aresample=44100"
-                return (
-                    f"{main_filter}[main];"
-                    f"amovie='{bgm_esc}':loop=0,volume={bgm_vol:.2f}[bgm];"
-                    f"[main][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0"
-                )
 
         return ",".join(chain_parts)
 
@@ -660,7 +617,16 @@ def get_metadata_poison_args(settings):
         "-metadata", "copyright=",
     ]
 
-def apply_anti_duplicate_to_command(command, settings, *, output_path, has_audio=True, has_existing_af=False):
+def apply_anti_duplicate_to_command(
+    command,
+    settings,
+    *,
+    output_path,
+    has_audio=True,
+    has_existing_af=False,
+    audio_input_label="0:a",
+    audio_map_value="0:a?",
+):
     """Tien ich chen tat ca anti-duplicate args vao FFmpeg command truoc output_path.
 
     Args:
@@ -680,10 +646,26 @@ def apply_anti_duplicate_to_command(command, settings, *, output_path, has_audio
     meta_args = get_metadata_poison_args(settings)
     if meta_args:
         command.extend(meta_args)
-    if has_audio and not has_existing_af:
+    if has_audio:
+        # Preserve any audio processing already authored by the export path
+        # (for example Audio Mix gain) and merge it with Anti-Duplicate audio
+        # settings. Previously ``has_existing_af=True`` skipped Pitch/EQ/BGM
+        # altogether, so the custom dialog and final export could disagree.
+        existing_audio_filters = []
+        idx = 0
+        while idx < len(command) - 1:
+            if command[idx] == "-af":
+                existing_audio_filters.append(str(command[idx + 1]))
+                del command[idx:idx + 2]
+                continue
+            idx += 1
+
         af_filter = build_anti_duplicate_audio_filter(settings)
-        if af_filter:
-            command.extend(["-af", af_filter])
+        main_audio_filter = ",".join(
+            part for part in [*existing_audio_filters, af_filter] if part
+        )
+        if main_audio_filter:
+            command.extend(["-af", main_audio_filter])
     command.append(output_path)
     return command
 

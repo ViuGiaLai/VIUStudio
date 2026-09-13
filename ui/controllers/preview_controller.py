@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QCheckBox, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QCheckBox, QDialog, QFileDialog, QMessageBox
 
 from runtime_paths import bin_path
 from worker_adapters import (
@@ -711,8 +711,29 @@ class PreviewController:
         else:
             initial_recap = True
 
+        from app.anti_duplicate import AntiDuplicateSettings
+
+        # Resolve the exact saved snapshot before building the summary. The
+        # old hard-coded text always claimed Zoom/Flip/Color/BGM were enabled,
+        # even after the user had disabled them successfully.
+        existing_ad_settings = getattr(self.gui, "_anti_duplicate_settings", None)
+        if existing_ad_settings is None and hasattr(self.gui, "current_project_state") and self.gui.current_project_state:
+            ps = self.gui.current_project_state
+            saved_dict = None
+            if hasattr(ps, "get_setting"):
+                saved_dict = ps.get_setting("anti_duplicate_custom_settings", None)
+            elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
+                saved_dict = ps.settings.get("anti_duplicate_custom_settings", None)
+            if isinstance(saved_dict, dict):
+                existing_ad_settings = AntiDuplicateSettings.from_dict(saved_dict)
+        if existing_ad_settings is None:
+            existing_ad_settings = AntiDuplicateSettings(
+                enabled=True,
+                continuous_mode=True,
+            )
+
         recap_desc = (
-            "Bật (1-Pass: Punch Zoom 5.5s + Lật gương + 4 Tone màu + BGM)"
+            f"Bật — {existing_ad_settings.summary_text()}"
             if initial_recap
             else "Tắt"
         )
@@ -726,20 +747,6 @@ class PreviewController:
             "CHỐNG TRÙNG LẶP / RECAP",
             f"Auto Recap: {recap_desc}",
         ])
-
-        from app.anti_duplicate import AntiDuplicateSettings
-
-        # Load existing custom settings from memory or project state if available
-        existing_ad_settings = getattr(self.gui, "_anti_duplicate_settings", None)
-        if existing_ad_settings is None and hasattr(self.gui, "current_project_state") and self.gui.current_project_state:
-            ps = self.gui.current_project_state
-            saved_dict = None
-            if hasattr(ps, "get_setting"):
-                saved_dict = ps.get_setting("anti_duplicate_custom_settings", None)
-            elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
-                saved_dict = ps.settings.get("anti_duplicate_custom_settings", None)
-            if saved_dict and isinstance(saved_dict, dict):
-                existing_ad_settings = AntiDuplicateSettings.from_dict(saved_dict)
 
         try:
             from ui.dialogs.export_confirm_dialog import ExportConfirmDialog
@@ -758,8 +765,13 @@ class PreviewController:
                 ps = self.gui.current_project_state
                 if hasattr(ps, "set_setting"):
                     ps.set_setting("anti_duplicate_custom_settings", ad_settings.to_dict())
+                    ps.set_setting("anti_duplicate_enabled", bool(wants_recap))
                 elif hasattr(ps, "settings") and isinstance(getattr(ps, "settings", None), dict):
                     ps.settings["anti_duplicate_custom_settings"] = ad_settings.to_dict()
+                    ps.settings["anti_duplicate_enabled"] = bool(wants_recap)
+                project_service = getattr(self.gui, "project_service", None)
+                if project_service is not None:
+                    project_service.save_project(ps)
             return confirmed, wants_recap, ad_settings
         except Exception as exc:
             # Safe fallback if UI fails to initialize
@@ -1277,16 +1289,27 @@ class PreviewController:
             return 0.0
 
     def export_final_video(self, *, automatic: bool = False):
-        video_path = self._resolve_export_video_path()
+        anti_duplicate_selected = bool(
+            hasattr(self.gui, "anti_duplicate_cb")
+            and self.gui.anti_duplicate_cb.isChecked()
+        )
+        # A rendered recap is only a preview/cache. Reusing it while applying
+        # Anti-Duplicate again bakes the old settings into the new export, so a
+        # filter the user just disabled can never disappear. Anti-Duplicate
+        # final export must start from the clean canonical/timeline source.
+        video_path = self._resolve_export_video_path(
+            prefer_recap=not anti_duplicate_selected
+        )
         if not video_path:
             QMessageBox.warning(self.gui, "Error", "Please choose a video first.")
             return
 
         # Auto Edit Recap Base Video Preparation
-        is_recap_active = bool(
-            (hasattr(self.gui, "is_auto_recap_enabled") and self.gui.is_auto_recap_enabled())
-            or (hasattr(self.gui, "anti_duplicate_cb") and self.gui.anti_duplicate_cb.isChecked())
+        is_auto_recap_active = bool(
+            hasattr(self.gui, "is_auto_recap_enabled")
+            and self.gui.is_auto_recap_enabled()
         )
+        is_recap_active = bool(is_auto_recap_active or anti_duplicate_selected)
         canonical_src = (
             self.gui.resolve_canonical_video_path()
             if hasattr(self.gui, "resolve_canonical_video_path")
@@ -1296,8 +1319,15 @@ class PreviewController:
 
         # If a recap video was already generated on disk (e.g. via Generate button), use it.
         # Otherwise, the export pipeline will apply the Auto Recap filters directly in 1-Pass!
-        if recap_path and os.path.isfile(recap_path):
+        use_rendered_recap = bool(
+            not anti_duplicate_selected
+            and recap_path
+            and os.path.isfile(recap_path)
+        )
+        if use_rendered_recap:
             video_path = recap_path
+        elif anti_duplicate_selected and canonical_src and os.path.isfile(canonical_src):
+            video_path = canonical_src
 
         has_translated_content = bool(
             getattr(self.gui, "current_translated_segments", None)
@@ -1429,8 +1459,21 @@ class PreviewController:
             os.makedirs(chosen_dir, exist_ok=True)
             self.gui.final_output_folder_edit.setText(chosen_dir)
 
-        wants_recap = is_recap_active
+        # This flag controls Anti-Duplicate filters only. Auto Recap editing is
+        # a separate feature and must not silently turn disabled filters back
+        # on during export.
+        wants_recap = anti_duplicate_selected
         custom_ad_settings = getattr(self.gui, "_anti_duplicate_settings", None)
+        if custom_ad_settings is None:
+            ps = getattr(self.gui, "current_project_state", None)
+            saved_ad_settings = None
+            if ps is not None and hasattr(ps, "get_setting"):
+                saved_ad_settings = ps.get_setting("anti_duplicate_custom_settings", None)
+            elif ps is not None and isinstance(getattr(ps, "settings", None), dict):
+                saved_ad_settings = ps.settings.get("anti_duplicate_custom_settings")
+            if isinstance(saved_ad_settings, dict):
+                from app.anti_duplicate import AntiDuplicateSettings
+                custom_ad_settings = AntiDuplicateSettings.from_dict(saved_ad_settings)
         if not automatic:
             confirm_res = self._confirm_export_summary(
                 video_path=video_path,
@@ -1445,11 +1488,22 @@ class PreviewController:
             if not confirmed:
                 return
 
+        if wants_recap:
+            # The currently selected settings must be applied exactly once to
+            # a clean source, including when Anti-Duplicate was enabled from
+            # inside the export confirmation dialog.
+            clean_source = (
+                self.gui.resolve_canonical_video_path()
+                if hasattr(self.gui, "resolve_canonical_video_path")
+                else ""
+            )
+            if clean_source and os.path.isfile(clean_source):
+                video_path = clean_source
+            use_rendered_recap = False
+
         # Update GUI controls to reflect user's selection
         if hasattr(self.gui, "anti_duplicate_cb"):
             self.gui.anti_duplicate_cb.setChecked(wants_recap)
-        if hasattr(self.gui, "auto_recap_cb"):
-            self.gui.auto_recap_cb.setChecked(wants_recap)
 
         # Check if an export is already running — guard against deleted C++ object
         if hasattr(self.gui, 'export_thread') and self.gui.export_thread is not None:
@@ -1480,6 +1534,22 @@ class PreviewController:
         fill_focus_x, fill_focus_y = self.gui.get_output_fill_focus()
         
         anti_dup = bool(wants_recap)
+        if anti_dup:
+            from app.anti_duplicate import AntiDuplicateSettings
+            if custom_ad_settings is None:
+                custom_ad_settings = AntiDuplicateSettings(
+                    enabled=True,
+                    continuous_mode=True,
+                )
+            else:
+                # Give the worker an immutable-by-convention snapshot. Later
+                # UI changes cannot alter an export already in progress.
+                custom_ad_settings = AntiDuplicateSettings.from_dict(
+                    custom_ad_settings.to_dict()
+                )
+                custom_ad_settings.enabled = True
+                custom_ad_settings.continuous_mode = True
+            self.gui._anti_duplicate_settings = custom_ad_settings
 
         raw_timeline_clips = (
             self.gui.get_timeline_video_clips(existing_only=True)
@@ -1488,7 +1558,7 @@ class PreviewController:
         timeline_clips = self._normalize_export_timeline_clips(
             raw_timeline_clips,
             base_video_path=video_path,
-            is_recap_active=wants_recap,
+            is_recap_active=use_rendered_recap,
         )
 
         self.gui.export_thread = FinalExportWorker(

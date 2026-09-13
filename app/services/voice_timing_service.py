@@ -143,6 +143,17 @@ def align_voice_clips(*, segments, wavs, engine, tmp_dir, mode="smart",
                 if duration <= available + 0.002:
                     break
             if duration > available + 0.002:
+                try:
+                    current = engine.cap_wav_to_duration(
+                        input_wav_path=current,
+                        output_wav_path=os.path.join(tmp_dir, f"aligned_{index:04d}_fit_cap.wav"),
+                        target_duration_seconds=available,
+                        fade_out_seconds=0.02,
+                    )
+                    duration = wav_duration(current)
+                except Exception:
+                    pass
+            if duration > available + 0.002:
                 problems.append(f"Cue {index + 1}: fitted speech still exceeds its subtitle window.")
                 continue
         fitted[index] = current

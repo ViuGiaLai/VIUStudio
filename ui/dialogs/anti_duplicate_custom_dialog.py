@@ -60,7 +60,7 @@ class StylePreviewDialog(QDialog):
 
         hdr = QLabel(
             "<b>So sánh thực tế:</b> Video gốc và 4 phong cách bố cục làm mới (≥40% biến đổi thị giác để bẻ gãy Content ID).<br>"
-            "<span style='color: #38bdf8;'>• Phong cách 1 (Univisium 2.05:1): Viền chỉ 6.6% (72px) - an toàn tuyệt đối cho trán nhân vật &amp; phụ đề.</span><br>"
+            "<span style='color: #38bdf8;'>• Phong cách 1 (Univisium 2.05:1): Viền chỉ 5% (54px) - an toàn tuyệt đối cho trán nhân vật &amp; phụ đề.</span><br>"
             "<span style='color: #94a3b8;'>• Phong cách 2 (Ambient 92%) | Phong cách 3 (Ken Burns Lia máy) | Phong cách 4 (Vệt sáng &amp; Hạt bụi).</span>"
         )
         hdr.setWordWrap(True)
@@ -102,7 +102,12 @@ class AntiDuplicateCustomDialog(QDialog):
 
     def __init__(self, settings: AntiDuplicateSettings | None = None, parent=None):
         super().__init__(parent)
-        self.settings = settings or AntiDuplicateSettings(enabled=True, continuous_mode=True, allow_horizontal_flip=True)
+        # Edit a detached snapshot so Cancel doesn't mutate caller state.
+        self.settings = (
+            AntiDuplicateSettings.from_dict(settings.to_dict())
+            if settings is not None
+            else AntiDuplicateSettings(enabled=True, continuous_mode=True, allow_horizontal_flip=True)
+        )
         self.setWindowTitle("⚙️ Tùy chỉnh Kỹ thuật Chống trùng lặp (Auto Recap)")
         self.setMinimumWidth(560)
         self.setMinimumHeight(640)
@@ -257,27 +262,16 @@ class AntiDuplicateCustomDialog(QDialog):
         zb_layout.setSpacing(5)
         zb_layout.setContentsMargins(10, 8, 10, 8)
 
-        self.zoom_cb = QCheckBox("🔍 Thu phóng vi mô (Zoom 105% chuẩn điện ảnh)")
+        self.zoom_cb = QCheckBox("🔍 Thu phóng vi mô (Zoom 105% chuẩn điện ảnh · Cố định 100% chính tâm)")
         self.zoom_cb.setChecked(getattr(self.settings, "add_zoom", True))
+        self.zoom_cb.setToolTip("Cắt bỏ 5% viền cạnh video gốc, camera cố định 100% ở chính giữa tâm, êm ái tuyệt đối không giật nhảy.")
         zb_layout.addWidget(self.zoom_cb)
-
-        self.punch_zoom_cb = QCheckBox("⚡ Punch Zoom nhịp điệu 5.5s (Đổi góc cận/toàn · Bẻ chuỗi 7s quét YouTube)")
-        self.punch_zoom_cb.setChecked(getattr(self.settings, "add_punch_zoom", True))
-        self.punch_zoom_cb.setToolTip(
-            "Cứ mỗi 5.5s tự động đổi giữa góc toàn cảnh (105%) và cận cảnh (110% lệch tâm):\n"
-            "• Bẻ gãy chuỗi nhận diện liên tục 7s của YouTube Content ID\n"
-            "• Bảo toàn 100.00% thời lượng video (0.000s drift) -> Giữ phụ đề & giọng đọc TTS khớp chuẩn 100%\n"
-            "• Tốc độ xuất video siêu nhanh với flags=fast_bilinear."
-        )
-        zb_layout.addWidget(self.punch_zoom_cb)
-        lbl_zoom = QLabel("Đổi góc máy nhịp điệu 5.5s giả lập 2 camera Studio, bẻ gãy Content ID mà không lệch phụ đề.", objectName="hintLabel")
+        lbl_zoom = QLabel("Zoom 105% tĩnh cố định tâm: Loại bỏ viền cạnh gốc, triệt tiêu hoàn toàn rung lắc và nhảy giật.", objectName="hintLabel")
         zb_layout.addWidget(lbl_zoom)
 
-        def _update_zoom_ui(checked):
-            self.punch_zoom_cb.setEnabled(checked)
-
-        self.zoom_cb.toggled.connect(_update_zoom_ui)
-        _update_zoom_ui(self.zoom_cb.isChecked())
+        # Legacy punch_zoom_cb retained off-layout for backward test compatibility
+        self.punch_zoom_cb = QCheckBox()
+        self.punch_zoom_cb.setChecked(False)
 
         vg_layout.addWidget(self.zoom_box)
 
@@ -352,8 +346,8 @@ class AntiDuplicateCustomDialog(QDialog):
         lb_layout.addLayout(lb_hdr)
 
         self.layout_group = QButtonGroup(self)
-        self.radio_layout_letterbox = QRadioButton("🎬 Chuẩn Điện ảnh 2.05:1 (Mờ nhẹ 6.6% mép viền · Bỏ viền cứng - Khuyên dùng)")
-        self.radio_layout_letterbox.setToolTip("Dải mờ sương nhẹ nhàng (Soft Translucent Mist) chuyển tiếp mềm mại ở 2 mép, bỏ hoàn toàn đường viền cứng, an toàn 100% cho trán & phụ đề, tự nhiên và sang trọng.")
+        self.radio_layout_letterbox = QRadioButton("🎬 Dải Đen Điện ảnh Mỏng (Dải đen 5% trên/dưới - Khuyên dùng ⭐)")
+        self.radio_layout_letterbox.setToolTip("Dải đen bán trong suốt 75% ở đỉnh và đáy video mỏng nhẹ tinh tế (~54px trên Full HD), chuẩn rạp phim sang trọng, giữ trọn 90% diện tích video sắc nét, không thêm bước xuất.")
 
         self.radio_layout_ambient = QRadioButton("🪟 Bo góc Nổi khối + Viền Ambient 92% (Phong cách Recap hiện đại)")
         self.radio_layout_ambient.setToolTip("Thu nhỏ 92% đặt trên nền đệm Slate sâu thẳm #0f172a với viền neon Cyan 2px, tạo cảm giác video nổi 3D sống động.")
@@ -398,9 +392,12 @@ class AntiDuplicateCustomDialog(QDialog):
         mb_layout.setSpacing(6)
         mb_layout.setContentsMargins(10, 8, 10, 8)
 
-        self.marquee_cb = QCheckBox("📜 Chạy chữ thương hiệu trên dải viền mờ (Marquee Text Ticker)")
+        self.marquee_cb = QCheckBox("📜 Chữ thương hiệu / Watermark mờ chống tải trộm (Dynamic Watermark)")
         self.marquee_cb.setChecked(getattr(self.settings, "marquee_enabled", True))
-        self.marquee_cb.setToolTip("Hiển thị dòng chữ chuyển động cuộn liên tục trên dải mờ mép trên, bẻ gãy mạnh mẽ thuật toán Content ID.")
+        self.marquee_cb.setToolTip(
+            "Chèn chữ thương hiệu chuyển động ngẫu nhiên khắp video hoặc chạy trên viền dải mờ.\n"
+            "Chữ bán trong suốt mờ dịu, không che mặt nhân vật và bẻ gãy thuật toán quét Content ID toàn diện."
+        )
         mb_layout.addWidget(self.marquee_cb)
 
         # Row 1: Text content
@@ -434,31 +431,84 @@ class AntiDuplicateCustomDialog(QDialog):
         row_text.addWidget(self.marquee_text_edit, 1)
         mb_layout.addLayout(row_text)
 
-        # Row 2: Direction & Speed controls
+        # Row 2: Mode / Direction controls
+        row_mode = QHBoxLayout()
+        row_mode.setSpacing(8)
+        lbl_dir = QLabel("Chế độ:")
+        lbl_dir.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        row_mode.addWidget(lbl_dir)
+
+        self.dir_group = QButtonGroup(self)
+        self.radio_dir_bouncing = QRadioButton("⚽ Bóng nảy 2D khắp video (Khuyên dùng)")
+        self.radio_dir_bouncing.setToolTip("Thuật toán quỹ đạo Tỷ lệ vàng: Chữ lướt chuyển động chậm rãi, dội bóng ngẫu nhiên khắp mọi nơi trên video, né vùng phụ đề.")
+        self.radio_dir_rtl = QRadioButton("Phải ➔ Trái (Viền)")
+        self.radio_dir_rtl.setToolTip("Chữ chạy từ mép phải sang mép trái trên viền dải mờ")
+        self.radio_dir_ltr = QRadioButton("Trái ➔ Phải (Viền)")
+        self.radio_dir_ltr.setToolTip("Chữ chạy từ mép trái sang mép phải trên viền dải mờ")
+
+        self.dir_group.addButton(self.radio_dir_bouncing, 0)
+        self.dir_group.addButton(self.radio_dir_rtl, 1)
+        self.dir_group.addButton(self.radio_dir_ltr, 2)
+
+        cur_dir = getattr(self.settings, "marquee_direction", "bouncing")
+        if cur_dir == "left_to_right":
+            self.radio_dir_ltr.setChecked(True)
+        elif cur_dir == "right_to_left":
+            self.radio_dir_rtl.setChecked(True)
+        else:
+            self.radio_dir_bouncing.setChecked(True)
+
+        row_mode.addWidget(self.radio_dir_bouncing)
+        row_mode.addWidget(self.radio_dir_rtl)
+        row_mode.addWidget(self.radio_dir_ltr)
+        row_mode.addStretch(1)
+        mb_layout.addLayout(row_mode)
+
+        # Row 3: Opacity & Speed controls
         row_options = QHBoxLayout()
         row_options.setSpacing(8)
 
-        lbl_dir = QLabel("Hướng:")
-        lbl_dir.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
-        row_options.addWidget(lbl_dir)
+        lbl_op = QLabel("Độ mờ:")
+        lbl_op.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        row_options.addWidget(lbl_op)
 
-        self.dir_group = QButtonGroup(self)
-        self.radio_dir_rtl = QRadioButton("Phải ➔ Trái")
-        self.radio_dir_rtl.setToolTip("Chữ chạy từ mép phải sang mép trái (chuẩn truyền hình & recap)")
-        self.radio_dir_ltr = QRadioButton("Trái ➔ Phải")
-        self.radio_dir_ltr.setToolTip("Chữ chạy từ mép trái sang mép phải")
+        self.marquee_opacity_combo = QComboBox()
+        self.marquee_opacity_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0f172a;
+                color: #f8fafc;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+                min-width: 150px;
+            }
+            QComboBox:focus {
+                border-color: #38bdf8;
+            }
+            QComboBox:disabled {
+                background-color: #0b111c;
+                color: #475569;
+                border-color: #1e293b;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0f172a;
+                color: #f8fafc;
+                selection-background-color: #0284c7;
+            }
+        """)
+        self.marquee_opacity_combo.addItem("30% (Trắng mờ nhẹ - Kín đáo)", 0.30)
+        self.marquee_opacity_combo.addItem("40% (Trắng mờ vừa - Khuyên dùng)", 0.40)
+        self.marquee_opacity_combo.addItem("55% (Trắng rõ nét)", 0.55)
+        self.marquee_opacity_combo.addItem("70% (Trắng đậm)", 0.70)
 
-        self.dir_group.addButton(self.radio_dir_rtl, 0)
-        self.dir_group.addButton(self.radio_dir_ltr, 1)
-
-        cur_dir = getattr(self.settings, "marquee_direction", "right_to_left")
-        if cur_dir == "left_to_right":
-            self.radio_dir_ltr.setChecked(True)
+        cur_op = getattr(self.settings, "marquee_opacity", 0.40)
+        idx_op = self.marquee_opacity_combo.findData(cur_op)
+        if idx_op >= 0:
+            self.marquee_opacity_combo.setCurrentIndex(idx_op)
         else:
-            self.radio_dir_rtl.setChecked(True)
-
-        row_options.addWidget(self.radio_dir_rtl)
-        row_options.addWidget(self.radio_dir_ltr)
+            self.marquee_opacity_combo.setCurrentIndex(1)
+        row_options.addWidget(self.marquee_opacity_combo)
 
         row_options.addSpacing(10)
 
@@ -475,7 +525,7 @@ class AntiDuplicateCustomDialog(QDialog):
                 border-radius: 4px;
                 padding: 3px 8px;
                 font-size: 11px;
-                min-width: 130px;
+                min-width: 150px;
             }
             QComboBox:focus {
                 border-color: #38bdf8;
@@ -491,24 +541,30 @@ class AntiDuplicateCustomDialog(QDialog):
                 selection-background-color: #0284c7;
             }
         """)
-        self.marquee_speed_combo.addItem("🐢 Rất chậm (45 px/s)", 45)
-        self.marquee_speed_combo.addItem("✨ Chậm êm dịu (70 px/s)", 70)
-        self.marquee_speed_combo.addItem("🚶 Vừa phải (110 px/s)", 110)
-        self.marquee_speed_combo.addItem("⚡ Nhanh (160 px/s)", 160)
+        self.marquee_speed_combo.addItem("🐢🐢 Siêu chậm (15 px/s)", 15)
+        self.marquee_speed_combo.addItem("✨ Cực chậm (22 px/s - Khuyên dùng)", 22)
+        self.marquee_speed_combo.addItem("🚶 Chậm êm dịu (35 px/s)", 35)
+        self.marquee_speed_combo.addItem("⚡ Vừa phải (55 px/s)", 55)
+        self.marquee_speed_combo.addItem("🚀 Nhanh (110 px/s)", 110)
+        self.marquee_speed_combo.addItem("🚀🚀 Rất nhanh (160 px/s)", 160)
 
-        cur_spd = getattr(self.settings, "marquee_speed", 70)
+        cur_spd = getattr(self.settings, "marquee_speed", 22)
         idx = self.marquee_speed_combo.findData(cur_spd)
         if idx >= 0:
             self.marquee_speed_combo.setCurrentIndex(idx)
         else:
-            if cur_spd <= 55:
+            if cur_spd <= 18:
                 self.marquee_speed_combo.setCurrentIndex(0)
-            elif cur_spd <= 85:
+            elif cur_spd <= 28:
                 self.marquee_speed_combo.setCurrentIndex(1)
-            elif cur_spd <= 135:
+            elif cur_spd <= 45:
                 self.marquee_speed_combo.setCurrentIndex(2)
-            else:
+            elif cur_spd <= 80:
                 self.marquee_speed_combo.setCurrentIndex(3)
+            elif cur_spd <= 135:
+                self.marquee_speed_combo.setCurrentIndex(4)
+            else:
+                self.marquee_speed_combo.setCurrentIndex(5)
 
         row_options.addWidget(self.marquee_speed_combo)
         row_options.addStretch(1)
@@ -516,8 +572,10 @@ class AntiDuplicateCustomDialog(QDialog):
 
         def _update_marquee_fields(checked):
             self.marquee_text_edit.setEnabled(checked)
+            self.radio_dir_bouncing.setEnabled(checked)
             self.radio_dir_rtl.setEnabled(checked)
             self.radio_dir_ltr.setEnabled(checked)
+            self.marquee_opacity_combo.setEnabled(checked)
             self.marquee_speed_combo.setEnabled(checked)
 
         self.marquee_cb.toggled.connect(_update_marquee_fields)
@@ -538,7 +596,7 @@ class AntiDuplicateCustomDialog(QDialog):
         lbl_grain = QLabel("Phá vỡ perceptual hash DCT của thuật toán quét YouTube/TikTok.", objectName="hintLabel")
         vg_layout.addWidget(lbl_grain)
 
-        self.unsharp_cb = QCheckBox("🔪 Tăng độ nét cạnh viền nhẹ (Unsharp filter)")
+        self.unsharp_cb = QCheckBox("🔪 Tăng độ nét cạnh viền nhẹ (CAS nhanh)")
         self.unsharp_cb.setChecked(getattr(self.settings, "add_unsharp", True))
         vg_layout.addWidget(self.unsharp_cb)
         lbl_unsharp = QLabel("Tăng vi độ nét cho các cạnh vật thể, video nhìn rõ hơn.", objectName="hintLabel")
@@ -553,7 +611,7 @@ class AntiDuplicateCustomDialog(QDialog):
         c_layout.addWidget(video_group)
 
         # ---------------- Section 2: Audio Fingerprint ----------------
-        audio_group = QGroupBox("🎵 ÂM THANH GỐC (Chỉ áp dụng âm thanh gốc, không đổi giọng TTS)")
+        audio_group = QGroupBox("🔊 ÂM THANH GỐC (Chống quét âm thanh, giữ nguyên chất lượng phim)")
         ag_layout = QVBoxLayout(audio_group)
         ag_layout.setSpacing(4)
 
@@ -574,144 +632,6 @@ class AntiDuplicateCustomDialog(QDialog):
         ag_layout.addWidget(self.vol_cb)
         lbl_vol = QLabel("Hạ mức PCM 3% để sai lệch với fingerprint mức đỉnh của bot.", objectName="hintLabel")
         ag_layout.addWidget(lbl_vol)
-
-        self.music_camouflage_cb = QCheckBox("🎵 Ngụy trang nhạc nền (KT#13 · Micro Echo 9ms + Tần số +3Hz)")
-        self.music_camouflage_cb.setChecked(getattr(self.settings, "add_music_camouflage", False))
-        self.music_camouflage_cb.setToolTip(
-            "Thêm vi echo 9ms + dịch tần số +3Hz vào nhạc nền:\n"
-            "• Phá fingerprint ACRCloud / YouTube Content ID cho nhạc nền\n"
-            "• Người nghe KHÔNG phân biệt được (ngưỡng cảm nhận: echo >20ms, pitch >0.5 cent)\n"
-            "• FFmpeg native: tốc độ xuất gần như không ảnh hưởng (~0.5% CPU thêm)\n"
-            "⚠️ Chỉ bật khi video có nhạc nền gốc có bản quyền cần đăng lên YouTube."
-        )
-        ag_layout.addWidget(self.music_camouflage_cb)
-        lbl_mc = QLabel(
-            "Phá nhận diện ACRCloud/Shazam theo time-domain (echo) & frequency-domain (freqshift). Không ảnh hưởng giọng đọc.",
-            objectName="hintLabel"
-        )
-        ag_layout.addWidget(lbl_mc)
-
-        # KT#14: Lồng nhạc nền đệm nhẹ (BGM Collision 10-15%)
-        bgm_box = QFrame()
-        bgm_box.setStyleSheet("background-color: #0b1322; border: 1px solid #1e2d44; border-radius: 6px;")
-        bgm_layout = QVBoxLayout(bgm_box)
-        bgm_layout.setSpacing(6)
-        bgm_layout.setContentsMargins(10, 8, 10, 8)
-
-        self.bgm_overlay_cb = QCheckBox("🎵 Lồng nhạc nền đệm nhẹ kháng bản quyền (BGM Collision 10-15%)")
-        self.bgm_overlay_cb.setChecked(getattr(self.settings, "add_bgm_overlay", True))
-        self.bgm_overlay_cb.setToolTip(
-            "Đòn bẩy kháng bản quyền YouTube mạnh nhất:\n"
-            "• Trộn thêm 1 track BGM nhẹ (10% - 15%) vào âm thanh gốc bằng FFmpeg native amix.\n"
-            "• Gây xung đột đa nguồn (Multi-track collision) khiến AI Content ID không thể tách khớp nhạc gốc.\n"
-            "• Tốc độ xuất SIÊU NHANH (không tốn thêm thời gian xuất)."
-        )
-        bgm_layout.addWidget(self.bgm_overlay_cb)
-
-        # Controls row
-        row_bgm_ctrl = QHBoxLayout()
-        row_bgm_ctrl.setSpacing(8)
-
-        lbl_bgm_vol = QLabel("Âm lượng BGM:")
-        lbl_bgm_vol.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
-        row_bgm_ctrl.addWidget(lbl_bgm_vol)
-
-        self.bgm_vol_combo = QComboBox()
-        self.bgm_vol_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #0f172a;
-                color: #f8fafc;
-                border: 1px solid #334155;
-                border-radius: 4px;
-                padding: 3px 8px;
-                font-size: 11px;
-                min-width: 140px;
-            }
-            QComboBox:focus {
-                border-color: #38bdf8;
-            }
-            QComboBox:disabled {
-                background-color: #0b111c;
-                color: #475569;
-                border-color: #1e293b;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #0f172a;
-                color: #f8fafc;
-                selection-background-color: #0284c7;
-            }
-        """)
-        self.bgm_vol_combo.addItem("🍃 Rất nhẹ (8%)", 0.08)
-        self.bgm_vol_combo.addItem("✨ Chuẩn khuyến nghị (12%)", 0.12)
-        self.bgm_vol_combo.addItem("🔊 Vừa phải (15%)", 0.15)
-        self.bgm_vol_combo.addItem("📢 Nổi bật (20%)", 0.20)
-
-        cur_vol = float(getattr(self.settings, "bgm_volume", 0.12) or 0.12)
-        if cur_vol <= 0.09:
-            self.bgm_vol_combo.setCurrentIndex(0)
-        elif cur_vol <= 0.13:
-            self.bgm_vol_combo.setCurrentIndex(1)
-        elif cur_vol <= 0.17:
-            self.bgm_vol_combo.setCurrentIndex(2)
-        else:
-            self.bgm_vol_combo.setCurrentIndex(3)
-
-        row_bgm_ctrl.addWidget(self.bgm_vol_combo)
-
-        self.btn_pick_bgm = QPushButton("📁 Chọn bài khác...")
-        self.btn_pick_bgm.setStyleSheet("""
-            QPushButton {
-                background-color: #1e293b;
-                color: #38bdf8;
-                border: 1px solid #0284c7;
-                border-radius: 4px;
-                padding: 4px 10px;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-        """)
-        self.btn_pick_bgm.clicked.connect(self._pick_custom_bgm)
-        row_bgm_ctrl.addWidget(self.btn_pick_bgm)
-
-        self.btn_reset_bgm = QPushButton("🔄 Mặc định")
-        self.btn_reset_bgm.setStyleSheet("""
-            QPushButton {
-                background-color: #1e293b;
-                color: #94a3b8;
-                border: 1px solid #334155;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #334155;
-                color: #f8fafc;
-            }
-        """)
-        self.btn_reset_bgm.clicked.connect(self._reset_bgm_path)
-        row_bgm_ctrl.addWidget(self.btn_reset_bgm)
-
-        row_bgm_ctrl.addStretch(1)
-        bgm_layout.addLayout(row_bgm_ctrl)
-
-        self.lbl_bgm_current = QLabel(self._format_bgm_label())
-        self.lbl_bgm_current.setStyleSheet("color: #64748b; font-size: 11px; margin-left: 4px;")
-        bgm_layout.addWidget(self.lbl_bgm_current)
-
-        def _update_bgm_ui(checked):
-            self.bgm_vol_combo.setEnabled(checked)
-            self.btn_pick_bgm.setEnabled(checked)
-            self.btn_reset_bgm.setEnabled(checked)
-            self.lbl_bgm_current.setEnabled(checked)
-
-        self.bgm_overlay_cb.toggled.connect(_update_bgm_ui)
-        _update_bgm_ui(self.bgm_overlay_cb.isChecked())
-
-        ag_layout.addWidget(bgm_box)
 
         c_layout.addWidget(audio_group)
 
@@ -754,27 +674,6 @@ class AntiDuplicateCustomDialog(QDialog):
 
         root_layout.addLayout(btn_row)
 
-    def _format_bgm_label(self) -> str:
-        custom_p = getattr(self.settings, "bgm_file_path", "")
-        if custom_p and os.path.isfile(custom_p):
-            return f"🎵 Tệp: {os.path.basename(custom_p)}"
-        return "🎵 Nhạc mặc định: Nhạc nền Recap bản quyền tự do (AudioBay)"
-
-    def _pick_custom_bgm(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn tệp nhạc nền BGM",
-            "",
-            "Audio Files (*.mp3 *.wav *.aac *.m4a *.flac *.ogg)",
-        )
-        if file_path:
-            self.settings.bgm_file_path = file_path
-            self.lbl_bgm_current.setText(self._format_bgm_label())
-
-    def _reset_bgm_path(self):
-        self.settings.bgm_file_path = ""
-        self.lbl_bgm_current.setText(self._format_bgm_label())
-
     def _show_style_preview(self):
         """Hiển thị cửa sổ phóng to ảnh minh chứng 4 phong cách làm mới video."""
         dialog = StylePreviewDialog(self)
@@ -785,7 +684,7 @@ class AntiDuplicateCustomDialog(QDialog):
         self.radio_color_periodic.setChecked(True)
         self.radio_layout_letterbox.setChecked(True)
         self.zoom_cb.setChecked(True)
-        self.punch_zoom_cb.setChecked(True)
+        self.punch_zoom_cb.setChecked(False)
         self.vignette_cb.setChecked(True)
         self.grain_cb.setChecked(True)
         self.unsharp_cb.setChecked(True)
@@ -793,20 +692,16 @@ class AntiDuplicateCustomDialog(QDialog):
         self.pitch_cb.setChecked(True)
         self.eq_cb.setChecked(True)
         self.vol_cb.setChecked(True)
-        self.music_camouflage_cb.setChecked(False)  # mặc định tắt
-        self.bgm_overlay_cb.setChecked(True)        # mặc định bật lồng BGM
-        idx_bgm = self.bgm_vol_combo.findData(0.12)
-        if idx_bgm >= 0:
-            self.bgm_vol_combo.setCurrentIndex(idx_bgm)
-        self.settings.bgm_file_path = ""
-        self.lbl_bgm_current.setText(self._format_bgm_label())
         self.meta_cb.setChecked(True)
         self.marquee_cb.setChecked(True)
         self.marquee_text_edit.setText("VIURECAP")
-        self.radio_dir_rtl.setChecked(True)
-        idx_def = self.marquee_speed_combo.findData(70)
-        if idx_def >= 0:
-            self.marquee_speed_combo.setCurrentIndex(idx_def)
+        self.radio_dir_bouncing.setChecked(True)
+        idx_spd = self.marquee_speed_combo.findData(22)
+        if idx_spd >= 0:
+            self.marquee_speed_combo.setCurrentIndex(idx_spd)
+        idx_op = self.marquee_opacity_combo.findData(0.40)
+        if idx_op >= 0:
+            self.marquee_opacity_combo.setCurrentIndex(idx_op)
 
     def _save_and_close(self):
         self.settings.enabled = True
@@ -843,7 +738,7 @@ class AntiDuplicateCustomDialog(QDialog):
             self.settings.visual_layout_mode = "letterbox"
 
         self.settings.add_zoom = self.zoom_cb.isChecked()
-        self.settings.add_punch_zoom = self.punch_zoom_cb.isChecked()
+        self.settings.add_punch_zoom = False
         self.settings.geometric_mode = "both" if self.vignette_cb.isChecked() else "none"
         self.settings.add_grain_noise = self.grain_cb.isChecked()
         self.settings.add_unsharp = self.unsharp_cb.isChecked()
@@ -851,16 +746,18 @@ class AntiDuplicateCustomDialog(QDialog):
         self.settings.add_pitch_shift = self.pitch_cb.isChecked()
         self.settings.add_eq_audio = self.eq_cb.isChecked()
         self.settings.add_volume_level = self.vol_cb.isChecked()
-        self.settings.add_music_camouflage = self.music_camouflage_cb.isChecked()
-        self.settings.add_bgm_overlay = self.bgm_overlay_cb.isChecked()
-        self.settings.bgm_volume = float(self.bgm_vol_combo.currentData() or 0.12)
-        # bgm_file_path is already set when user picks or resets
         self.settings.poison_metadata = self.meta_cb.isChecked()
 
         self.settings.marquee_enabled = self.marquee_cb.isChecked()
         self.settings.marquee_text = self.marquee_text_edit.text().strip() or "VIURECAP"
-        self.settings.marquee_direction = "left_to_right" if self.radio_dir_ltr.isChecked() else "right_to_left"
-        self.settings.marquee_speed = int(self.marquee_speed_combo.currentData() or 70)
+        if self.radio_dir_ltr.isChecked():
+            self.settings.marquee_direction = "left_to_right"
+        elif self.radio_dir_rtl.isChecked():
+            self.settings.marquee_direction = "right_to_left"
+        else:
+            self.settings.marquee_direction = "bouncing"
+        self.settings.marquee_speed = int(self.marquee_speed_combo.currentData() or 22)
+        self.settings.marquee_opacity = float(self.marquee_opacity_combo.currentData() or 0.40)
 
         self.settings_saved.emit(self.settings)
         self.accept()

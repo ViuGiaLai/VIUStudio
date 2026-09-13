@@ -162,7 +162,7 @@ class ExportConfirmDialog(QDialog):
         self.recap_cb.setChecked(initial_recap)
         self.recap_cb.setEnabled(True)
         self.recap_cb.setToolTip(
-            "Áp dụng bộ lọc kháng bản quyền (Punch Zoom 5.5s, Lật gương, 4 Tone màu, BGM lót...) ngay trong 1 lần xuất."
+            "Áp dụng bộ lọc kháng bản quyền (Zoom 105% cố định tâm, Lật gương, 4 Tone màu...) ngay trong 1 lần xuất."
         )
 
         top_rc.addWidget(self.recap_cb)

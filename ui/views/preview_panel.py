@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
+    QSplitterHandle,
     QStackedWidget,
     QTextEdit,
     QVBoxLayout,
@@ -28,6 +29,44 @@ from runtime_paths import asset_path
 from widgets import MpvVideoView, VideoView
 from utils.icon_utils import load_icon
 from utils.media_backend import is_mpv_backend_available
+
+
+class _PreviewTimelineHandle(QSplitterHandle):
+    """A visible, forgiving drag target between preview and timeline."""
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self.setToolTip("Kéo để thay đổi chiều cao Preview / Timeline · Nhấp đúp để đặt lại")
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        center = self.rect().center()
+        painter.setPen(QPen(QColor("#78a9d4"), 1.4))
+        for offset in (-8, 0, 8):
+            painter.drawLine(center.x() + offset - 3, center.y(), center.x() + offset + 3, center.y())
+
+    def mouseDoubleClickEvent(self, event):
+        splitter = self.splitter()
+        reset = getattr(splitter, "reset_to_default", None)
+        if callable(reset):
+            reset()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class _PreviewTimelineSplitter(QSplitter):
+    """CapCut-style vertical workspace splitter with a clear resize grip."""
+
+    def createHandle(self):
+        return _PreviewTimelineHandle(self.orientation(), self)
+
+    def reset_to_default(self):
+        callback = getattr(self, "_reset_callback", None)
+        if callable(callback):
+            callback()
 
 
 def _import_editor_timeline():
@@ -796,10 +835,9 @@ def build_preview_panel(gui):
         gui.video_view.scaleModeToggleRequested.connect(
             lambda: gui.toggle_preview_scale_mode() if hasattr(gui, "toggle_preview_scale_mode") else None
         )
-    # The vertical workspace is splitter-resizable.  Keep a practical but
-    # compact minimum so the transport row always has its own space when the
-    # user gives more room to the timeline.
-    gui.video_view.setMinimumHeight(270)
+    # Keep the player flexible: the outer preview card owns the safe minimum.
+    # This lets laptop users reclaim room for either monitor or timeline.
+    gui.video_view.setMinimumHeight(150)
     gui.video_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     gui.timeline = _import_editor_timeline()()
     # The outer Timeline card owns the usable minimum height.  Do not give
@@ -1408,7 +1446,7 @@ def build_preview_panel(gui):
     gui.rewrite_translation_btn = QPushButton("Rewrite")
     gui.audio_inspector_regenerate_voice_btn = QPushButton("Voice")
     gui.subtitle_editor_btn = QPushButton("Edit")
-    gui.import_translation_btn = QPushButton("Import")
+    gui.import_translation_btn = QPushButton("Import SRT")
     gui.inspector_delete_segment_btn = QPushButton("Delete")
 
     gui.rewrite_translation_btn.setIcon(load_icon(asset_path("icons/rewrite.svg"), 14))
@@ -1418,16 +1456,17 @@ def build_preview_panel(gui):
     gui.inspector_delete_segment_btn.setIcon(load_icon(asset_path("icons/delete.svg"), 14))
 
     action_buttons = (
-        (gui.rewrite_translation_btn, "Rewrite the selected subtitle with AI."),
-        (gui.audio_inspector_regenerate_voice_btn, "Re-generate voice for the selected subtitle."),
-        (gui.subtitle_editor_btn, "Open the full subtitle editor."),
-        (gui.import_translation_btn, "Import subtitles from an SRT file."),
-        (gui.inspector_delete_segment_btn, "Delete the selected subtitle cue."),
+        (gui.rewrite_translation_btn, "Rewrite the selected subtitle with AI.", 76),
+        (gui.subtitle_editor_btn, "Open the full subtitle editor.", 56),
+        (gui.import_translation_btn, "Import subtitles from an SRT file.", 88),
+        (gui.audio_inspector_regenerate_voice_btn, "Re-generate voice for the selected subtitle.", 64),
+        (gui.inspector_delete_segment_btn, "Delete the selected subtitle cue.", 68),
     )
-    for button, tooltip in action_buttons:
+    for button, tooltip, maximum_width in action_buttons:
         button.setObjectName("subtitleInspectorAction")
-        button.setFixedHeight(28)
+        button.setFixedHeight(32)
         button.setMinimumWidth(0)
+        button.setMaximumWidth(maximum_width)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button.setIconSize(QSize(14, 14))
         button.setCursor(Qt.PointingHandCursor)
@@ -2141,50 +2180,46 @@ def build_preview_panel(gui):
 
     workspace_row = QHBoxLayout()
     workspace_row.setSpacing(10)
-    # Inspector takes more horizontal space than the preview so the
-    # audio/subtitle controls and segment editor are comfortable.
-    workspace_row.addWidget(preview_card, 2)
-    workspace_row.addWidget(inspector_shell, 3)
+    # The monitor is the primary editing surface. The inspector already has
+    # a responsive fixed width, so Preview receives all remaining space.
+    workspace_row.addWidget(preview_card, 1)
+    workspace_row.addWidget(inspector_shell, 0)
 
-    # Keep Preview + Inspector and Timeline independently resizable.  The
-    # previous 3:5 layout gave a 16:9 source only enough height to occupy a
-    # small central portion of a wide preview panel.  A 45:55 default gives
-    # the preview about 20% more vertical room while leaving the timeline
-    # comfortably usable.  MpvVideoView recalculates its canvas and overlays
-    # on every resize, so this does not alter any source/canvas coordinates.
+    # Keep Preview + Inspector and Timeline independently resizable. The
+    # default project-open layout gives the upper workspace 64% and Timeline
+    # 36%, while the visible handle lets users choose their own balance.
     workspace_widget = QWidget()
     workspace_widget.setObjectName("previewWorkspace")
     workspace_widget.setLayout(workspace_row)
     gui.preview_workspace_widget = workspace_widget
     gui.preview_workspace_layout = workspace_row
     gui.timeline_card = timeline_card
-    # 270 px preview + transport row + card margins/spacing.  This prevents
-    # the native MPV surface from extending over the transport controls when
-    # the splitter is dragged upward on a smaller window.
-    workspace_widget.setMinimumHeight(350)
-    # Keep the original practical minimum for the editor timeline.
-    timeline_card.setMinimumHeight(360)
-    gui._responsive_workspace_minimum_height = 350
-    gui._responsive_timeline_minimum_height = 360
+    # Both panes intentionally have compact minimums. EditorTimeline owns its
+    # scrollbars, so extra tracks remain reachable when the card is short.
+    workspace_widget.setMinimumHeight(270)
+    timeline_card.setMinimumHeight(190)
+    gui._responsive_workspace_minimum_height = 270
+    gui._responsive_timeline_minimum_height = 190
 
-    gui.preview_timeline_splitter = QSplitter(Qt.Vertical)
+    gui.preview_timeline_splitter = _PreviewTimelineSplitter(Qt.Vertical)
     gui.preview_timeline_splitter.setObjectName("previewTimelineSplitter")
     gui.preview_timeline_splitter.setChildrenCollapsible(False)
     gui.preview_timeline_splitter.setOpaqueResize(True)
-    gui.preview_timeline_splitter.setHandleWidth(7)
+    gui.preview_timeline_splitter.setHandleWidth(11)
     gui.preview_timeline_splitter.setStyleSheet(
-        "QSplitter::handle { background: #1b2a3d; margin: 2px 0; }"
-        "QSplitter::handle:hover { background: #3a6289; }"
+        "QSplitter::handle { background: #18283a; border-top: 1px solid #28445f;"
+        " border-bottom: 1px solid #0b1520; margin: 2px 0; }"
+        "QSplitter::handle:hover { background: #2b5274; border-top-color: #5591bd; }"
     )
     gui.preview_timeline_splitter.addWidget(workspace_widget)
     gui.preview_timeline_splitter.addWidget(timeline_card)
     gui.preview_timeline_splitter.handle(1).setEnabled(True)
     gui.preview_timeline_splitter.handle(1).setCursor(Qt.SplitVCursor)
-    gui.preview_timeline_splitter.setStretchFactor(0, 45)
-    gui.preview_timeline_splitter.setStretchFactor(1, 55)
+    gui.preview_timeline_splitter.setStretchFactor(0, 64)
+    gui.preview_timeline_splitter.setStretchFactor(1, 36)
 
     # Do not permit an extreme Preview expansion to clip the Timeline card
-    # below a usable viewport. The normal 45/55 layout remains unchanged;
+    # below a usable viewport. The normal 60/40 layout remains unchanged;
     # this guard applies only at the lower end of the splitter range.
     gui._constraining_preview_timeline_splitter = False
 
@@ -2196,7 +2231,7 @@ def build_preview_panel(gui):
         if len(sizes) != 2:
             return
         min_timeline_height = int(
-            getattr(gui, "_responsive_timeline_minimum_height", 360) or 360
+            getattr(gui, "_responsive_timeline_minimum_height", 190) or 190
         )
         if sizes[1] >= min_timeline_height:
             return
@@ -2212,12 +2247,36 @@ def build_preview_panel(gui):
     gui.preview_timeline_splitter.splitterMoved.connect(_keep_timeline_accessible)
     right_layout.addWidget(gui.preview_timeline_splitter, 1)
 
-    def _set_default_preview_timeline_sizes():
+    def _preview_timeline_settings_key():
+        state = getattr(gui, "current_project_state", None)
+        project_id = str(getattr(state, "project_id", "") or "").strip()
+        safe_project_id = project_id.replace("/", "_").replace("\\", "_") or "_default"
+        return f"editor/preview_timeline_ratio_v5/{safe_project_id}"
+
+    def _set_default_preview_timeline_sizes(use_saved=True):
         splitter = gui.preview_timeline_splitter
         available = sum(splitter.sizes())
         if available > 0:
-            preview_height = int(round(available * 0.45))
+            saved_ratio = None
+            settings = getattr(gui, "settings", None)
+            if use_saved and settings is not None:
+                try:
+                    saved_ratio = float(settings.value(_preview_timeline_settings_key(), 0.64))
+                except (TypeError, ValueError):
+                    saved_ratio = None
+            preview_ratio = max(0.35, min(0.78, saved_ratio if saved_ratio is not None else 0.64))
+            preview_height = int(round(available * preview_ratio))
             splitter.setSizes([preview_height, max(1, available - preview_height)])
+
+    def _remember_preview_timeline_ratio(_pos=None, _index=None):
+        sizes = gui.preview_timeline_splitter.sizes()
+        available = sum(sizes)
+        settings = getattr(gui, "settings", None)
+        if available > 0 and settings is not None:
+            settings.setValue(_preview_timeline_settings_key(), round(sizes[0] / available, 4))
+
+    gui.preview_timeline_splitter._reset_callback = lambda: _set_default_preview_timeline_sizes(False)
+    gui.preview_timeline_splitter.splitterMoved.connect(_remember_preview_timeline_ratio)
 
     # MainWindow calls this from its first show event, when the splitter has
     # real dimensions but before the editor's first visible paint.

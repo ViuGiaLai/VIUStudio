@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 APP_NAME = "VIUStudio Video & Auto Edit Recap"
-AUTO_RECAP_VERSION = "1.1.2"
+AUTO_RECAP_VERSION = "1.1.3"
 
-RELEASE_NOTES = """✨ VIUStudio v1.3.2 - CapCut-Style Subtitle Controls, 1:1 Export Sync & Video Workflow Enhancements
+RELEASE_NOTES = """✨ VIUStudio v1.3.3 - One-Pass Export Optimization, Responsive Workspace & Anti-Duplicate Enhancements
 
 Hạng mục tính năng mới:
-• 🎯 CapCut-Style Subtitle Direct Manipulation: Điều khiển phụ đề trực tiếp trên màn hình xem trước (Live Preview). Bấm chọn hiển thị khung viền nét đứt màu xanh neon (#00E5FF) cùng 4 tay cầm góc; kéo thả tự do mọi vị trí (Drag & Move); kéo góc phóng to/thu nhỏ cỡ chữ mượt mà theo thời gian thực (12px - 140px).
-• 🔄 Đồng bộ 1:1 Tuyệt đối sang Export: Chuẩn hóa thuật toán neo tâm \\an5\\pos(x,y) và cỡ chữ font giữa Preview và xuất video libass/FFmpeg. Khắc phục triệt để hiện tượng kéo trên preview mà xuất video không đổi.
-• 🖥️ Live Preview Display Hardening: Sửa lỗi tắt text rendering trong CPU Mode, triệt tiêu sai số mili-giây khi seek/click timeline segment, loại bỏ dải đen nền 96px, hiển thị phụ đề tức thì khi click chọn đoạn.
-• 🎙️ Import Voice Audio: Bổ sung chức năng nhập trực tiếp file giọng đọc / voiceover vào dự án qua menu More.
-• 🛑 Export Progress Dialog & Cancel: Giao diện tiến trình xuất video hiện đại, bổ sung nút Cancel dừng tác vụ an toàn ngay lập tức.
-• 🛡️ Anti-Duplicate Video Pipeline: Bổ sung pipeline chống trùng lặp video (lật gương, zoom punch, chỉnh màu động, đối chiếu video so sánh trước/sau).
-• 🧪 Automated Test Suite: Đạt 347/347 bài kiểm thử tự động (344 passed, 3 skipped, 0 failed).
+• ⚡ One-Pass Export Optimization: Tối ưu hóa luồng xuất video 1 bước duy nhất (1-Pass) cho cả phụ đề và hiệu ứng, loại bỏ xuất file trung gian giúp tăng tốc độ render và tiết kiệm dung lượng đĩa.
+• 📐 Responsive Workspace & Splitter Persistence: Cải tiến thanh chia tỷ lệ linh hoạt giữa màn hình Preview (64%) và Timeline (36%), tự động ghi nhớ tỷ lệ theo từng dự án, hỗ trợ kéo thả mượt mà trên mọi kích thước màn hình.
+• 🎛️ Anti-Duplicate Dialog Full Sync: Hoàn thiện đồng bộ toàn bộ tùy chọn bộ lọc chống trùng lặp từ giao diện trực quan sang cấu hình xuất FFmpeg.
+• 🎵 BGM Library Collection: Bổ sung thư viện nhạc nền không bản quyền chất lượng cao (21 bài) phục vụ lồng nhạc và kháng quét Content ID.
+• 🖱️ Timeline & Inspector Precision: Tối ưu tương tác click chọn phụ đề trên timeline, kích thước nút hành động inspector chuẩn xác và phản hồi nhanh.
+• 🧪 Automated Test Suite: Đạt 389/389 bài kiểm thử tự động (386 passed, 3 skipped, 0 failed).
 """
 
 

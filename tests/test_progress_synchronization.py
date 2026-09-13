@@ -13,7 +13,12 @@ for p in [ROOT_DIR, APP_DIR, UI_DIR]:
 
 from app.core.models.progress import ProgressEvent, MonotonicProgressTracker
 from app.runtime_paths import sanitize_ffmpeg_diagnostics
-from app.video_processor import build_export_h264_encoder_args, run_ffmpeg_with_progress
+from app.video_processor import (
+    _hardware_decode_args,
+    _remove_auto_hwaccel,
+    build_export_h264_encoder_args,
+    run_ffmpeg_with_progress,
+)
 from ui.utils.progress_protocol import format_duration_clock
 
 
@@ -73,6 +78,13 @@ class TestProgressCore:
 
 
 class TestFFmpegProgressAndCancellation:
+    def test_hardware_decode_hint_and_cpu_fallback_cleanup(self):
+        assert _hardware_decode_args(["-c:v", "h264_qsv"]) == ["-hwaccel", "auto"]
+        assert _hardware_decode_args(["-c:v", "libx264"]) == []
+        command = ["ffmpeg", "-hwaccel", "auto", "-i", "input.mp4", "output.mp4"]
+        _remove_auto_hwaccel(command)
+        assert command == ["ffmpeg", "-i", "input.mp4", "output.mp4"]
+
     @patch("app.video_processor._ffmpeg_supports_encoder", return_value=False)
     def test_export_profiles_use_speed_and_requested_bitrate(self, _mock_encoder):
         fast = build_export_h264_encoder_args("ffmpeg", "fast", 4000)
@@ -91,6 +103,7 @@ class TestFFmpegProgressAndCancellation:
         mock_proc = MagicMock()
         mock_proc.stdout = iter([
             "out_time_ms=10000000\n",   # 10 seconds
+            "speed=2.50x\n",
             "progress=continue\n",
             "out_time_ms=20000000\n",   # 20 seconds
             "progress=continue\n",
@@ -112,6 +125,25 @@ class TestFFmpegProgressAndCancellation:
         assert ok is True
         assert len(events) >= 3
         assert events[-1].percent == 100
+        assert any("2.50x" in event.message for event in events)
+
+    @patch("subprocess.Popen")
+    def test_ffmpeg_reports_selected_video_encoder(self, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["progress=end\n"])
+        mock_proc.stderr = iter([])
+        mock_proc.returncode = 0
+        mock_proc.wait.return_value = 0
+        mock_popen.return_value = mock_proc
+
+        events = []
+        ok, _stdout, _stderr = run_ffmpeg_with_progress(
+            ["ffmpeg", "-i", "input.mp4", "-c:v", "h264_qsv", "output.mp4"],
+            progress_callback=lambda event: events.append(event),
+        )
+
+        assert ok is True
+        assert any("h264_qsv" in event.message for event in events)
 
     @patch("subprocess.Popen")
     def test_ffmpeg_cancellation(self, mock_popen):
