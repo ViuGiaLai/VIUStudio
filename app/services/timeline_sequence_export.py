@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+import math
 import os
 import subprocess
-import time
 import tempfile
+import uuid
 
 from app.runtime_paths import sanitize_ffmpeg_diagnostics, subprocess_text_kwargs
 
@@ -50,6 +52,88 @@ def _source_fps(path: str) -> int:
         return 30
 
 
+def _validate_playable_output(path: str, expected_duration: float) -> None:
+    """Reject incomplete MP4 files before they replace the requested output.
+
+    FFprobe verifies the container and required streams. FFmpeg then decodes a
+    frame near both ends so a present-but-broken video stream is not accepted.
+    """
+    from app.runtime_paths import bin_path
+
+    output = os.path.abspath(path)
+    if not os.path.isfile(output) or os.path.getsize(output) <= 0:
+        raise RuntimeError("FFmpeg did not create the Timeline output file.")
+
+    probe = str(bin_path("ffmpeg", "ffprobe.exe"))
+    result = subprocess.run(
+        [
+            probe, "-v", "error",
+            "-show_entries", "format=duration:stream=codec_type,width,height,duration",
+            "-of", "json", output,
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30,
+        **subprocess_text_kwargs(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Exported MP4 could not be opened: {sanitize_ffmpeg_diagnostics(result.stderr)[-800:]}"
+        )
+    try:
+        metadata = json.loads(result.stdout or "{}")
+        streams = list(metadata.get("streams") or [])
+        duration = float((metadata.get("format") or {}).get("duration") or 0.0)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Exported MP4 has invalid media metadata.") from exc
+
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not video_streams:
+        raise RuntimeError("Exported MP4 does not contain a video stream.")
+    if not audio_streams:
+        raise RuntimeError("Exported MP4 does not contain an audio stream.")
+    first_video = video_streams[0]
+    if int(first_video.get("width") or 0) <= 0 or int(first_video.get("height") or 0) <= 0:
+        raise RuntimeError("Exported MP4 has an invalid video resolution.")
+    tolerance = max(0.5, min(5.0, float(expected_duration or 0.0) * 0.002))
+    video_duration = float(first_video.get("duration") or duration)
+    if (not math.isfinite(duration) or not math.isfinite(video_duration)
+            or duration <= 0.0 or video_duration <= 0.0
+            or min(duration, video_duration) + tolerance < float(expected_duration or 0.0)):
+        raise RuntimeError(
+            f"Exported MP4 is incomplete ({duration:.2f}s of {float(expected_duration):.2f}s)."
+        )
+
+    ffmpeg = str(bin_path("ffmpeg", "ffmpeg.exe"))
+    sample_points = [0.0]
+    if video_duration > 2.0:
+        sample_points.append(max(0.0, video_duration - 1.0))
+    for point in sample_points:
+        decoded = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-xerror",
+                "-ss", f"{point:.6f}", "-i", output,
+                "-map", "0:v:0", "-frames:v", "1", "-f", "framehash", "-",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=45,
+            **subprocess_text_kwargs(),
+        )
+        # FFmpeg can exit successfully after decoding zero frames at EOF.
+        # Require an actual frame checksum, not merely a zero exit status.
+        has_frame = any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in (decoded.stdout or "").splitlines()
+        )
+        if decoded.returncode != 0 or not has_frame:
+            raise RuntimeError(
+                "Exported MP4 failed the playback check: "
+                f"{sanitize_ffmpeg_diagnostics(decoded.stderr)[-800:]}"
+            )
+
+
 def export_timeline_sequence(
     clips: list[dict],
     output_path: str,
@@ -83,6 +167,8 @@ def export_timeline_sequence(
         _build_mask_filter_chain,
         _build_video_color_chain,
         _build_video_lut_chain,
+        _hardware_decode_args,
+        _remove_auto_hwaccel,
         build_export_h264_encoder_args,
         _ffmpeg_path,
         _map_normalized_overlays_to_canvas,
@@ -116,7 +202,15 @@ def export_timeline_sequence(
     focus_y = max(0.0, min(1.0, float(output_fill_focus_y)))
 
     ffmpeg = _ffmpeg_path()
+    video_encoder_args = build_export_h264_encoder_args(
+        ffmpeg, export_preset, video_bitrate_kbps
+    )
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+    # A single source is the common long-video export path and safely uses one
+    # hardware decoder. Multi-input timelines remain on software decode to
+    # avoid exhausting device decoder sessions; hardware encoding still applies.
+    if len(valid) == 1:
+        command += _hardware_decode_args(video_encoder_args)
     for clip in valid:
         command += ["-i", os.path.abspath(str(clip["source"]))]
     external_audio_index = None
@@ -297,55 +391,79 @@ def export_timeline_sequence(
             current_audio = "aout"
         audio_map = f"[{current_audio}]"
 
-    video_encoder_args = build_export_h264_encoder_args(
-        ffmpeg, export_preset, video_bitrate_kbps
+    output_abs = os.path.abspath(output_path)
+    input_paths = [str(clip["source"]) for clip in valid]
+    if external_audio_index is not None:
+        input_paths.append(audio_path)
+    input_paths.extend(layer["source"] for _kind, layer in overlay_inputs)
+    if any(os.path.normcase(output_abs) == os.path.normcase(os.path.abspath(path)) for path in input_paths):
+        raise ValueError("Choose a different output filename from the Timeline source video.")
+    os.makedirs(os.path.dirname(output_abs), exist_ok=True)
+    partial_path = os.path.join(
+        os.path.dirname(output_abs),
+        f".{os.path.basename(output_abs)}.{uuid.uuid4().hex}.partial.mp4",
     )
     filter_string = ";".join(filters)
+    filter_script_path = ""
     if len(filter_string) > 8000:
-        filter_script_path = os.path.join(tempfile.gettempdir(), f"timeline_export_{int(time.time())}.txt")
+        filter_script_path = os.path.join(tempfile.gettempdir(), f"timeline_export_{uuid.uuid4().hex}.txt")
         with open(filter_script_path, "w", encoding="utf-8") as f:
             f.write(filter_string)
         command += [
             "-filter_complex_script", filter_script_path, "-map", "[vout]", "-map", audio_map,
             *video_encoder_args,
             "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{total_duration:.6f}", "-movflags", "+faststart", output_path,
+            "-t", f"{total_duration:.6f}", "-movflags", "+faststart", partial_path,
         ]
     else:
         command += [
             "-filter_complex", filter_string, "-map", "[vout]", "-map", audio_map,
             *video_encoder_args,
             "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{total_duration:.6f}", "-movflags", "+faststart", output_path,
+            "-t", f"{total_duration:.6f}", "-movflags", "+faststart", partial_path,
         ]
-        
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
     # Use FFmpeg's machine-readable progress output instead of waiting for a
     # blocking subprocess.  This keeps timeline exports consistent with the
     # regular subtitle export path and reports the actual ``out_time``.
-    ok, _stdout, stderr = run_ffmpeg_with_progress(
-        command,
-        total_duration_seconds=total_duration,
-        progress_callback=on_progress,
-        cancellation_check=cancellation_check,
-        output_path_to_clean=output_path,
-    )
-    if not ok and any(e in command for e in ("h264_nvenc", "h264_qsv", "h264_amf")):
-        fallback_args = build_export_h264_encoder_args(
-            ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
-        )
-        video_arg_index = command.index("-c:v")
-        audio_arg_index = command.index("-c:a", video_arg_index)
-        command[video_arg_index:audio_arg_index] = fallback_args
+    try:
         ok, _stdout, stderr = run_ffmpeg_with_progress(
             command,
             total_duration_seconds=total_duration,
             progress_callback=on_progress,
             cancellation_check=cancellation_check,
-            output_path_to_clean=output_path,
+            output_path_to_clean=partial_path,
         )
-    if not ok:
-        raise RuntimeError(f"FFmpeg Timeline export failed: {sanitize_ffmpeg_diagnostics(stderr)[-1800:]}")
-    if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
-        raise RuntimeError("FFmpeg did not create the Timeline output file.")
-    return output_path
+        if not ok and any(e in command for e in ("h264_nvenc", "h264_qsv", "h264_amf")):
+            fallback_args = build_export_h264_encoder_args(
+                ffmpeg, export_preset, video_bitrate_kbps, allow_hardware=False
+            )
+            _remove_auto_hwaccel(command)
+            video_arg_index = command.index("-c:v")
+            audio_arg_index = command.index("-c:a", video_arg_index)
+            command[video_arg_index:audio_arg_index] = fallback_args
+            ok, _stdout, stderr = run_ffmpeg_with_progress(
+                command,
+                total_duration_seconds=total_duration,
+                progress_callback=on_progress,
+                cancellation_check=cancellation_check,
+                output_path_to_clean=partial_path,
+            )
+        if not ok:
+            raise RuntimeError(f"FFmpeg Timeline export failed: {sanitize_ffmpeg_diagnostics(stderr)[-1800:]}")
+        _validate_playable_output(partial_path, total_duration)
+        if cancellation_check and cancellation_check():
+            raise InterruptedError("Export cancelled by user")
+        os.replace(partial_path, output_abs)
+        return output_abs
+    finally:
+        if os.path.exists(partial_path):
+            try:
+                os.remove(partial_path)
+            except OSError:
+                pass
+        if filter_script_path and os.path.exists(filter_script_path):
+            try:
+                os.remove(filter_script_path)
+            except OSError:
+                pass

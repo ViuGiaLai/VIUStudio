@@ -85,6 +85,43 @@ class TestFFmpegProgressAndCancellation:
         _remove_auto_hwaccel(command)
         assert command == ["ffmpeg", "-i", "input.mp4", "output.mp4"]
 
+    def test_timeline_hw_decode_falls_back_without_replacing_existing_output(self, tmp_path):
+        from app.services.timeline_sequence_export import export_timeline_sequence
+
+        source = tmp_path / "source.mp4"
+        output = tmp_path / "existing.mp4"
+        source.write_bytes(b"source placeholder")
+        output.write_bytes(b"keep this playable output")
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(list(command))
+            return False, "", "simulated encoder failure"
+
+        with patch("video_processor.get_video_dimensions", return_value=(1920, 1080)), \
+             patch("video_processor.build_export_h264_encoder_args", side_effect=[
+                 ["-c:v", "h264_qsv", "-preset:v", "7"],
+                 ["-c:v", "libx264", "-preset", "ultrafast"],
+             ]), \
+             patch("video_processor.run_ffmpeg_with_progress", side_effect=fake_run), \
+             patch("app.services.timeline_sequence_export._source_fps", return_value=30), \
+             patch("app.services.timeline_sequence_export._has_audio", return_value=False):
+            with pytest.raises(RuntimeError, match="Timeline export failed"):
+                export_timeline_sequence(
+                    [{
+                        "source": str(source),
+                        "source_start": 0.0,
+                        "source_duration": 2.0,
+                        "speed": 1.0,
+                    }],
+                    str(output),
+                )
+
+        assert commands[0][commands[0].index("-hwaccel") + 1] == "auto"
+        assert "-hwaccel" not in commands[1]
+        assert output.read_bytes() == b"keep this playable output"
+        assert not list(tmp_path.glob("*.partial.mp4"))
+
     @patch("app.video_processor._ffmpeg_supports_encoder", return_value=False)
     def test_export_profiles_use_speed_and_requested_bitrate(self, _mock_encoder):
         fast = build_export_h264_encoder_args("ffmpeg", "fast", 4000)
