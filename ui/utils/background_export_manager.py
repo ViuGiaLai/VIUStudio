@@ -133,8 +133,8 @@ class BackgroundExportManager(QObject):
 
     def get_job_for_project(self, state_path_or_id: str, video_path: str = "") -> Optional[ExportJob]:
         """Find an active export job matching project state path, project id, or video path."""
-        norm_target_state = os.path.normcase(os.path.abspath(state_path_or_id)) if state_path_or_id and os.path.exists(state_path_or_id) else ""
-        norm_target_video = os.path.normcase(os.path.abspath(video_path)) if video_path and os.path.exists(video_path) else ""
+        norm_target_state = os.path.normcase(os.path.abspath(state_path_or_id)) if state_path_or_id else ""
+        norm_target_video = os.path.normcase(os.path.abspath(video_path)) if video_path else ""
         target_id = str(state_path_or_id or "").strip().lower()
 
         for job in self.get_active_jobs():

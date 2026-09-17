@@ -713,6 +713,7 @@ class WorkflowActionsMixin:
         self.subtitle_controller.on_rewrite_selected_segment_finished(translated_srt, error)
 
     def _close_export_progress_dialog(self):
+        self._is_export_backgrounded = False
         try:
             dlg = getattr(self, "export_progress_dialog", None)
             if dlg is not None:
@@ -721,6 +722,7 @@ class WorkflowActionsMixin:
                 dlg.deleteLater()
         finally:
             self.export_progress_dialog = None
+        self._refresh_bg_export_badge()
 
     def cancel_video_export(self):
         dlg = getattr(self, "export_progress_dialog", None)
@@ -770,10 +772,351 @@ class WorkflowActionsMixin:
             return dlg
         dlg = ExportProgressDialog(self)
         dlg.cancel_requested.connect(self.cancel_video_export)
+        dlg.bg_requested.connect(self.on_export_run_in_background)
         self.export_progress_dialog = dlg
         self._register_progress_dialog(dlg)
-        dlg.show()
+        if not getattr(self, "_is_export_backgrounded", False):
+            dlg.show()
         return dlg
+
+    def on_export_run_in_background(self):
+        self._is_export_backgrounded = True
+        dlg = getattr(self, "export_progress_dialog", None)
+        if dlg is not None:
+            dlg.set_backgrounded(True)
+            dlg.hide()
+        worker = getattr(self, "export_thread", None)
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            if worker is not None:
+                BackgroundExportManager.get_instance().set_backgrounded_by_worker(worker, True)
+        except Exception as exc:
+            print(f"[Export] Could not flag backgrounded in manager: {exc}")
+
+        self._update_background_export_banner()
+        self.log("[Export] Video export continuing in the background.")
+
+    def show_export_progress_dialog(self):
+        self._is_export_backgrounded = False
+        dlg = self._ensure_export_progress_dialog()
+        if dlg is not None:
+            dlg.set_backgrounded(False)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+
+    def _setup_background_export_listener(self):
+        """Subscribe this window to the central BackgroundExportManager signals."""
+        if getattr(self, "_bg_export_listener_initialized", False):
+            return
+        self._bg_export_listener_initialized = True
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            mgr.job_progress.connect(self._on_global_bg_job_progress)
+            mgr.job_completed.connect(self._on_global_bg_job_completed)
+            mgr.job_failed.connect(self._on_global_bg_job_failed)
+            mgr.job_cancelled.connect(self._on_global_bg_job_cancelled)
+            mgr.job_registered.connect(self._on_global_bg_job_registered)
+        except Exception as exc:
+            print(f"[Export] Could not bind BackgroundExportManager signals: {exc}")
+        self._refresh_bg_export_badge()
+
+    def _is_job_matching_current_project(self, job) -> bool:
+        if not job:
+            return False
+        ps = getattr(self, "current_project_state", None)
+        cur_state_path = getattr(ps, "project_state_path", "") or getattr(self, "project_state_path", "")
+        cur_video = getattr(self, "_current_video_path", "")
+        cur_id = getattr(ps, "project_id", "") if ps else ""
+
+        if cur_state_path and job.project_state_path:
+            if os.path.normcase(os.path.abspath(cur_state_path)) == os.path.normcase(os.path.abspath(job.project_state_path)):
+                return True
+        if cur_video and job.video_path:
+            if os.path.normcase(os.path.abspath(cur_video)) == os.path.normcase(os.path.abspath(job.video_path)):
+                return True
+        if cur_id and job.project_id and cur_id.lower() == job.project_id.lower():
+            return True
+        return False
+
+    def _refresh_bg_export_badge(self):
+        badge = getattr(self, "bg_export_badge", None)
+        if badge is None:
+            return
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            active_jobs = mgr.get_active_jobs()
+            if not active_jobs:
+                # Check if there is a recently completed job (within last 45 seconds)
+                import time
+                now = time.time()
+                recent_done = [
+                    j for j in mgr._jobs.values()
+                    if j.status == "completed" and (now - j.completed_at) < 45
+                ]
+                if recent_done:
+                    latest = sorted(recent_done, key=lambda j: j.completed_at, reverse=True)[0]
+                    self._on_global_bg_job_completed(latest.job_id, latest.output_path)
+                    return
+                badge.hide()
+                return
+
+            # Find matching active job or first active job
+            matching_job = None
+            for j in active_jobs:
+                if self._is_job_matching_current_project(j):
+                    matching_job = j
+                    break
+
+            if matching_job is not None:
+                self._on_global_bg_job_progress(matching_job.job_id, matching_job.percent, matching_job.message)
+            else:
+                top_job = active_jobs[0]
+                self._on_global_bg_job_progress(top_job.job_id, top_job.percent, top_job.message)
+        except Exception:
+            pass
+
+    def _on_global_bg_job_progress(self, job_id: str, percent: int, message: str):
+        badge = getattr(self, "bg_export_badge", None)
+        if badge is None:
+            return
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            job = mgr.get_job(job_id)
+            if not job or not job.is_active:
+                return
+
+            badge.setStyleSheet("""
+                QPushButton#bgExportBadge {
+                    background-color: #12362a;
+                    color: #34d399;
+                    border: 1px solid #10b981;
+                    border-radius: 10px;
+                    padding: 4px 12px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton#bgExportBadge:hover {
+                    background-color: #1a4d3c;
+                    border-color: #34d399;
+                    color: #ffffff;
+                }
+            """)
+
+            if self._is_job_matching_current_project(job):
+                if getattr(self, "_is_export_backgrounded", False):
+                    badge.setText(f"⚡ Exporting: {percent}% (Click to view)")
+                    badge.setToolTip(f"Exporting current project: {percent}%\n{message}\nClick to open progress dialog")
+                    badge.show()
+            else:
+                active = mgr.get_active_jobs()
+                if len(active) <= 1:
+                    badge.setText(f"⚡ [{job.project_name}]: {percent}%")
+                    badge.setToolTip(f"Background export: {job.project_name} ({percent}%)\n{message}\nClick to view background exports")
+                else:
+                    badge.setText(f"⚡ {len(active)} Exports in background ({percent}%)")
+                    badge.setToolTip(f"{len(active)} background exports active\nClick to view background exports")
+                badge.show()
+        except Exception:
+            pass
+
+    def _on_global_bg_job_completed(self, job_id: str, output_path: str):
+        badge = getattr(self, "bg_export_badge", None)
+        if badge is None:
+            return
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            job = mgr.get_job(job_id)
+            if not job:
+                return
+
+            badge.setStyleSheet("""
+                QPushButton#bgExportBadge {
+                    background-color: #064e3b;
+                    color: #a7f3d0;
+                    border: 1px solid #059669;
+                    border-radius: 10px;
+                    padding: 4px 12px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton#bgExportBadge:hover {
+                    background-color: #047857;
+                    color: #ffffff;
+                }
+            """)
+
+            if self._is_job_matching_current_project(job):
+                self._is_export_backgrounded = False
+                badge.setText(f"✓ Export Complete (Click to open)")
+                badge.setToolTip(f"Export complete!\nFile: {output_path}\nClick to open containing folder")
+                badge.show()
+                if hasattr(self, "export_btn"):
+                    self.export_btn.setEnabled(True)
+                    self.export_btn.setText("Export")
+                if hasattr(self, "progress_bar"):
+                    self.progress_bar.setValue(100)
+                self.log(f"[Export] Video export completed successfully: {output_path}")
+            else:
+                badge.setText(f"✓ [{job.project_name}] Exported (Click to open)")
+                badge.setToolTip(f"Background project {job.project_name} finished exporting!\nFile: {output_path}\nClick to open containing folder")
+                badge.show()
+                self.log(f"[Background Export] {job.project_name} completed: {output_path}")
+        except Exception:
+            pass
+
+    def _on_global_bg_job_failed(self, job_id: str, error: str):
+        badge = getattr(self, "bg_export_badge", None)
+        if badge is None:
+            return
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            job = BackgroundExportManager.get_instance().get_job(job_id)
+            name = job.project_name if job else "Project"
+            badge.setStyleSheet("""
+                QPushButton#bgExportBadge {
+                    background-color: #271418;
+                    color: #fca5a5;
+                    border: 1px solid #4c1d24;
+                    border-radius: 10px;
+                    padding: 4px 12px;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+                QPushButton#bgExportBadge:hover {
+                    background-color: #3d1b22;
+                    color: #ffffff;
+                }
+            """)
+            badge.setText(f"⚠ [{name}] Export Failed")
+            badge.setToolTip(f"Export failed: {error}\nClick to dismiss")
+            badge.show()
+        except Exception:
+            pass
+
+    def _on_global_bg_job_cancelled(self, job_id: str):
+        self._refresh_bg_export_badge()
+
+    def _on_global_bg_job_registered(self, job_id: str):
+        self._refresh_bg_export_badge()
+
+    def on_bg_export_badge_clicked(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from utils.background_export_manager import BackgroundExportManager
+        mgr = BackgroundExportManager.get_instance()
+        badge = getattr(self, "bg_export_badge", None)
+        badge_text = badge.text() if badge else ""
+
+        # 1. If badge indicates completion, open output folder
+        if badge_text.startswith("✓"):
+            completed = [j for j in mgr._jobs.values() if j.status == "completed"]
+            if completed:
+                latest = sorted(completed, key=lambda j: j.completed_at, reverse=True)[0]
+                if latest.output_path and os.path.exists(latest.output_path):
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(latest.output_path)))
+                elif latest.output_path:
+                    parent_dir = os.path.dirname(latest.output_path)
+                    if os.path.exists(parent_dir):
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(parent_dir))
+            badge.hide()
+            return
+
+        # 2. If failed, dismiss
+        if badge_text.startswith("⚠"):
+            self._refresh_bg_export_badge()
+            return
+
+        # 3. If active: check if current project is exporting
+        active_jobs = mgr.get_active_jobs()
+        if not active_jobs:
+            badge.hide()
+            return
+
+        current_job = None
+        for j in active_jobs:
+            if self._is_job_matching_current_project(j):
+                current_job = j
+                break
+
+        if current_job is not None and getattr(self, "export_progress_dialog", None) is not None:
+            self.show_export_progress_dialog()
+        else:
+            self.show_background_exports_manager_dialog()
+
+    def show_background_exports_manager_dialog(self):
+        """Open the Background Exports manager dialog."""
+        try:
+            from widgets.background_exports_dialog import BackgroundExportsDialog
+            dlg = BackgroundExportsDialog(self)
+            dlg.exec()
+            self._refresh_bg_export_badge()
+        except Exception as exc:
+            print(f"[Export] Could not open BackgroundExportsDialog: {exc}")
+
+    def open_another_project_in_new_window(self):
+        """Open the Launcher to select and edit another project in a new window."""
+        try:
+            from PySide6.QtCore import QTimer
+            from PySide6.QtWidgets import QApplication
+            from views.launcher import show_launcher
+            from utils.project_launch import initialize_editor_from_selection
+
+            selection = show_launcher(self)
+            if not selection:
+                return
+
+            new_window = self.__class__()
+            app = QApplication.instance()
+            if not hasattr(app, "_viustudio_all_windows"):
+                app._viustudio_all_windows = []
+            if self not in app._viustudio_all_windows:
+                app._viustudio_all_windows.append(self)
+            app._viustudio_all_windows.append(new_window)
+
+            new_window.destroyed.connect(
+                lambda _=None, w=new_window: app._viustudio_all_windows.remove(w)
+                if hasattr(app, "_viustudio_all_windows") and w in app._viustudio_all_windows else None
+            )
+
+            new_window.prepare_initial_editor_layout()
+            new_window.show()
+            QTimer.singleShot(100, lambda: initialize_editor_from_selection(new_window, selection))
+        except Exception as exc:
+            self.log(f"[Window] Could not open project in new window: {exc}")
+
+    def _update_background_export_banner(self, percent=None, message: str = ""):
+        pct = percent if percent is not None else (self.progress_bar.value() if hasattr(self, "progress_bar") else 0)
+        badge = getattr(self, "bg_export_badge", None)
+        if badge is not None:
+            badge.setText(f"⚡ Exporting: {pct}% (Click for details)")
+            badge.show()
+        if hasattr(self, "export_btn"):
+            self.export_btn.setEnabled(True)
+            self.export_btn.setText("Exporting…")
+
+    def attach_background_export(self, job):
+        """Reattach a running background export job when reopening a project in the editor."""
+        if job is None or not getattr(job, "is_active", False):
+            return
+        self.export_thread = job.worker
+        self._is_export_backgrounded = True
+        try:
+            job.worker.progress.connect(self.on_export_progress)
+        except Exception:
+            pass
+        try:
+            job.worker.finished.connect(self.on_export_finished)
+        except Exception:
+            pass
+        self._update_background_export_banner(job.percent, job.message)
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setValue(job.percent)
+        self.log(f"[Export] Reconnected to background export: {job.percent}%")
 
     def on_export_progress(self, percent: int, message: str):
         dlg = self._ensure_export_progress_dialog()
@@ -787,6 +1130,7 @@ class WorkflowActionsMixin:
         dlg.setLabelText("Exporting final video...\n\n" + "\n".join(self._export_progress_messages))
         if percent is None or int(percent) < 0:
             dlg.setRange(0, 0)
+            value = 0
         else:
             if dlg.maximum() == 0:
                 dlg.setRange(0, 100)
@@ -796,7 +1140,12 @@ class WorkflowActionsMixin:
                 self.progress_bar.setValue(value)
             except Exception:
                 pass
-        dlg.show()
+
+        is_bg = bool(getattr(self, "_is_export_backgrounded", False) or getattr(dlg, "is_backgrounded", lambda: False)())
+        if not is_bg:
+            dlg.show()
+        else:
+            self._update_background_export_banner(value, message_text)
 
     def get_whisper_model_name(self) -> str:
         selected = str(getattr(self, "selected_whisper_model_name", "auto") or "auto").strip().lower()

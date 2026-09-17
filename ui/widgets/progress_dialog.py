@@ -168,10 +168,6 @@ class ExportProgressDialog(QDialog):
     def setCancelButtonText(self, text: str):
         self.bg_btn.setText(str(text))
 
-    def closeEvent(self, event):
-        self.hide()
-        event.ignore()
-
 class StepWidget(QFrame):
     def __init__(self, name, parent=None):
         super().__init__(parent)

@@ -244,6 +244,33 @@ def _build_header_bar(gui):
     gui.project_title_label.setObjectName("commandProject")
     layout.addWidget(gui.project_title_label, 1)
 
+    gui.bg_export_badge = QPushButton("⚡ Exporting: 0%")
+    gui.bg_export_badge.setObjectName("bgExportBadge")
+    gui.bg_export_badge.setCursor(Qt.PointingHandCursor)
+    gui.bg_export_badge.setToolTip("Click to view export progress dialog")
+    gui.bg_export_badge.setStyleSheet("""
+        QPushButton#bgExportBadge {
+            background-color: #12362a;
+            color: #34d399;
+            border: 1px solid #10b981;
+            border-radius: 10px;
+            padding: 4px 12px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        QPushButton#bgExportBadge:hover {
+            background-color: #1a4d3c;
+            border-color: #34d399;
+            color: #ffffff;
+        }
+    """)
+    gui.bg_export_badge.hide()
+    if hasattr(gui, "on_bg_export_badge_clicked"):
+        gui.bg_export_badge.clicked.connect(gui.on_bg_export_badge_clicked)
+    elif hasattr(gui, "show_export_progress_dialog"):
+        gui.bg_export_badge.clicked.connect(gui.show_export_progress_dialog)
+    layout.addWidget(gui.bg_export_badge)
+
     gui.run_all_btn.setFixedSize(132, 40)
     gui.run_all_btn.setCursor(Qt.PointingHandCursor)
     layout.addWidget(gui.run_all_btn)
@@ -277,6 +304,14 @@ def _build_header_bar(gui):
     gui.more_actions_btn.setCursor(Qt.PointingHandCursor)
     more_menu = QMenu(gui.more_actions_btn)
     more_menu.setObjectName("headerMoreMenu")
+
+    gui.open_new_window_action = more_menu.addAction("Open Another Project in New Window…")
+    if hasattr(gui, "open_another_project_in_new_window"):
+        gui.open_new_window_action.triggered.connect(gui.open_another_project_in_new_window)
+    gui.view_bg_exports_action = more_menu.addAction("⚡ Background Exports…")
+    if hasattr(gui, "show_background_exports_manager_dialog"):
+        gui.view_bg_exports_action.triggered.connect(gui.show_background_exports_manager_dialog)
+    more_menu.addSeparator()
 
     gui.import_subtitle_action = more_menu.addAction("Import Translated SRT…")
     gui.import_subtitle_action.triggered.connect(gui.import_translated_srt)

@@ -1505,6 +1505,24 @@ class PipelineLifecycleMixin:
                 self.log(f"[Clean] Removed from recent: {video_path} -> {len(projects)} remaining")
             except Exception as e:
                 self.log(f"[Clean] Failed: {e}")
+        # Detach any running background export so BackgroundExportManager keeps running it
+        worker = getattr(self, "export_thread", None)
+        if worker is not None and getattr(worker, "isRunning", lambda: False)():
+            try:
+                from utils.background_export_manager import BackgroundExportManager
+                if BackgroundExportManager.get_instance().is_worker_registered(worker):
+                    try:
+                        worker.progress.disconnect(self.on_export_progress)
+                    except Exception:
+                        pass
+                    try:
+                        worker.finished.disconnect(self.on_export_finished)
+                    except Exception:
+                        pass
+                    setattr(self, "export_thread", None)
+            except Exception:
+                pass
+
         self._current_video_path = ""
         self._terminate_workers()
         self.hide()
@@ -1559,6 +1577,13 @@ class PipelineLifecycleMixin:
         for name in attrs:
             worker = getattr(self, name, None)
             if worker is not None:
+                if name == "export_thread":
+                    try:
+                        from utils.background_export_manager import BackgroundExportManager
+                        if BackgroundExportManager.get_instance().is_worker_registered(worker):
+                            continue
+                    except Exception:
+                        pass
                 try:
                     if getattr(worker, "isRunning", lambda: False)():
                         worker.requestInterruption()

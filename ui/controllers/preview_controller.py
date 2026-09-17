@@ -1581,6 +1581,36 @@ class PreviewController:
             project_state_path=project_state_path,
             project_temp_dir=self.gui.get_project_temp_dir("export"),
             timeline_clips=timeline_clips,
+            export_preset=self.gui.get_export_preset(),
+            video_bitrate_kbps=self.gui.get_output_bitrate_kbps(),
+            anti_duplicate_enabled=anti_dup,
+            anti_duplicate_settings=custom_ad_settings if anti_dup else None,
+        )
+        self.gui.export_thread.progress.connect(self.gui.on_export_progress)
+        self.gui.export_thread.finished.connect(self.gui.on_export_finished)
+        self.gui.export_thread.finished.connect(self._on_export_thread_done)
+
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            ps = getattr(self.gui, "current_project_state", None)
+            proj_id = str(getattr(ps, "project_id", "") or "") if ps else ""
+            proj_name = str(getattr(ps, "display_name", "") or os.path.basename(video_path) or proj_id or "Project") if ps else (os.path.basename(video_path) or "Project")
+            BackgroundExportManager.get_instance().register_job(
+                project_id=proj_id,
+                project_name=proj_name,
+                project_state_path=project_state_path,
+                video_path=video_path,
+                output_path=output_path,
+                worker=self.gui.export_thread,
+            )
+        except Exception as exc:
+            print(f"[Export] BackgroundExportManager register failed: {exc}")
+
+        self.gui.export_thread.start()
+
+    def _on_export_thread_done(self, *args):
+        """Clear the export_thread reference after the thread finishes.
+
         The result signal is emitted from inside ``run()`` before the native
         QThread has fully stopped, so release the reference only after the
         worker is idle.
@@ -1895,16 +1925,21 @@ class PreviewController:
             self.gui.update_workflow_stage_badges()
             self.gui.log(f"[Export] Final video exported successfully: {output_path}")
             self.gui.log("[Export] Kept current preview/subtitle state so you can continue editing after export.")
-            message = QMessageBox(self.gui)
-            message.setIcon(QMessageBox.Information)
-            message.setWindowTitle("Export completed")
-            message.setText("Video exported successfully.")
-            message.setInformativeText(output_path)
-            open_folder = message.addButton("Open Folder", QMessageBox.ActionRole)
-            message.addButton("Close", QMessageBox.AcceptRole)
-            message.exec()
-            if message.clickedButton() is open_folder:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(output_path)))
+            is_bg = bool(getattr(self.gui, "_is_export_backgrounded", False))
+            if not is_bg:
+                message = QMessageBox(self.gui)
+                message.setIcon(QMessageBox.Information)
+                message.setWindowTitle("Export completed")
+                message.setText("Video exported successfully.")
+                message.setInformativeText(output_path)
+                open_folder = message.addButton("Open Folder", QMessageBox.ActionRole)
+                message.addButton("Close", QMessageBox.AcceptRole)
+                message.exec()
+                if message.clickedButton() is open_folder:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(output_path)))
+            else:
+                if hasattr(self.gui, "statusBar") and self.gui.statusBar():
+                    self.gui.statusBar().showMessage(f"✓ Video exported successfully: {os.path.basename(output_path)}", 10000)
 
     def _on_auto_recap_export_finished(self, output_path, error):
         if not error and output_path:

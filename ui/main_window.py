@@ -1419,6 +1419,8 @@ class VideoTranslatorGUI(PipelineLifecycleMixin, MultiVideoTimelineMixin, AutoRe
         self.setup_ui()
         self._apply_reimagined_theme()
         self._configure_local_voice_mode_ui()
+        if hasattr(self, "_setup_background_export_listener"):
+            self._setup_background_export_listener()
         self._timeline_visual_refresh_timer = QTimer(self)
         self._timeline_visual_refresh_timer.setSingleShot(True)
         self._timeline_visual_refresh_timer.timeout.connect(self._run_pending_timeline_visual_refresh)

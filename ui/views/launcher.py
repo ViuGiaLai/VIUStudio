@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -72,6 +73,13 @@ def _save_recent_projects(settings, projects):
 
 def _project_pipeline_status(video_path: str = "", state_path: str = "") -> tuple[str, str]:
     """Read the persisted project stage without creating or modifying it."""
+    try:
+        from utils.background_export_manager import BackgroundExportManager
+        job = BackgroundExportManager.get_instance().get_job_for_project(state_path, video_path)
+        if job and job.is_active:
+            return f"⚡ Đang xuất: {job.percent}%", "#34d399"
+    except Exception:
+        pass
     if not state_path:
         name = os.path.splitext(os.path.basename(video_path))[0] or "project"
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower() or "project"
@@ -195,7 +203,56 @@ class ProjectCard(QFrame):
         )
         layout.addWidget(self.stage_badge, 0, Qt.AlignLeft)
 
+        self.card_progress_bar = QProgressBar(self)
+        self.card_progress_bar.setRange(0, 100)
+        self.card_progress_bar.setFixedHeight(6)
+        self.card_progress_bar.setTextVisible(False)
+        self.card_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #0b1320;
+                border: 1px solid #1e293b;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #34d399;
+                border-radius: 3px;
+            }
+        """)
+        layout.addWidget(self.card_progress_bar)
+        self.card_progress_bar.hide()
+
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            job = BackgroundExportManager.get_instance().get_job_for_project(project_state_path, video_path)
+            if job and job.is_active:
+                self.stage_badge.setText(f"⚡ Đang xuất: {job.percent}%")
+                self.stage_badge.setStyleSheet(
+                    "background-color: #12362a; color: #34d399; border: 1px solid #10b981; "
+                    "border-radius: 10px; padding: 4px 10px; font-size: 10px; font-weight: 700;"
+                )
+                self.card_progress_bar.setValue(job.percent)
+                self.card_progress_bar.show()
+        except Exception:
+            pass
+
         self._load_thumb(thumbnail_cache_dir)
+
+    def update_bg_progress(self, percent: int, message: str = "") -> None:
+        self.stage_badge.setText(f"⚡ Đang xuất: {percent}%")
+        self.stage_badge.setStyleSheet(
+            "background-color: #12362a; color: #34d399; border: 1px solid #10b981; "
+            "border-radius: 10px; padding: 4px 10px; font-size: 10px; font-weight: 700;"
+        )
+        self.card_progress_bar.setValue(percent)
+        self.card_progress_bar.show()
+
+    def on_bg_completed(self) -> None:
+        self.stage_badge.setText("Export complete")
+        self.stage_badge.setStyleSheet(
+            "background-color: #16263a; color: #6ee7d6; border: none; "
+            "border-radius: 10px; padding: 4px 10px; font-size: 10px; font-weight: 700;"
+        )
+        self.card_progress_bar.hide()
 
     def _load_thumb(self, cache_dir):
         if not self.video_path or not os.path.exists(self.video_path):
@@ -478,8 +535,25 @@ class LauncherWindow(QDialog):
         """)
 
         self._build_ui()
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            mgr.job_progress.connect(self._on_bg_job_progress)
+            mgr.job_completed.connect(self._on_bg_job_completed)
+            mgr.job_failed.connect(lambda _jid, _err: self._refresh_background_exports())
+            mgr.job_cancelled.connect(lambda _jid: self._refresh_background_exports())
+            mgr.job_registered.connect(lambda _jid: self._refresh_background_exports())
+        except Exception:
+            pass
+
+        self._bg_sync_timer = QTimer(self)
+        self._bg_sync_timer.setInterval(800)
+        self._bg_sync_timer.timeout.connect(self._refresh_background_exports)
+        self._bg_sync_timer.start()
+
         QTimer.singleShot(0, self._load_recent)
         QTimer.singleShot(0, self._validate_resources_for_device)
+        QTimer.singleShot(50, self._refresh_background_exports)
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -769,6 +843,83 @@ class LauncherWindow(QDialog):
         glow.setColor(QColor(92, 83, 220, 40))
         header_frame.setGraphicsEffect(glow)
 
+        # Background exports notification and tracking panel
+        self.bg_exports_frame = QFrame()
+        self.bg_exports_frame.setObjectName("bgExportsFrame")
+        self.bg_exports_frame.setStyleSheet("""
+            QFrame#bgExportsFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0d2824, stop:1 #0c1c28);
+                border: 1px solid #1e5c4f;
+                border-radius: 14px;
+            }
+            QLabel#bgExportsTitle {
+                color: #34d399;
+                font-size: 12px;
+                font-weight: 800;
+                letter-spacing: 0.8px;
+            }
+            QProgressBar {
+                background-color: #0b1320;
+                border: 1px solid #1e293b;
+                border-radius: 5px;
+                text-align: center;
+                color: #ffffff;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QProgressBar::chunk {
+                background-color: #34d399;
+                border-radius: 5px;
+            }
+            QPushButton#bgActionBtn {
+                background-color: #12362a;
+                color: #34d399;
+                border: 1px solid #10b981;
+                border-radius: 7px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QPushButton#bgActionBtn:hover {
+                background-color: #1a4d3c;
+                border-color: #34d399;
+                color: #ffffff;
+            }
+            QPushButton#bgCancelBtn {
+                background-color: #271418;
+                color: #fca5a5;
+                border: 1px solid #4c1d24;
+                border-radius: 7px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QPushButton#bgCancelBtn:hover {
+                background-color: #3d1b22;
+                border-color: #ef4444;
+                color: #ffffff;
+            }
+        """)
+        bg_main_layout = QVBoxLayout(self.bg_exports_frame)
+        bg_main_layout.setContentsMargins(16, 12, 16, 12)
+        bg_main_layout.setSpacing(10)
+
+        bg_header_row = QHBoxLayout()
+        bg_title = QLabel("⚡ ĐANG XUẤT VIDEO TRONG NỀN (BACKGROUND EXPORTS)", self.bg_exports_frame)
+        bg_title.setObjectName("bgExportsTitle")
+        bg_header_row.addWidget(bg_title)
+        bg_header_row.addStretch()
+        bg_main_layout.addLayout(bg_header_row)
+
+        self.bg_jobs_container = QWidget(self.bg_exports_frame)
+        self.bg_jobs_layout = QVBoxLayout(self.bg_jobs_container)
+        self.bg_jobs_layout.setContentsMargins(0, 0, 0, 0)
+        self.bg_jobs_layout.setSpacing(8)
+        bg_main_layout.addWidget(self.bg_jobs_container)
+
+        self.bg_exports_frame.hide()
+        main_column.addWidget(self.bg_exports_frame)
+
         self.section_label = QLabel("YOUR PROJECTS  /  Pick up where you left off")
         self.section_label.setStyleSheet("font-size: 12px; font-weight: 800; color: #818cf8; letter-spacing: 0.8px; text-transform: uppercase;")
         self.section_label.setObjectName("launcherSectionLabel")
@@ -871,7 +1022,155 @@ class LauncherWindow(QDialog):
         self._save_device_env()
         super().accept()
 
+    def _refresh_background_exports(self):
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            jobs = mgr.get_active_jobs()
+            if not jobs:
+                if hasattr(self, "bg_exports_frame") and self.bg_exports_frame.isVisible():
+                    self.bg_exports_frame.hide()
+                if hasattr(self, "_bg_job_rows"):
+                    for row_data in self._bg_job_rows.values():
+                        if row_data.get("widget"):
+                            row_data["widget"].deleteLater()
+                    self._bg_job_rows.clear()
+                return
+
+            self.bg_exports_frame.show()
+            if not hasattr(self, "_bg_job_rows"):
+                self._bg_job_rows = {}
+
+            active_ids = {job.job_id for job in jobs}
+
+            # Clean up rows for completed/cancelled jobs
+            for jid in list(self._bg_job_rows.keys()):
+                if jid not in active_ids:
+                    row_data = self._bg_job_rows.pop(jid)
+                    if row_data.get("widget"):
+                        row_data["widget"].deleteLater()
+
+            for job in jobs:
+                if job.job_id in self._bg_job_rows:
+                    row = self._bg_job_rows[job.job_id]
+                    row["pbar"].setValue(job.percent)
+                    row["status_lbl"].setText(f"{job.percent}%  ({job.message or 'Exporting...'})")
+                else:
+                    row_widget = QWidget()
+                    row_layout = QHBoxLayout(row_widget)
+                    row_layout.setContentsMargins(0, 2, 0, 2)
+                    row_layout.setSpacing(10)
+
+                    name_lbl = QLabel(f"🎬 {job.project_name}", row_widget)
+                    name_lbl.setStyleSheet("color: #edf2ff; font-weight: 700; font-size: 12px;")
+                    name_lbl.setFixedWidth(180)
+                    row_layout.addWidget(name_lbl)
+
+                    pbar = QProgressBar(row_widget)
+                    pbar.setRange(0, 100)
+                    pbar.setValue(job.percent)
+                    pbar.setFixedHeight(16)
+                    row_layout.addWidget(pbar, 1)
+
+                    status_lbl = QLabel(f"{job.percent}%  ({job.message or 'Exporting...'})", row_widget)
+                    status_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
+                    status_lbl.setFixedWidth(200)
+                    row_layout.addWidget(status_lbl)
+
+                    btn_open = QPushButton("Mở dự án", row_widget)
+                    btn_open.setObjectName("bgActionBtn")
+                    btn_open.setCursor(Qt.PointingHandCursor)
+                    btn_open.clicked.connect(lambda _=False, j=job: self._open_job_project(j))
+                    row_layout.addWidget(btn_open)
+
+                    btn_cancel = QPushButton("Hủy", row_widget)
+                    btn_cancel.setObjectName("bgCancelBtn")
+                    btn_cancel.setCursor(Qt.PointingHandCursor)
+                    btn_cancel.clicked.connect(lambda _=False, jid=job.job_id: mgr.cancel_job(jid))
+                    row_layout.addWidget(btn_cancel)
+
+                    self.bg_jobs_layout.addWidget(row_widget)
+                    self._bg_job_rows[job.job_id] = {
+                        "widget": row_widget,
+                        "pbar": pbar,
+                        "status_lbl": status_lbl,
+                    }
+        except Exception:
+            pass
+
+    def _open_job_project(self, job):
+        if getattr(self, "_is_accepting", False):
+            return
+        self.selected_video = job.video_path
+        self.selected_project_state_path = job.project_state_path
+        self.accept()
+
+    def _on_bg_job_progress(self, job_id: str, percent: int, message: str):
+        try:
+            if hasattr(self, "_bg_job_rows") and job_id in self._bg_job_rows:
+                row = self._bg_job_rows[job_id]
+                row["pbar"].setValue(percent)
+                row["status_lbl"].setText(f"{percent}%  ({message or 'Exporting...'})")
+            from utils.background_export_manager import BackgroundExportManager
+            job = BackgroundExportManager.get_instance().get_job(job_id)
+            if not job:
+                return
+            for i in range(self.grid.count()):
+                item = self.grid.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), ProjectCard):
+                    card = item.widget()
+                    is_match = False
+                    if job.project_state_path and card.project_state_path:
+                        is_match = (os.path.normcase(os.path.abspath(card.project_state_path)) == os.path.normcase(os.path.abspath(job.project_state_path)))
+                    elif job.video_path and card.video_path:
+                        is_match = (os.path.normcase(os.path.abspath(card.video_path)) == os.path.normcase(os.path.abspath(job.video_path)))
+                    if is_match:
+                        card.update_bg_progress(percent, message)
+        except Exception:
+            pass
+
+    def _on_bg_job_completed(self, job_id: str, output_path: str):
+        self._refresh_background_exports()
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            job = BackgroundExportManager.get_instance().get_job(job_id)
+            if not job:
+                return
+            for i in range(self.grid.count()):
+                item = self.grid.itemAt(i)
+                if item and item.widget() and isinstance(item.widget(), ProjectCard):
+                    card = item.widget()
+                    is_match = False
+                    if job.project_state_path and card.project_state_path:
+                        is_match = (os.path.normcase(os.path.abspath(card.project_state_path)) == os.path.normcase(os.path.abspath(job.project_state_path)))
+                    elif job.video_path and card.video_path:
+                        is_match = (os.path.normcase(os.path.abspath(card.video_path)) == os.path.normcase(os.path.abspath(job.video_path)))
+                    if is_match:
+                        card.on_bg_completed()
+        except Exception:
+            pass
+
     def reject(self):
+        try:
+            from utils.background_export_manager import BackgroundExportManager
+            mgr = BackgroundExportManager.get_instance()
+            if mgr.has_active_exports():
+                from PySide6.QtWidgets import QMessageBox
+                confirm = QMessageBox(
+                    QMessageBox.Question,
+                    "Background Export in Progress",
+                    "There are active video exports running in the background.\n\n"
+                    "Do you want to cancel the exports and exit VIUStudio?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    self,
+                )
+                confirm.setStyleSheet(MSG_STYLE)
+                if confirm.exec() != QMessageBox.Yes:
+                    return
+                for job in mgr.get_active_jobs():
+                    mgr.cancel_job(job.job_id)
+        except Exception:
+            pass
         self._stop_loader_timer()
         super().reject()
 

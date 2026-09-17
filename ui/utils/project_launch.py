@@ -96,4 +96,19 @@ def initialize_editor_from_selection(window, selection) -> None:
             250,
             lambda: window.schedule_timeline_visual_refresh(waveform=True, thumbnails=True),
         )
+    try:
+        from utils.background_export_manager import BackgroundExportManager
+        mgr = BackgroundExportManager.get_instance()
+        job = mgr.get_job_for_project(state_path, selected_video)
+        if job and job.is_active:
+            if hasattr(window, "attach_background_export"):
+                window.attach_background_export(job)
+        else:
+            active_jobs = mgr.get_active_jobs()
+            if active_jobs and hasattr(window, "bg_export_badge"):
+                window.bg_export_badge.setText(f"⚡ Exporting: {active_jobs[0].project_name} ({active_jobs[0].percent}%)")
+                window.bg_export_badge.show()
+    except Exception as exc:
+        print(f"[ProjectLaunch] Background export check: {exc}")
+
     _mark("editor ready")
