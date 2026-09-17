@@ -241,10 +241,9 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_dir=str(project_root / "upx"),
-    # Keep the console build as the debugging/default configuration.  The
-    # windowed production spec sets VIUSTUDIO_WINDOWED_BUILD=1 before executing
-    # this file.
-    console=os.environ.get("VIUSTUDIO_WINDOWED_BUILD", "0").strip() != "1",
+    # Default to windowed (no console) for desktop GUI application.
+    # Set VIUSTUDIO_CONSOLE_BUILD=1 only when building for CLI debugging.
+    console=os.environ.get("VIUSTUDIO_CONSOLE_BUILD", "0").strip() == "1",
     icon=str(project_root / "assets" / "viustudio.ico"),
     disable_windowed_traceback=False,
 )

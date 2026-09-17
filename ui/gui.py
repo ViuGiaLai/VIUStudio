@@ -44,6 +44,23 @@ def _acquire_single_instance() -> bool:
         # A mutex failure should never prevent the application from starting.
         return True
 
+def _hide_console_window_if_present() -> None:
+    """Hide and detach from any Windows console window if launched via python.exe."""
+    if os.name != "nt":
+        return
+    if os.environ.get("VIUSTUDIO_DEBUG_CONSOLE", "").strip() in ("1", "true", "yes"):
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
+        ctypes.windll.kernel32.FreeConsole()
+    except Exception:
+        pass
+
+
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -55,6 +72,9 @@ if __name__ == "__main__" and ("--worker-server" in sys.argv or os.getenv("VIUST
 
     remote_api_server_main()
     raise SystemExit(0)
+
+if __name__ == "__main__":
+    _hide_console_window_if_present()
 
 if __name__ == "__main__" and not _acquire_single_instance():
     raise SystemExit(0)

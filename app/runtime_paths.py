@@ -120,3 +120,18 @@ def sanitize_ffmpeg_diagnostics(text: object) -> str:
         flags=re.IGNORECASE | re.MULTILINE,
     )
     return re.sub(r"\n{3,}", "\n\n", value).strip()
+
+
+def get_python_exe(prefer_windowless: bool = True) -> str:
+    """Return the Python executable path, preferring pythonw.exe on Windows.
+
+    When launching child Python processes or pip in a GUI application, using
+    pythonw.exe prevents Windows (especially Windows 11 terminal emulator) from
+    popping up or flashing any console window titled 'python.exe' or 'pyt...'.
+    """
+    if prefer_windowless and os.name == "nt" and not getattr(sys, "frozen", False):
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if os.path.isfile(pythonw):
+            return pythonw
+    return sys.executable
+

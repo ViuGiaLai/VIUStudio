@@ -171,6 +171,7 @@ class AutoRecapEngine:
                     [ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "nullsrc=size=64x64:duration=0.1",
                      "-c:v", "h264_nvenc", "-preset", "p1", "-frames:v", "1", "-f", "null", "-"],
                     capture_output=True, timeout=8,
+                    **subprocess_hidden_kwargs(),
                 )
                 cls._nvenc_available = (probe.returncode == 0)
             except Exception:
@@ -185,6 +186,7 @@ class AutoRecapEngine:
                     [ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "nullsrc=size=64x64:duration=0.1",
                      "-c:v", "h264_qsv", "-global_quality", "28", "-frames:v", "1", "-f", "null", "-"],
                     capture_output=True, timeout=8,
+                    **subprocess_hidden_kwargs(),
                 )
                 cls._qsv_available = (probe.returncode == 0)
             except Exception:

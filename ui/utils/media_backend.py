@@ -821,6 +821,8 @@ class MpvMediaPlayerBackend(QObject):
             "keep_open": "always",
             "sub_auto": "no",
             "sub_ass_override": "no",
+            "terminal": False,
+            "msg_level": "all=no",
         }
         # FFmpeg export passes this directory to libass. Give MPV the same
         # bundled faces so subtitle wrapping and the full-block background

@@ -16,7 +16,16 @@ import uuid
 import stat
 from pathlib import Path
 
-from runtime_paths import app_path, bin_path, bundle_root, join_root, models_path, subprocess_hidden_kwargs, subprocess_text_kwargs
+from runtime_paths import (
+    app_path,
+    bin_path,
+    bundle_root,
+    get_python_exe,
+    join_root,
+    models_path,
+    subprocess_hidden_kwargs,
+    subprocess_text_kwargs,
+)
 
 
 class ResourceDownloadService:
@@ -1574,7 +1583,7 @@ class ResourceDownloadService:
     @staticmethod
     def _python_module_imports(module_name: str) -> bool:
         result = subprocess.run(
-            [sys.executable, "-c", f"import {module_name}"],
+            [get_python_exe(), "-c", f"import {module_name}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=60,
@@ -1585,7 +1594,7 @@ class ResourceDownloadService:
     @staticmethod
     def _pip_runtime_usable() -> bool:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "--version"],
+            [get_python_exe(), "-m", "pip", "--version"],
             capture_output=True,
             timeout=60,
             **subprocess_text_kwargs(),
@@ -1606,7 +1615,7 @@ class ResourceDownloadService:
             "raise SystemExit(main(['install','--force-reinstall','--no-index',w]))"
         )
         result = subprocess.run(
-            [sys.executable, "-c", repair_script, wheel_path],
+            [get_python_exe(), "-c", repair_script, wheel_path],
             capture_output=True,
             timeout=600,
             **subprocess_text_kwargs(),
@@ -1623,7 +1632,7 @@ class ResourceDownloadService:
             raise RuntimeError("pip is still unavailable after automatic repair.")
 
         command = [
-            sys.executable,
+            get_python_exe(),
             "-m",
             "pip",
             "install",
@@ -1679,7 +1688,7 @@ class ResourceDownloadService:
         if not self._pip_runtime_usable():
             raise RuntimeError("pip is still unavailable after automatic repair.")
         command = [
-            sys.executable,
+            get_python_exe(),
             "-m",
             "pip",
             "install",
@@ -1757,7 +1766,7 @@ class ResourceDownloadService:
         if progress_cb:
             progress_cb(20, "Installing Kokoro English pronunciation data...")
         process = subprocess.run(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
+            [get_python_exe(), "-m", "spacy", "download", "en_core_web_sm"],
             capture_output=True,
             timeout=900,
             **subprocess_text_kwargs(),

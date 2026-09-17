@@ -10,7 +10,7 @@ import urllib.request
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QMessageBox
 from worker_adapters import AutoRecapWorker, PrepareWorkflowWorker
-from runtime_paths import subprocess_hidden_kwargs
+from runtime_paths import get_python_exe, subprocess_hidden_kwargs
 from utils.thread_lifecycle import release_thread_when_stopped
 
 # Progress events are part of the application package.  ``models/`` is also
@@ -195,9 +195,10 @@ class PipelineController:
         # Starting it with no arguments would open a second launcher window;
         # the worker entrypoint then runs the HTTP server without importing the
         # GUI or creating a QApplication.
+        worker_python = get_python_exe()
         worker_command = ([sys.executable, "--worker-server"]
                           if getattr(sys, "frozen", False)
-                          else [sys.executable, server_script])
+                          else [worker_python, server_script])
         self.local_worker_process = subprocess.Popen(
             worker_command,
             cwd=app_root,

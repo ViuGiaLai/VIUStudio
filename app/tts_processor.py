@@ -10,7 +10,7 @@ import time
 import wave
 
 from dotenv import load_dotenv
-from runtime_paths import app_path, bin_path, bundle_root, models_path, temp_path, subprocess_text_kwargs
+from runtime_paths import app_path, bin_path, bundle_root, get_python_exe, models_path, temp_path, subprocess_hidden_kwargs, subprocess_text_kwargs
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(os.path.dirname(BASE_DIR), ".env")
 if os.path.exists(ENV_PATH):
@@ -103,7 +103,7 @@ def _ensure_zerotts_runtime(*, on_progress: callable = None):
                 on_progress("Upgrading ZeroTTS runtime to version >= 0.1.5...")
             subprocess.run(
                 [
-                    sys.executable,
+                    get_python_exe(),
                     "-m",
                     "pip",
                     "install",
@@ -115,6 +115,7 @@ def _ensure_zerotts_runtime(*, on_progress: callable = None):
                 ],
                 check=True,
                 capture_output=True,
+                **subprocess_hidden_kwargs(),
             )
             import importlib
             importlib.invalidate_caches()

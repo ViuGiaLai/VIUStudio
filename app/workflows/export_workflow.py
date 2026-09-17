@@ -163,7 +163,7 @@ class ExportWorkflow:
             return audio_path
         try:
             import subprocess
-            from runtime_paths import bin_path
+            from runtime_paths import bin_path, subprocess_hidden_kwargs
             ffmpeg_exe = str(bin_path("ffmpeg", "ffmpeg.exe"))
             delay = float(delay_seconds)
             os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
@@ -178,7 +178,7 @@ class ExportWorkflow:
                 "-ar", "48000", "-ac", "2",
                 output_path,
             ]
-            subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+            subprocess.run(cmd, capture_output=True, check=True, timeout=120, **subprocess_hidden_kwargs())
             if os.path.isfile(output_path):
                 return output_path
         except Exception as a_exc:
