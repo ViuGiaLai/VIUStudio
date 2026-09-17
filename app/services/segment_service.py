@@ -94,4 +94,53 @@ class SegmentService:
                 if key in seg:
                     model.metadata[key] = seg.get(key)
             models.append(model)
+        return self.expand_short_segments_into_gaps(models)
+
+    def expand_short_segments_into_gaps(self, models: list[Segment], safe_gap_seconds: float = 0.08) -> list[Segment]:
+        try:
+            from app.services.segment_regroup_service import SegmentRegroupService
+        except ImportError:
+            from services.segment_regroup_service import SegmentRegroupService
+
+        if not models:
+            return []
+
+        raw_cues = []
+        for model in models:
+            s_start = float(getattr(model, "start", 0.0) or 0.0)
+            s_end = float(getattr(model, "end", s_start) or s_start)
+            cue = {
+                "id": getattr(model, "id", 0),
+                "start": s_start,
+                "end": s_end,
+                "sub_start": float(model.metadata.get("sub_start", s_start)),
+                "sub_end": float(model.metadata.get("sub_end", s_end)),
+                "voice_start": float(model.metadata.get("voice_start", s_start)),
+                "voice_end": float(model.metadata.get("voice_end", s_end)),
+                "final_text": getattr(model, "final_text", ""),
+                "tts_text": getattr(model, "tts_text", ""),
+                "dubbing_vi": getattr(model, "tts_text", "") or getattr(model, "final_text", ""),
+                "raw_translation": getattr(model, "raw_translation", ""),
+                "original_text": getattr(model, "original_text", ""),
+                "text": getattr(model, "subtitle_text", ""),
+            }
+            raw_cues.append(cue)
+
+        expanded = SegmentRegroupService.expand_short_cues_into_gaps(raw_cues, safe_gap_seconds=safe_gap_seconds)
+        for model, exp in zip(models, expanded):
+            # Subtitle timeline is strictly IMMUTABLE
+            model.start = exp["sub_start"]
+            model.end = exp["sub_end"]
+            model.tts_text = exp.get("tts_text", model.tts_text)
+            model.metadata["sub_start"] = exp["sub_start"]
+            model.metadata["sub_end"] = exp["sub_end"]
+            model.metadata["voice_start"] = exp["voice_start"]
+            model.metadata["voice_end"] = exp["voice_end"]
+            model.metadata["_audio_start"] = exp["voice_start"]
+            model.metadata["_audio_end"] = exp["voice_end"]
+            model.metadata["fit_quality"] = exp.get("fit_quality", "natural")
+            model.metadata["timing_conflict"] = exp.get("timing_conflict", False)
+            if "overflow_seconds" in exp:
+                model.metadata["overflow_seconds"] = exp["overflow_seconds"]
+
         return models

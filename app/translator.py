@@ -11,7 +11,18 @@ env_path = os.path.join(base_dir, ".env")
 load_dotenv(env_path)
 
 
-def translate_segments_to_srt(srt_text, model_path=None, src_lang="auto", target_lang="vi", enable_polish=True, optimize_subtitles=False, style_instruction=""):
+def translate_segments_to_srt(
+    srt_text,
+    model_path=None,
+    src_lang="auto",
+    target_lang="vi",
+    enable_polish=True,
+    optimize_subtitles=False,
+    style_instruction="",
+    on_progress=None,
+    cancellation_check=None,
+    **kwargs,
+):
     from translation import TranslationOrchestrator
 
     orchestrator = TranslationOrchestrator()
@@ -22,6 +33,8 @@ def translate_segments_to_srt(srt_text, model_path=None, src_lang="auto", target
         enable_polish=enable_polish,
         optimize_subtitles=optimize_subtitles,
         style_instruction=style_instruction,
+        on_progress=on_progress,
+        cancellation_check=cancellation_check,
     )
     if not result.success:
         raise TranslationError("; ".join(result.errors) or "Translation failed.")
@@ -37,6 +50,9 @@ def translate_segments(
     optimize_subtitles=False,
     style_instruction="",
     batch_callback=None,
+    on_progress=None,
+    cancellation_check=None,
+    **kwargs,
 ):
     from translation import TranslationOrchestrator
 
@@ -49,6 +65,8 @@ def translate_segments(
         optimize_subtitles=optimize_subtitles,
         style_instruction=style_instruction,
         batch_callback=batch_callback,
+        on_progress=on_progress,
+        cancellation_check=cancellation_check,
     )
     if not result.success:
         raise TranslationError("; ".join(result.errors) or "Translation failed.")

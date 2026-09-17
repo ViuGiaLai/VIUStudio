@@ -44,7 +44,7 @@ def _acquire_single_instance() -> bool:
         # A mutex failure should never prevent the application from starting.
         return True
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication
 
 # Keep the worker entrypoint before the GUI import.  In a windowed PyInstaller
@@ -221,6 +221,7 @@ if __name__ == "__main__":
     os.chdir(app_root)
     runtime_logs = _capture_runtime_output()
     app = QApplication(sys.argv)
+    open_child_windows = []
 
     from views.launcher import show_launcher, LauncherWindow
     selection = show_launcher(None)
@@ -231,6 +232,16 @@ if __name__ == "__main__":
         from views.srt_tts_window import SrtTtsWindow
         window = SrtTtsWindow(app_root)
         window.show()
+    elif isinstance(selection, dict) and selection.get("launch_mode") == "movie_review":
+        from views.movie_review_editor import MovieReviewEditorWindow
+        window = MovieReviewEditorWindow(app_root)
+        window.setAttribute(Qt.WA_DeleteOnClose)
+        open_child_windows.append(window)
+        window.destroyed.connect(
+            lambda _=None, child=window: open_child_windows.remove(child)
+            if child in open_child_windows else None
+        )
+        window.showMaximized()
     else:
         LauncherWindow.add_recent(None, selection)
         window = VideoTranslatorGUI()

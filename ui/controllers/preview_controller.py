@@ -1581,23 +1581,6 @@ class PreviewController:
             project_state_path=project_state_path,
             project_temp_dir=self.gui.get_project_temp_dir("export"),
             timeline_clips=timeline_clips,
-            export_preset=self.gui.get_export_preset(),
-            video_bitrate_kbps=self.gui.get_output_bitrate_kbps(),
-            anti_duplicate_enabled=anti_dup,
-            anti_duplicate_settings=custom_ad_settings if anti_dup else None,
-        )
-        self.gui.export_thread.progress.connect(self.gui.on_export_progress)
-        self.gui.export_thread.finished.connect(self.gui.on_export_finished)
-        # Do NOT use deleteLater() here — it destroys the C++ object while
-        # self.gui.export_thread still holds the Python reference, causing
-        # "Internal C++ object already deleted" on the next Export click.
-        # Instead, clear the reference once the thread is truly done.
-        self.gui.export_thread.finished.connect(self._on_export_thread_done)
-        self.gui.export_thread.start()
-
-    def _on_export_thread_done(self, *args):
-        """Clear the export_thread reference after the thread finishes.
-
         The result signal is emitted from inside ``run()`` before the native
         QThread has fully stopped, so release the reference only after the
         worker is idle.

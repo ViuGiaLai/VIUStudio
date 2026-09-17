@@ -36,18 +36,23 @@ class TranslationModelRoleTests(unittest.TestCase):
         _provider, translate_polisher = orchestrator._resolve_ai_provider(role="translate")
         _provider2, quality_polisher = orchestrator._resolve_ai_provider(role="quality")
 
-        self.assertEqual(translate_polisher.model_name, "gemini-2.5-flash")
+        self.assertEqual(translate_polisher.model_name, "gemini-3.6-flash")
         self.assertEqual(quality_polisher.model_name, "gemini-2.5-pro-custom")
 
-    def test_quality_role_defaults_to_pro_for_gemini(self):
-        # No dedicated env: the quality role falls back to gemini-2.5-pro
-        # while the translate role keeps the fast flash default.
+    def test_quality_role_defaults_to_flash_for_gemini(self):
+        # No dedicated env: the quality role uses the available Flash model.
         orchestrator = TranslationOrchestrator()
         _provider, translate_polisher = orchestrator._resolve_ai_provider(role="translate")
         _provider2, quality_polisher = orchestrator._resolve_ai_provider(role="quality")
 
-        self.assertEqual(translate_polisher.model_name, "gemini-2.5-flash")
-        self.assertEqual(quality_polisher.model_name, "gemini-2.5-pro")
+        self.assertEqual(translate_polisher.model_name, "gemini-3.6-flash")
+        self.assertEqual(quality_polisher.model_name, "gemini-3.6-flash")
+
+    def test_legacy_unavailable_pro_model_is_downgraded_to_flash(self):
+        os.environ["GOOGLE_AI_STUDIO_POLISH_MODEL"] = "models/gemini-2.5-pro"
+        orchestrator = TranslationOrchestrator()
+        _provider, quality_polisher = orchestrator._resolve_ai_provider(role="quality")
+        self.assertEqual(quality_polisher.model_name, "gemini-3.6-flash")
 
 
 if __name__ == "__main__":

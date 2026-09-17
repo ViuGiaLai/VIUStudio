@@ -89,7 +89,109 @@ def normalize_subtitle_timing(segments, gap_seconds: float = 0.04):
             if previous["end"] <= previous["start"]:
                 normalized.pop()
         normalized.append(item)
-    return normalized
+    return expand_short_cues_into_gaps(normalized, safe_gap_seconds=safe_gap)
+
+
+try:
+    from app.services.segment_regroup_service import SegmentRegroupService
+except ImportError:
+    from services.segment_regroup_service import SegmentRegroupService
+
+SAFE_GAP = SegmentRegroupService.SAFE_GAP
+MAX_PER_NUDGE = SegmentRegroupService.MAX_PER_NUDGE
+MAX_CUMULATIVE_DRIFT = SegmentRegroupService.MAX_CUMULATIVE_DRIFT
+MAX_LEADING = SegmentRegroupService.MAX_LEADING
+TARGET_MAX_SPEED = SegmentRegroupService.TARGET_MAX_SPEED
+HARD_MAX_SPEED = SegmentRegroupService.HARD_MAX_SPEED
+is_semantic_shortening_safe = SegmentRegroupService.is_semantic_shortening_safe
+generate_shorten_candidates = SegmentRegroupService.generate_shorten_candidates
+estimate_tts_duration = SegmentRegroupService.estimate_tts_duration
+estimate_tts_speed = SegmentRegroupService.estimate_tts_speed
+
+
+def compute_natural_cue_duration(text: str) -> float:
+    """Compute the natural minimum duration (seconds) needed for comfortable
+    speech articulation and human reading of a subtitle cue.
+    """
+    return SegmentRegroupService.compute_natural_cue_duration(text)
+
+
+def shorten_text_for_tts(
+    text: str,
+    available_duration: float,
+    *,
+    max_words: int | None = None,
+) -> str:
+    """Shorten translation text when time slot is strictly constrained and cannot expand,
+    allowing TTS to articulate naturally without being forced into high speedups (> 1.18x).
+    """
+    return SegmentRegroupService.shorten_text_for_tts(text, available_duration, max_words=max_words)
+
+
+def expand_short_cues_into_gaps(
+    segments,
+    *,
+    min_cue_duration: float = 0.8,
+    safe_gap_seconds: float = 0.08,
+    max_timeline_duration: float | None = None,
+    video_duration: float | None = None,
+):
+    """Extend artificially short cues into silence gaps with strict synchrony constraints:
+    1. Subtitle timeline (sub_start, sub_end, start, end) is strictly IMMUTABLE to preserve video sync.
+    2. TTS window (voice_start, voice_end) is expanded into silence without cumulative ripple drift.
+    3. Trailing expansion bounded by next_sub_start - safe_gap.
+    4. Ripple nudge capped at MAX_PER_NUDGE (0.15s) and MAX_CUMULATIVE_DRIFT (0.20s).
+    5. Leading expansion computed via available_leading = voice_start - prev_sub_end - safe_gap.
+    6. Multi-level candidate shortening tested against required speed <= 1.15 (natural) or <= 1.20 (acceptable).
+    7. If even shortest candidate requires speed > 1.20, marked as timing_conflict = True without truncating.
+    """
+    return SegmentRegroupService.expand_short_cues_into_gaps(
+        segments,
+        min_cue_duration=min_cue_duration,
+        safe_gap_seconds=safe_gap_seconds,
+        max_timeline_duration=max_timeline_duration,
+        video_duration=video_duration,
+    )
+
+
+
+def align_segments_to_video_start(segments: list, first_video_start: float, offset_if_relative: bool = True) -> list:
+    """Ensure subtitle segments start strictly from the first video clip on the timeline,
+    skipping any intro clips/images. If the first cue starts before first_video_start
+    and offset_if_relative is True, all cues are offset so that the first cue aligns to first_video_start.
+    Any cue lying entirely inside the intro is dropped, and overlapping onset is clamped.
+    """
+    if not segments or first_video_start <= 0.05:
+        return segments
+
+    first_sub_start = float(segments[0].get("start", 0.0) or 0.0)
+    # If the imported or existing subtitles were authored relative to 0:00 (i.e. start before video)
+    if offset_if_relative and first_sub_start < first_video_start - 0.05:
+        offset = round(first_video_start, 3)
+        aligned = []
+        for s in segments:
+            item = dict(s)
+            st = round(float(item.get("start", 0.0) or 0.0) + offset, 3)
+            et = round(float(item.get("end", st + 0.1) or (st + 0.1)) + offset, 3)
+            item["start"] = max(first_video_start, st)
+            item["end"] = max(item["start"] + 0.05, et)
+            aligned.append(item)
+        segments = aligned
+
+    # Filter out any cues that end at or before the video start,
+    # and clamp any remaining cue to start >= first_video_start
+    filtered = []
+    for s in segments:
+        item = dict(s)
+        st = float(item.get("start", 0.0) or 0.0)
+        et = float(item.get("end", st + 0.05) or (st + 0.05))
+        if et <= first_video_start:
+            continue
+        if st < first_video_start:
+            item["start"] = first_video_start
+        item["end"] = max(item["start"] + 0.05, et)
+        filtered.append(item)
+    return filtered
 
 
 def validate_srt_text(srt_text, expected_len=None):
@@ -182,6 +284,7 @@ def format_segments_to_srt(segments, max_gap_ms: float = 100.0):
                 end_s = next_start
         end = format_timestamp(end_s)
         lines.append(f"{idx + 1}")
+        lines.append(f"{start} --> {end}")
         seg_text = str(
             seg.get("final_text")
             or seg.get("text")
@@ -208,3 +311,35 @@ def _timestamp_to_seconds(value):
 
 def _normalize_srt_text(srt_text):
     return str(srt_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def parse_timestamp(value) -> float | None:
+    """Parse a timestamp string in various formats into seconds as a float.
+
+    Supports:
+      - 'HH:MM:SS,mmm' or 'HH:MM:SS.mmm'
+      - 'MM:SS,mmm' or 'MM:SS.mmm'
+      - 'SS.mmm' or 'SS,mmm' or 'SS'
+      - float/int numbers directly
+    Returns None if parsing fails.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    raw = str(value).strip().replace(",", ".")
+    if not raw:
+        return None
+    parts = raw.split(":")
+    try:
+        if len(parts) == 3:
+            h, m, s = parts
+            return max(0.0, int(h) * 3600 + int(m) * 60 + float(s))
+        elif len(parts) == 2:
+            m, s = parts
+            return max(0.0, int(m) * 60 + float(s))
+        elif len(parts) == 1:
+            return max(0.0, float(parts[0]))
+    except (ValueError, TypeError):
+        return None
+    return None

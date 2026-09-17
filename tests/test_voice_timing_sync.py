@@ -214,7 +214,7 @@ class VoiceTimingSyncTests(unittest.TestCase):
             self.assertAlmostEqual(segments[1]["_audio_start"], 1.0, delta=0.001)
             self.assertNotIn("voice_queue", segments[1].get("action_taken", ""))
 
-    def test_mixer_rejects_unfitted_dense_cues_instead_of_shifting_them(self):
+    def test_mixer_accommodates_dense_cues_without_shifting_subsequent_cues(self):
         with tempfile.TemporaryDirectory() as folder:
             first = os.path.join(folder, "first.wav")
             second = os.path.join(folder, "second.wav")
@@ -226,12 +226,16 @@ class VoiceTimingSyncTests(unittest.TestCase):
                 {"start": 1.0, "end": 1.5},
             ]
 
-            with self.assertRaisesRegex(ValueError, "exceeds subtitle end"):
-                build_voice_track_from_srt_segments(
-                    segments=segments,
-                    tts_wav_paths=[first, second],
-                    output_wav_path=output,
-                )
+            result = build_voice_track_from_srt_segments(
+                segments=segments,
+                tts_wav_paths=[first, second],
+                output_wav_path=output,
+            )
+            self.assertEqual(result, output)
+            self.assertTrue(os.path.isfile(output))
+            self.assertTrue(segments[0].get("timing_conflict"))
+            self.assertTrue(segments[0].get("_tts_overflow"))
+            self.assertAlmostEqual(segments[0].get("_tts_overflow_seconds", 0.0), 1.2, delta=0.05)
 
     def test_editing_one_subtitle_mutes_only_that_voice_window(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -395,6 +399,57 @@ class VoiceTimingSyncTests(unittest.TestCase):
             )
 
             self.assertAlmostEqual(ffprobe_wav_duration(wavs[0]), 2.0, delta=0.15)
+
+
+    def test_assembly_respects_voice_start_and_voice_end(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first = os.path.join(folder, "first.wav")
+            output = os.path.join(folder, "voice.wav")
+            _make_tone_wav(first, 0.7)
+            # Subtitle window is 0.0 - 0.422 (too short for 0.7s)
+            # But voice window is expanded to 0.0 - 0.8
+            segments = [{
+                "start": 0.0,
+                "end": 0.422,
+                "voice_start": 0.0,
+                "voice_end": 0.8,
+                "text": "Short cue",
+            }]
+            result = build_voice_track_from_srt_segments(
+                segments=segments,
+                tts_wav_paths=[first],
+                output_wav_path=output,
+            )
+            self.assertEqual(result, output)
+            self.assertTrue(os.path.isfile(output))
+            # No timing conflict because 0.7s fits within voice_end (0.8s)
+            self.assertFalse(segments[0].get("timing_conflict", False))
+
+    def test_assembly_expands_total_duration_on_overflow(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first = os.path.join(folder, "first.wav")
+            output = os.path.join(folder, "voice.wav")
+            _make_tone_wav(first, 2.5)
+            segments = [{
+                "start": 0.0,
+                "end": 1.0,
+                "voice_start": 0.0,
+                "voice_end": 1.0,
+                "text": "Overflowing cue",
+            }]
+            # Output duration was requested as 1000ms (1.0s)
+            result = build_voice_track_from_srt_segments(
+                segments=segments,
+                tts_wav_paths=[first],
+                output_wav_path=output,
+                total_duration_ms=1000,
+            )
+            self.assertEqual(result, output)
+            self.assertTrue(os.path.isfile(output))
+            # Duration was expanded so speech wasn't truncated
+            self.assertGreaterEqual(ffprobe_wav_duration(output), 2.45)
+            self.assertTrue(segments[0].get("timing_conflict"))
+            self.assertTrue(segments[0].get("_tts_overflow"))
 
 
 if __name__ == "__main__":

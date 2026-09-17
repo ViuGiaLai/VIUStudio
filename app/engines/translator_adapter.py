@@ -25,6 +25,9 @@ class TranslatorAdapter:
         enable_polish: bool = True,
         optimize_subtitles: bool = False,
         style_instruction: str = "",
+        on_progress=None,
+        cancellation_check=None,
+        **kwargs,
     ) -> str:
         funcs = self._translator_module()
         return funcs["translate_segments_to_srt"](
@@ -35,6 +38,9 @@ class TranslatorAdapter:
             enable_polish=enable_polish,
             optimize_subtitles=optimize_subtitles,
             style_instruction=style_instruction,
+            on_progress=on_progress,
+            cancellation_check=cancellation_check,
+            **kwargs,
         )
 
     def translate_segments(
@@ -48,6 +54,9 @@ class TranslatorAdapter:
         optimize_subtitles: bool = False,
         style_instruction: str = "",
         batch_callback=None,
+        on_progress=None,
+        cancellation_check=None,
+        **kwargs,
     ):
         funcs = self._translator_module()
         return funcs["translate_segments"](
@@ -59,6 +68,9 @@ class TranslatorAdapter:
             optimize_subtitles=optimize_subtitles,
             style_instruction=style_instruction,
             batch_callback=batch_callback,
+            on_progress=on_progress,
+            cancellation_check=cancellation_check,
+            **kwargs,
         )
 
     def rewrite_segments(self, source_segments, translated_segments, *, model_path=None, src_lang: str = "auto", style_instruction: str = ""):

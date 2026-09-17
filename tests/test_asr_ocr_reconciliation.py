@@ -430,6 +430,15 @@ class AsrOcrReconciliationTests(unittest.TestCase):
         ])
         self.assertEqual(ranges, [(9.85, 10.55), (10.85, 11.35)])
 
+    def test_short_cue_with_trailing_gap_extends_ocr_window(self):
+        requests = AsrOcrReconciliationService.suspicious_cue_requests([
+            {"start": 10.0, "end": 10.4, "text": "你倒是挺大方的"},
+            {"start": 13.0, "end": 13.5, "text": "走"},
+        ], source_language="zh")
+        # For cue 1 (0.4s duration, 2.6s gap), OCR window extends into gap to detect visual disappearance
+        self.assertGreater(requests[0]["end"], 11.5)
+        self.assertLessEqual(requests[0]["end"], 13.0 - 0.08)
+
     def test_two_frame_consensus_rejects_disagreement_or_missing_text(self):
         self.assertEqual(
             ocr_processor._two_frame_ocr_consensus(["等一下", "等一下！"]),

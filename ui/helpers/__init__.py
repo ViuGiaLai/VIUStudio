@@ -7,6 +7,7 @@ from .presentation_helpers import (
     get_output_mode_key,
 )
 from .srt_helpers import (
+    align_segments_to_video_start,
     extract_subtitle_text_entries,
     format_segments_to_srt,
     format_timestamp,
@@ -17,6 +18,7 @@ from .srt_helpers import (
 
 __all__ = [
     "OUTPUT_MODE_MAPPING",
+    "align_segments_to_video_start",
     "build_guidance_state",
     "build_preview_context_text",
     "build_workflow_hint",

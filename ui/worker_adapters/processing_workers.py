@@ -595,15 +595,15 @@ class TimelineThumbnailWorker(QThread):
             else:
                 requests = [(self.video_path, timestamp, timestamp) for timestamp in timestamps]
 
+            from app.services.timeline_video_sequence import is_image_file
             thumbnails = []
             for idx, (source_path, source_timestamp, timeline_timestamp) in enumerate(requests):
                 output_path = os.path.join(self.thumb_dir, f"{digest}_{idx:02d}.jpg")
                 if not os.path.exists(output_path):
-                    cmd = [
-                        ffmpeg_path,
-                        "-y",
-                        "-ss",
-                        f"{source_timestamp:.3f}",
+                    cmd = [ffmpeg_path, "-y"]
+                    if not is_image_file(source_path):
+                        cmd.extend(["-ss", f"{source_timestamp:.3f}"])
+                    cmd.extend([
                         "-i",
                         source_path,
                         "-frames:v",
@@ -613,7 +613,7 @@ class TimelineThumbnailWorker(QThread):
                         "-vf",
                         "scale=180:-1:force_original_aspect_ratio=decrease",
                         output_path,
-                    ]
+                    ])
                     try:
                         subprocess.run(
                             cmd,
@@ -1357,11 +1357,12 @@ class VoiceExportWorker(QThread):
     finished = Signal(bool, str, str)  # (success, output_path, error_message)
     progress = Signal(int, str)
 
-    def __init__(self, input_wav: str, output_path: str, bitrate: str = "256k"):
+    def __init__(self, input_wav: str, output_path: str, bitrate: str = "256k", timeline_offset_seconds: float = 0.0):
         super().__init__()
         self.input_wav = str(input_wav or "").strip()
         self.output_path = str(output_path or "").strip()
         self.bitrate = str(bitrate or "256k").strip()
+        self.timeline_offset_seconds = max(0.0, float(timeline_offset_seconds or 0.0))
 
     def _copy_voice_report(self):
         source = self.input_wav + ".json"
@@ -1380,9 +1381,26 @@ class VoiceExportWorker(QThread):
             if out_dir and not os.path.exists(out_dir):
                 os.makedirs(out_dir, exist_ok=True)
 
+            ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
+            has_offset = self.timeline_offset_seconds > 0.05
+            delay_ms = int(round(self.timeline_offset_seconds * 1000))
+
             if self.output_path.lower().endswith(".wav"):
-                self.progress.emit(50, "Copying WAV audio...")
-                if os.path.abspath(self.input_wav) != os.path.abspath(self.output_path):
+                self.progress.emit(50, "Exporting WAV audio...")
+                if has_offset and os.path.exists(ffmpeg):
+                    partial_path = os.path.join(
+                        out_dir, f".{os.path.basename(self.output_path)}.{uuid.uuid4().hex}.partial.wav"
+                    )
+                    cmd = [
+                        ffmpeg, "-y", "-i", self.input_wav,
+                        "-filter:a", f"adelay={delay_ms}|{delay_ms}",
+                        partial_path,
+                    ]
+                    proc = subprocess.run(cmd, capture_output=True, text=True, **subprocess_hidden_kwargs())
+                    if proc.returncode != 0:
+                        raise RuntimeError(f"FFmpeg audio offset failed:\n{proc.stderr or proc.stdout}")
+                    os.replace(partial_path, self.output_path)
+                elif os.path.abspath(self.input_wav) != os.path.abspath(self.output_path):
                     partial_path = os.path.join(
                         out_dir, f".{os.path.basename(self.output_path)}.{uuid.uuid4().hex}.partial.wav"
                     )
@@ -1393,7 +1411,6 @@ class VoiceExportWorker(QThread):
                 self.finished.emit(True, self.output_path, "")
                 return
 
-            ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
             if not os.path.exists(ffmpeg):
                 self.finished.emit(False, "", f"FFmpeg not found at {ffmpeg}")
                 return
@@ -1408,6 +1425,10 @@ class VoiceExportWorker(QThread):
                 "-i",
                 self.input_wav,
                 "-vn",
+            ]
+            if has_offset:
+                cmd.extend(["-filter:a", f"adelay={delay_ms}|{delay_ms}"])
+            cmd.extend([
                 "-c:a",
                 "libmp3lame",
                 "-b:a",
@@ -1415,7 +1436,7 @@ class VoiceExportWorker(QThread):
                 "-ar",
                 "44100",
                 partial_path,
-            ]
+            ])
             kwargs = subprocess_hidden_kwargs()
             proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
             if proc.returncode == 0 and os.path.exists(partial_path) and os.path.getsize(partial_path) > 0:

@@ -149,6 +149,7 @@ class AutoRecapEngine:
             pass
         return shutil.which(name) or name
 
+    _nvenc_available: Optional[bool] = None
     _qsv_available: Optional[bool] = None  # Class-level cache, probed once
 
     @classmethod
@@ -156,15 +157,30 @@ class AutoRecapEngine:
         """Tự động phát hiện encoder nhanh nhất có sẵn.
 
         Ưu tiên:
-          1. h264_qsv (Intel Quick Sync) — hardware encoder, tiết kiệm CPU
-          2. libx264 -preset ultrafast — software fallback tốc độ cao
+          1. h264_nvenc (NVIDIA GPU) — hardware encoder, tốc độ cao nhất
+          2. h264_qsv (Intel Quick Sync) — hardware encoder, tiết kiệm CPU
+          3. libx264 -preset ultrafast — software fallback tốc độ cao
 
         Returns:
             (encoder_name, extra_flags) — extra_flags thêm vào sau -c:v
         """
+        ffmpeg = cls._media_tool_path("ffmpeg")
+        if cls._nvenc_available is None:
+            try:
+                probe = subprocess.run(
+                    [ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "nullsrc=size=64x64:duration=0.1",
+                     "-c:v", "h264_nvenc", "-preset", "p1", "-frames:v", "1", "-f", "null", "-"],
+                    capture_output=True, timeout=8,
+                )
+                cls._nvenc_available = (probe.returncode == 0)
+            except Exception:
+                cls._nvenc_available = False
+
+        if cls._nvenc_available:
+            return "h264_nvenc", ["-preset", "p2", "-tune:v", "hq", "-spatial_aq", "1", "-temporal_aq", "1", "-cq", "22", "-pix_fmt", "nv12"]
+
         if cls._qsv_available is None:
             try:
-                ffmpeg = cls._media_tool_path("ffmpeg")
                 probe = subprocess.run(
                     [ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "nullsrc=size=64x64:duration=0.1",
                      "-c:v", "h264_qsv", "-global_quality", "28", "-frames:v", "1", "-f", "null", "-"],
@@ -175,11 +191,11 @@ class AutoRecapEngine:
                 cls._qsv_available = False
 
         if cls._qsv_available:
-            # QSV: global_quality 26 ≈ CRF 23 chất lượng, preset 7 = fastest
-            return "h264_qsv", ["-global_quality", "26", "-preset:v", "7"]
+            return "h264_qsv", ["-global_quality", "23", "-preset:v", "4", "-async_depth", "4", "-pix_fmt", "nv12"]
         else:
             # libx264 ultrafast + threads tất cả core
-            return "libx264", ["-preset", "ultrafast", "-crf", "23", "-threads", "0"]
+            return "libx264", ["-preset", "ultrafast", "-crf", "23", "-threads", "0", "-pix_fmt", "yuv420p"]
+
 
     def detect_scenes_ffmpeg(self, video_path: str, threshold: float = 0.3) -> List[Dict[str, Any]]:
         """Detect effect-shot boundaries while preserving the full source timeline."""
@@ -252,6 +268,84 @@ class AutoRecapEngine:
             ]
         except Exception:
             return []
+
+    def detect_scene_cuts(
+        self,
+        video_path: str,
+        start: float = 0.0,
+        end: float = 0.0,
+        *,
+        threshold: float = 0.3,
+        chunk_seconds: float = 300.0,
+        total_budget_seconds: float = 45.0,
+    ) -> List[float]:
+        """Absolute scene-cut timestamps found inside ``[start, end]`` only.
+
+        ``detect_scenes_ffmpeg`` has to decode the whole file, which a caller
+        that already knows its time window (the Movie Review SRT span, for
+        example) should not pay for. This walks just that window in chunks with
+        an input seek plus a cheap downsampled frame stream, and stops once the
+        wall-clock budget is spent, so a feature film returns usable cuts in
+        seconds instead of blocking a worker until a timeout.
+
+        Partial coverage is intentional: the caller only needs cut boundaries,
+        and any window that was not scanned simply keeps its gap-based
+        grouping. Chunk failures never discard cuts already found.
+        """
+        if not video_path or not os.path.exists(video_path):
+            return []
+        window_start = max(0.0, float(start or 0.0))
+        window_end = float(end or 0.0)
+        if 0.0 < window_end <= window_start:
+            return []
+
+        chunk = max(30.0, float(chunk_seconds))
+        deadline = time.monotonic() + max(5.0, float(total_budget_seconds))
+        windows: List[tuple[float, float]] = []
+        if window_end > window_start:
+            cursor = window_start
+            while cursor < window_end - 0.001 and len(windows) < 500:
+                length = min(chunk, window_end - cursor)
+                windows.append((cursor, length))
+                cursor += length
+        else:
+            # No explicit end: one bounded pass to the end of the file.
+            windows.append((window_start, 0.0))
+
+        ffmpeg = self._media_tool_path("ffmpeg")
+        cuts: set[float] = set()
+        for chunk_start, chunk_length in windows:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            command = [
+                ffmpeg, "-hide_banner", "-nostats",
+                "-ss", f"{chunk_start:.3f}", "-i", video_path,
+            ]
+            if chunk_length > 0:
+                command += ["-t", f"{chunk_length:.3f}"]
+            command += [
+                "-filter_complex",
+                f"fps=5,scale=192:-2,select='gt(scene,{threshold})',metadata=print:file=-",
+                "-f", "null", "-",
+            ]
+            try:
+                process = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=max(5.0, min(120.0, remaining + 5.0)),
+                    **subprocess_text_kwargs(),
+                )
+                for value in re.findall(r"pts_time:([\d\.]+)", process.stdout or ""):
+                    try:
+                        cuts.add(round(chunk_start + float(value), 3))
+                    except ValueError:
+                        continue
+            except (OSError, subprocess.SubprocessError):
+                # Keep whatever earlier chunks already found.
+                continue
+        return sorted(value for value in cuts if value > window_start + 0.001)
 
     @staticmethod
     def apply_subtitles_to_scenes(
@@ -652,11 +746,14 @@ class AutoRecapEngine:
         if not decisions:
             return "", []
 
+        active_decisions = [decision for decision in decisions if decision.action_type != "CUT"]
+        if not active_decisions:
+            return "", []
         filter_chains = []
         v_labels = []
         a_labels = []
 
-        for idx, d in enumerate(decisions):
+        for idx, d in enumerate(active_decisions):
             v_out = f"vout{idx}"
             a_out = f"aout{idx}"
 
@@ -762,7 +859,7 @@ class AutoRecapEngine:
                 a_labels.append(f"[{a_out}]")
 
         # Concat all shots together in 1-pass
-        num_shots = len(decisions)
+        num_shots = len(active_decisions)
         if has_audio:
             concat_inputs = "".join([f"{v}{a}" for v, a in zip(v_labels, a_labels)])
             filter_chains.append(f"{concat_inputs}concat=n={num_shots}:v=1:a=1[vfinal][afinal]")
@@ -935,6 +1032,8 @@ class AutoRecapEngine:
             cmd = [
                 self._media_tool_path("ffmpeg"), "-y", "-hide_banner",
                 "-threads", "0",
+                "-filter_threads", "0",
+                "-filter_complex_threads", "0",
                 "-progress", "pipe:1", "-nostats",
                 "-i", input_video_path,
                 "-filter_complex_script", filter_script_path,

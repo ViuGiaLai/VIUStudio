@@ -189,13 +189,29 @@ def export_timeline_sequence(
             nxt_st = float(valid[i + 1].get("start", 0.0) or 0.0)
             if nxt_st > cur_st and cur_end > nxt_st:
                 valid[i]["end"] = nxt_st
-                valid[i]["source_duration"] = nxt_st - cur_st
+    try:
+        from services.timeline_video_sequence import is_image_file
+    except ImportError:
+        from app.services.timeline_video_sequence import is_image_file
+
     first_w, first_h = get_video_dimensions(valid[0]["source"])
     width = max(2, int(target_width or first_w or 1920))
     height = max(2, int(target_height or first_h or 1080))
     width -= width % 2
     height -= height % 2
-    fps = max(1, int(output_fps or _source_fps(valid[0]["source"])))
+
+    detected_fps = None
+    for clip in valid:
+        if not is_image_file(str(clip.get("source", ""))):
+            v_fps = _source_fps(str(clip.get("source", "")))
+            if v_fps > 1:
+                detected_fps = v_fps
+                break
+    if not detected_fps:
+        detected_fps = _source_fps(valid[0]["source"])
+    if detected_fps < 15:
+        detected_fps = 30
+    fps = max(1, int(output_fps or detected_fps or 30))
     mode = str(mode or "subtitle").strip().lower()
     scale_mode = str(output_scale_mode or "fit").strip().lower()
     focus_x = max(0.0, min(1.0, float(output_fill_focus_x)))
@@ -205,14 +221,13 @@ def export_timeline_sequence(
     video_encoder_args = build_export_h264_encoder_args(
         ffmpeg, export_preset, video_bitrate_kbps
     )
-    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
-    # A single source is the common long-video export path and safely uses one
-    # hardware decoder. Multi-input timelines remain on software decode to
-    # avoid exhausting device decoder sessions; hardware encoding still applies.
-    if len(valid) == 1:
-        command += _hardware_decode_args(video_encoder_args)
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-threads", "0", "-filter_threads", "0", "-filter_complex_threads", "0"]
+    hw_decode = _hardware_decode_args(video_encoder_args)
     for clip in valid:
-        command += ["-i", os.path.abspath(str(clip["source"]))]
+        source_path = os.path.abspath(str(clip["source"]))
+        if hw_decode and not is_image_file(source_path):
+            command += list(hw_decode)
+        command += ["-i", source_path]
     external_audio_index = None
     if mode in {"voice", "both"} and audio_path and os.path.isfile(audio_path):
         external_audio_index = len(valid)
@@ -255,14 +270,19 @@ def export_timeline_sequence(
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
             )
+        is_clip_img = is_image_file(str(clip.get("source", "")))
+        if is_clip_img:
+            v_trim_chain = f"[{index}:v]loop=loop=-1:size=1:start=0,trim=start={start:.6f}:duration={source_duration:.6f}"
+        else:
+            v_trim_chain = f"[{index}:v]trim=start={start:.6f}:duration={source_duration:.6f}"
         filters.append(
-            f"[{index}:v]trim=start={start:.6f}:duration={source_duration:.6f},"
+            f"{v_trim_chain},"
             f"setpts=(PTS-STARTPTS)/{speed:.8f},{canvas_chain},"
             f"setsar=1,fps={fps},format=yuv420p[{vlabel}]"
         )
         if use_timeline_audio:
             volume = 0.0 if bool(clip.get("muted", False)) else max(0.0, float(clip.get("volume", 1.0) or 0.0))
-            if _has_audio(str(clip["source"])):
+            if not is_clip_img and _has_audio(str(clip["source"])):
                 filters.append(
                     f"[{index}:a]atrim=start={start:.6f}:duration={source_duration:.6f},"
                     f"asetpts=PTS-STARTPTS,{_atempo(speed)},volume={volume:.6f},"

@@ -831,6 +831,9 @@ class RuntimeMediaMixin:
         main_video = os.path.abspath(str(self._normalize_local_file_path(main_path) or ""))
         
         # When previewing a secondary clip from multi-video timeline, play its own audio directly
+        from app.services.timeline_video_sequence import is_image_file
+        if current_preview_source and is_image_file(current_preview_source):
+            return ""
         if current_preview_source and current_preview_source != main_video and os.path.exists(current_preview_source):
             return current_preview_source
 

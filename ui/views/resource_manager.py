@@ -342,17 +342,18 @@ def open_resource_manager(workspace_root: str = None, parent=None,
                     lambda _checked=False, target_url=url: _open_url(target_url)
                 )
                 button_row.addWidget(download_btn)
-        elif not install_btn:
+        else:
             download_url = str(item.get("download_url", "")).strip()
-            download_btn = QPushButton("Open Download Page", dialog)
-            download_btn.setObjectName("primaryBtn")
-            download_btn.setEnabled(bool(download_url))
             if download_url:
+                download_btn = QPushButton("Open Download Page", dialog)
+                if install_btn is None and str(item.get("status", "")).lower() != "installed":
+                    download_btn.setObjectName("primaryBtn")
+                download_btn.setEnabled(bool(download_url))
                 download_btn.setToolTip(download_url)
-            download_btn.clicked.connect(
-                lambda _checked=False, url=download_url: _open_url(url)
-            )
-            button_row.addWidget(download_btn)
+                download_btn.clicked.connect(
+                    lambda _checked=False, url=download_url: _open_url(url)
+                )
+                button_row.addWidget(download_btn)
 
         open_folder_btn = QPushButton("Open Storage Folder", dialog)
         open_folder_btn.setEnabled(bool(target_dir))

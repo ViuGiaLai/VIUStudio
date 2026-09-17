@@ -36,6 +36,9 @@ class EditorTimeline(QGraphicsView):
     selectionRangeChanged = Signal(float, float)
     selectionRangeCleared = Signal()
     selectionModeChanged = Signal(bool)
+    rippleNudgeRequested = Signal(int, float)
+    syncSubtitlesRequested = Signal(int)
+    alignToVideoStartRequested = Signal(int)
 
     RULER_HEIGHT = 30
     TRACK_HEADER_W = 0
@@ -415,6 +418,11 @@ class EditorTimeline(QGraphicsView):
 
     @staticmethod
     def _probe_video_duration(path: str) -> float:
+        if not path:
+            return 0.0
+        from app.services.timeline_video_sequence import is_image_file
+        if is_image_file(path):
+            return 3.0
         if path in EditorTimeline._video_duration_cache:
             return EditorTimeline._video_duration_cache[path]
         try:
@@ -1018,13 +1026,19 @@ class EditorTimeline(QGraphicsView):
         original_end = float(getattr(layer, "end", end) or end)
         lower = 0.0
         upper = self._duration - duration
+        is_sub = self._is_subtitle_track(track)
+        shift_held = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        active_drag = getattr(self, "_drag_state", None) or {}
+        ripple_drag = is_sub and (shift_held or active_drag.get("ripple", False))
+
         for item in visible:
             item_start = float(getattr(item, "start", 0.0) or 0.0)
             item_end = float(getattr(item, "end", item_start) or item_start)
             if item_end <= original_start + 0.001:
                 lower = max(lower, item_end)
             elif item_start >= original_end - 0.001:
-                upper = min(upper, item_start - duration)
+                if not ripple_drag:
+                    upper = min(upper, item_start - duration)
         return max(lower, min(start, upper))
 
     def paintEvent(self, event):
@@ -1346,17 +1360,20 @@ class EditorTimeline(QGraphicsView):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
         
+        from app.services.timeline_video_sequence import is_image_file
+        is_img = is_image_file(getattr(layer, "source", ""))
+
         rect = QRectF(x, y, w, h)
         clip_path = QPainterPath()
         clip_path.addRoundedRect(rect, 4.0, 4.0)
         
-        # 1. Base background (Deep teal)
-        base_color = QColor("#082c31")
+        # 1. Base background
+        base_color = QColor("#182030") if is_img else QColor("#082c31")
         painter.fillPath(clip_path, base_color)
         
         # Calculate heights for header, filmstrip, and bottom waveform
         header_h = 22.0 if h >= 40 else (18.0 if h >= 28 else 0.0)
-        show_mini_wave = h >= 54
+        show_mini_wave = (h >= 54) and not is_img
         wave_h = 10.0 if show_mini_wave else 0.0
         thumb_h = max(0.0, h - header_h - wave_h)
         
@@ -1368,7 +1385,7 @@ class EditorTimeline(QGraphicsView):
             self._draw_video_thumbnails(painter, x, thumb_y, w, thumb_h, view_w)
             painter.restore()
             
-        # 3. Draw Mini Waveform Strip at Bottom (like CapCut)
+        # 3. Draw Mini Waveform Strip at Bottom (videos only)
         if show_mini_wave:
             wave_y = y + h - wave_h
             painter.save()
@@ -1401,8 +1418,8 @@ class EditorTimeline(QGraphicsView):
             painter.setClipPath(clip_path)
             
             header_rect = QRectF(x, y, w, header_h)
-            painter.fillRect(header_rect, QColor("#0a484e"))
-            painter.setPen(QPen(QColor("#0e5f67"), 1))
+            painter.fillRect(header_rect, QColor("#223249") if is_img else QColor("#0a484e"))
+            painter.setPen(QPen(QColor("#334968") if is_img else QColor("#0e5f67"), 1))
             painter.drawLine(QPointF(x, y + header_h), QPointF(x + w, y + header_h))
             
             # Duration Badge on Right
@@ -1429,17 +1446,18 @@ class EditorTimeline(QGraphicsView):
                 badge_rect = QRectF(badge_x, y + 2, badge_w, badge_h)
                 badge_path = QPainterPath()
                 badge_path.addRoundedRect(badge_rect, 3.0, 3.0)
-                painter.fillPath(badge_path, QColor("#042528"))
-                painter.setPen(QPen(QColor("#0e636b"), 1))
+                painter.fillPath(badge_path, QColor("#121b29") if is_img else QColor("#042528"))
+                painter.setPen(QPen(QColor("#38bdf8") if is_img else QColor("#0e636b"), 1))
                 painter.drawPath(badge_path)
                 
                 painter.setFont(badge_font)
-                painter.setPen(QColor("#6ee7b7"))
+                painter.setPen(QColor("#93c5fd") if is_img else QColor("#6ee7b7"))
                 painter.drawText(badge_rect, Qt.AlignCenter, dur_str)
                 badge_drawn = True
 
-            # Video Title / Filename on Left
-            title = os.path.basename(getattr(layer, "source", "") or layer.name or "Video")
+            # Video/Image Title / Filename on Left
+            raw_title = os.path.basename(getattr(layer, "source", "") or layer.name or ("Ảnh" if is_img else "Video"))
+            title = f"🖼️ {raw_title}" if is_img else raw_title
             title_font = QFont("Segoe UI", 8, QFont.DemiBold)
             painter.setFont(title_font)
             painter.setPen(QColor("#ffffff"))
@@ -1451,7 +1469,8 @@ class EditorTimeline(QGraphicsView):
             painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, elided_title)
         elif w > 30 and h > 15:
             # Fallback: draw title over the thumbnail strip if no header
-            title = os.path.basename(getattr(layer, "source", "") or layer.name or "Video")
+            raw_title = os.path.basename(getattr(layer, "source", "") or layer.name or ("Ảnh" if is_img else "Video"))
+            title = f"🖼️ {raw_title}" if is_img else raw_title
             title_font = QFont("Segoe UI", 8, QFont.DemiBold)
             painter.setFont(title_font)
             title_fm = QFontMetrics(title_font)
@@ -1942,6 +1961,8 @@ class EditorTimeline(QGraphicsView):
                 if idx >= 0:
                     self._manual_subtitle_selection = True
                     self.segmentSelected.emit(idx)
+                is_sub = self._is_subtitle_track(track)
+                shift_held = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
                 self._drag_state = {
                     "type": "move",
                     "layer_id": lid,
@@ -1952,6 +1973,8 @@ class EditorTimeline(QGraphicsView):
                     "end_time": float(self._get_effective_layer_end(layer)),
                     "changed": False,
                     "edit_started": False,
+                    "is_subtitle": is_sub,
+                    "ripple": is_sub and shift_held,
                 }
                 self.viewport().update()
                 event.accept()
@@ -2021,6 +2044,11 @@ class EditorTimeline(QGraphicsView):
 
             if is_sub and seg_idx >= 0:
                 menu.addSeparator()
+                menu.addAction("🎯 Khớp vào đầu Video (Align to Video Start)", lambda idx=seg_idx: self.alignToVideoStartRequested.emit(idx))
+                menu.addAction("⏱️ Đồng bộ & Dịch chuyển thời gian... (Sync / Shift Timing)", lambda idx=seg_idx: self.syncSubtitlesRequested.emit(idx))
+                menu.addAction("⏩ Dịch tiến (+0.5s Ripple)", lambda idx=seg_idx: self.rippleNudgeRequested.emit(idx, 0.5))
+                menu.addAction("⏪ Dịch lùi (-0.5s Ripple)", lambda idx=seg_idx: self.rippleNudgeRequested.emit(idx, -0.5))
+                menu.addSeparator()
                 menu.addAction("🎙️ Regenerate AI Voice", self.regenerateVoiceRequested.emit)
                 menu.addAction("✏️ Open in Subtitle Editor", self.openSubtitleEditorRequested.emit)
                 
@@ -2082,10 +2110,18 @@ class EditorTimeline(QGraphicsView):
                     layer.source_start = max(0.0, float(layer.source_start) + source_delta)
                 start = float(layer.start)
                 end = float(self._get_effective_layer_end(layer))
-                self.layerTimingChanged.emit(lid, start, end)
                 idx = self.segment_index_for_layer_id(lid)
-                if idx >= 0:
-                    self.segmentTimingChanged.emit(idx, start, end)
+                if drag.get("type") == "move" and drag.get("ripple") and idx >= 0:
+                    delta = start - float(drag["start_time"])
+                    if abs(delta) > 0.001:
+                        self.rippleNudgeRequested.emit(idx, delta)
+                    else:
+                        self.layerTimingChanged.emit(lid, start, end)
+                        self.segmentTimingChanged.emit(idx, start, end)
+                else:
+                    self.layerTimingChanged.emit(lid, start, end)
+                    if idx >= 0:
+                        self.segmentTimingChanged.emit(idx, start, end)
             self.viewport().update()
         super().mouseReleaseEvent(event)
 
@@ -2115,6 +2151,8 @@ class EditorTimeline(QGraphicsView):
                 before_start = float(getattr(layer, "start", 0.0) or 0.0)
                 before_end = float(self._get_effective_layer_end(layer))
                 if drag["type"] == "move":
+                    if drag.get("is_subtitle") and (QApplication.keyboardModifiers() & Qt.ShiftModifier):
+                        drag["ripple"] = True
                     delta = t - float(drag["anchor_time"])
                     original_start = float(drag["start_time"])
                     original_end = float(drag["end_time"])
@@ -2145,7 +2183,12 @@ class EditorTimeline(QGraphicsView):
                     
                     from app.layers.video import VideoLayer
                     from app.layers.audio import AudioLayer
-                    if isinstance(layer, (VideoLayer, AudioLayer)) and getattr(layer, "source", ""):
+                    from app.services.timeline_video_sequence import is_image_file
+                    if (
+                        isinstance(layer, (VideoLayer, AudioLayer))
+                        and getattr(layer, "source", "")
+                        and not is_image_file(layer.source)
+                    ):
                         source_dur = self._probe_video_duration(layer.source)
                         max_layer_dur = (source_dur - float(getattr(layer, "source_start", 0.0))) / max(0.01, float(getattr(layer, "speed", 1.0)))
                         max_allowed = float(drag["start_time"]) + max_layer_dur

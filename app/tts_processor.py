@@ -89,11 +89,42 @@ def _get_cached_piper_voice(*, model_path: str, on_progress: callable = None):
         return _PIPER_VOICE_CACHE[model_key]
 
 
+def _ensure_zerotts_runtime(*, on_progress: callable = None):
+    try:
+        import importlib.metadata
+        import sys
+        from packaging.version import parse as parse_version
+        pkg_version = importlib.metadata.version("zerotts")
+        if parse_version(pkg_version) < parse_version("0.1.5"):
+            if on_progress:
+                on_progress("Upgrading ZeroTTS runtime to version >= 0.1.5...")
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "zerotts>=0.1.5",
+                    "--disable-pip-version-check",
+                    "--progress-bar",
+                    "off",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            import importlib
+            importlib.invalidate_caches()
+    except Exception:
+        pass
+
+
 def _get_cached_zerotts(*, on_progress: callable = None):
     global _ZEROTTS_MODEL
     with _ZEROTTS_MODEL_LOCK:
         if _ZEROTTS_MODEL is not None:
             return _ZEROTTS_MODEL
+        _ensure_zerotts_runtime(on_progress=on_progress)
         try:
             from zerotts import ZeroTTS
         except Exception as exc:
@@ -104,8 +135,22 @@ def _get_cached_zerotts(*, on_progress: callable = None):
         if on_progress:
             on_progress("Loading ZeroTTS (the model is downloaded on first use)...")
         local_model_dir = models_path("zerotts")
-        model_source = local_model_dir if os.path.isfile(os.path.join(local_model_dir, "config.json")) else "zeroweight-ai/ZeroTTS"
-        _ZEROTTS_MODEL = ZeroTTS.from_pretrained(model_source)
+        te_path = os.path.join(local_model_dir, "onnx", "text_encoder.onnx")
+        is_valid_local = (
+            os.path.isfile(os.path.join(local_model_dir, "config.json"))
+            and os.path.isfile(te_path)
+            and os.path.getsize(te_path) > 200_000_000
+        )
+        model_source = local_model_dir if is_valid_local else "zeroweight-ai/ZeroTTS"
+        try:
+            _ZEROTTS_MODEL = ZeroTTS.from_pretrained(model_source)
+        except Exception as exc:
+            if model_source != "zeroweight-ai/ZeroTTS" and not isinstance(exc, (ValueError, TypeError)):
+                if on_progress:
+                    on_progress("Local ZeroTTS model incomplete, downloading latest model from Hugging Face...")
+                _ZEROTTS_MODEL = ZeroTTS.from_pretrained("zeroweight-ai/ZeroTTS")
+            else:
+                raise exc
         return _ZEROTTS_MODEL
 
 
@@ -204,13 +249,45 @@ def _speed_to_float(speed) -> float:
         return 1.0
 
 
+def _insert_natural_prosody_pauses(text: str) -> str:
+    """Insert natural breathing pauses into long run-on Vietnamese sentences (> 13 words)
+    that lack punctuation, improving TTS prosody and preventing breathless delivery.
+    Only breaks on strong clause-boundary conjunctions (e.g. 'nhưng', 'tuy nhiên', 'bởi vì'),
+    never on coordinating words ('và', 'mà', 'thì', 'để')."""
+    if not text:
+        return ""
+    words = text.split()
+    if len(words) <= 13:
+        return text
+    if any(p in text for p in (",", ";", ":", " - ", " – ", " — ")):
+        return text
+
+    strong_two_word_conjunctions = {
+        "bởi vì", "cho nên", "tuy nhiên", "đồng thời", "do đó", "vì vậy", "thế nhưng",
+    }
+    strong_one_word_conjunctions = {
+        "nhưng", "song", "cho dù",
+    }
+
+    # Require at least 5 words before and 4 words after to ensure genuine clause boundary
+    for i in range(5, len(words) - 4):
+        if i + 1 < len(words):
+            two_words = f"{words[i]} {words[i+1]}".lower()
+            if two_words in strong_two_word_conjunctions:
+                words[i] = "," + " " + words[i]
+                return " ".join(words)
+        one_word = words[i].lower()
+        if one_word in strong_one_word_conjunctions:
+            words[i] = "," + " " + words[i]
+            return " ".join(words)
+    return text
+
+
 def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str = "vi") -> str:
     value = " ".join(str(text or "").replace("\n", " ").split()).strip()
     if not value:
         return ""
-    if str(provider or "").strip().lower() != "piper":
-        return value
-    # vietnormalizer is deliberately Vietnamese-specific. English Piper
+    # vietnormalizer is deliberately Vietnamese-specific. English
     # voices should receive the translated text unchanged.
     if not str(language or "vi").strip().lower().startswith("vi"):
         return value
@@ -223,9 +300,21 @@ def normalize_text_for_tts(text: str, *, provider: str = "piper", language: str 
     value = re.sub(r'…$', '.', value)
     value = re.sub(r'[\.]{2,}', ' ', value)
     value = value.replace('…', ' ')
+    # Normalize punctuation spacing
+    value = re.sub(r'\s*,\s*', ', ', value)
+    value = re.sub(r'\s*\.\s*', '. ', value)
+    value = re.sub(r'\s*\?\s*', '? ', value)
+    value = re.sub(r'\s*!\s*', '! ', value)
     value = ' '.join(value.split()).strip()
     if not any(c.isalnum() for c in value):
         return ""
+
+    # Insert prosody breathing pauses for long run-on sentences
+    value = _insert_natural_prosody_pauses(value)
+
+    # Dictionary transliteration (vietnormalizer) is applied for piper
+    if str(provider or "").strip().lower() != "piper":
+        return value
 
     global _VIETNAMESE_NORMALIZER, _VIETNAMESE_NORMALIZER_DATA_DIR
     if _VIETNAMESE_NORMALIZER is None:

@@ -190,3 +190,42 @@ def parse_numbered_line_items(raw: str) -> list[tuple[int, str]]:
 def parse_numbered_lines(raw: str) -> list[str]:
     """Backward-compatible text-only parser for numbered model output."""
     return [text for _number, text in parse_numbered_line_items(raw)]
+
+
+def align_segments_to_video_start(segments: list[dict], first_video_start: float, offset_if_relative: bool = True) -> list[dict]:
+    """Ensure subtitle segments start strictly from the first video clip on the timeline,
+    skipping any intro clips/images. If the first cue starts before first_video_start
+    and offset_if_relative is True, all cues are offset so that the first cue aligns to first_video_start.
+    Any cue lying entirely inside the intro is dropped, and overlapping onset is clamped.
+    """
+    if not segments or first_video_start <= 0.05:
+        return segments
+
+    first_sub_start = float(segments[0].get("start", 0.0) or 0.0)
+    # If the imported or existing subtitles were authored relative to 0:00 (i.e. start before video)
+    if offset_if_relative and first_sub_start < first_video_start - 0.05:
+        offset = round(first_video_start, 3)
+        aligned = []
+        for s in segments:
+            item = dict(s)
+            st = round(float(item.get("start", 0.0) or 0.0) + offset, 3)
+            et = round(float(item.get("end", st + 0.1) or (st + 0.1)) + offset, 3)
+            item["start"] = max(first_video_start, st)
+            item["end"] = max(item["start"] + 0.05, et)
+            aligned.append(item)
+        segments = aligned
+
+    # Filter out any cues that end at or before the video start,
+    # and clamp any remaining cue to start >= first_video_start
+    filtered = []
+    for s in segments:
+        item = dict(s)
+        st = float(item.get("start", 0.0) or 0.0)
+        et = float(item.get("end", st + 0.05) or (st + 0.05))
+        if et <= first_video_start:
+            continue
+        if st < first_video_start:
+            item["start"] = first_video_start
+        item["end"] = max(item["start"] + 0.05, et)
+        filtered.append(item)
+    return filtered

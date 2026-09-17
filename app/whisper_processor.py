@@ -52,6 +52,7 @@ KNOWN_FASTER_WHISPER_MODELS = {
     "large-v1",
     "large-v2",
     "large-v3",
+    "large-v3-turbo",
     "distil-large-v2",
     "distil-large-v3",
     "turbo",
@@ -59,20 +60,61 @@ KNOWN_FASTER_WHISPER_MODELS = {
 
 
 def _cached_model_snapshot(model_name: str) -> str | None:
-    """Return the newest complete Hugging Face cache snapshot for a model."""
-    snapshots_dir = Path(models_path(
-        "faster_whisper",
-        f"models--Systran--faster-whisper-{model_name}",
-        "snapshots",
-    ))
-    if not snapshots_dir.is_dir():
+    """Return the newest complete Hugging Face cache snapshot or local folder for a model."""
+    normalized = str(model_name or "").strip().lower()
+    candidate_folder_names = []
+    if normalized in {"large-v3-turbo", "turbo"}:
+        candidate_folder_names = [
+            "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+            "models--deepdml--faster-whisper-large-v3-turbo-ct2",
+            "models--Systran--faster-whisper-large-v3-turbo",
+            "large-v3-turbo",
+            "turbo",
+        ]
+    elif normalized == "large-v3":
+        candidate_folder_names = [
+            "models--Systran--faster-whisper-large-v3",
+            "large-v3",
+        ]
+    else:
+        candidate_folder_names = [
+            f"models--Systran--faster-whisper-{normalized}",
+            normalized,
+        ]
+
+    faster_whisper_root = Path(models_path("faster_whisper"))
+    if not faster_whisper_root.is_dir():
         return None
-    snapshots = sorted(
-        (path for path in snapshots_dir.iterdir() if path.is_dir() and (path / "model.bin").is_file()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    return str(snapshots[0]) if snapshots else None
+
+    for folder_name in candidate_folder_names:
+        folder = faster_whisper_root / folder_name
+        if not folder.is_dir():
+            continue
+        if (folder / "model.bin").is_file():
+            return str(folder)
+        snapshots_dir = folder / "snapshots"
+        if snapshots_dir.is_dir():
+            snapshots = sorted(
+                (p for p in snapshots_dir.iterdir() if p.is_dir() and (p / "model.bin").is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if snapshots:
+                return str(snapshots[0])
+        nested = folder / folder_name
+        if nested.is_dir():
+            if (nested / "model.bin").is_file():
+                return str(nested)
+            nested_snapshots = nested / "snapshots"
+            if nested_snapshots.is_dir():
+                snapshots = sorted(
+                    (p for p in nested_snapshots.iterdir() if p.is_dir() and (p / "model.bin").is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if snapshots:
+                    return str(snapshots[0])
+    return None
 
 
 def _resolve_model_name(model_path):

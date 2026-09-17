@@ -69,6 +69,15 @@ class TestAutoRecapVerification(unittest.TestCase):
         # Concat Check
         self.assertIn("concat=n=4:v=1:a=1[vfinal][afinal]", filtergraph)
 
+    def test_cut_decisions_are_excluded_from_concat(self):
+        engine = AutoRecapEngine()
+        filtergraph, _maps = engine.build_ffmpeg_filtergraph([
+            ShotDecision(0, 0.0, 2.0, 2.0, 0.0, "CUT"),
+            ShotDecision(1, 2.0, 4.0, 2.0, 100.0, "KEEP"),
+        ])
+        self.assertNotIn("trim=start=0.00:end=2.00", filtergraph)
+        self.assertIn("concat=n=1", filtergraph)
+
 
 if __name__ == "__main__":
     unittest.main()

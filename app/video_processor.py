@@ -204,15 +204,9 @@ def _ffmpeg_amf_works(ffmpeg_path: str) -> bool:
 
 
 def _preferred_h264_encoder_args(ffmpeg_path: str, fast: bool = False) -> list[str]:
-    if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_nvenc') and _ffmpeg_nvenc_works(ffmpeg_path):
-        return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p']
-    if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_qsv') and _ffmpeg_qsv_works(ffmpeg_path):
-        preset = '7' if fast else '4'
-        return ['-c:v', 'h264_qsv', '-preset:v', preset, '-global_quality', '23', '-pix_fmt', 'nv12']
-    if _ffmpeg_supports_encoder(ffmpeg_path, 'h264_amf') and _ffmpeg_amf_works(ffmpeg_path):
-        return ['-c:v', 'h264_amf', '-quality', 'speed' if fast else 'balanced', '-pix_fmt', 'yuv420p']
-    preset = 'veryfast' if fast else 'medium'
-    return ['-c:v', 'libx264', '-preset', preset, '-crf', '18', '-threads', '0', '-pix_fmt', 'yuv420p']
+    profile = "fast" if fast else "balanced"
+    return build_export_h264_encoder_args(ffmpeg_path, export_preset=profile, allow_hardware=True)
+
 
 
 def build_export_h264_encoder_args(
@@ -245,19 +239,22 @@ def build_export_h264_encoder_args(
         ]
 
     if allow_hardware and _ffmpeg_supports_encoder(ffmpeg_path, "h264_nvenc") and _ffmpeg_nvenc_works(ffmpeg_path):
-        nvenc_preset = {"fast": "p1", "balanced": "p4", "max": "p7"}[profile]
+        nvenc_preset = {"fast": "p1", "balanced": "p2", "max": "p4"}[profile]
         quality_args = rate_args or ["-cq", {"fast": "25", "balanced": "22", "max": "19"}[profile]]
-        return ["-c:v", "h264_nvenc", "-preset", nvenc_preset, *quality_args, "-pix_fmt", "yuv420p"]
+        tune_args = ["-tune:v", "ll" if profile == "fast" else "hq"]
+        if profile == "max":
+            tune_args += ["-spatial_aq", "1", "-temporal_aq", "1"]
+        return ["-c:v", "h264_nvenc", "-preset", nvenc_preset, *tune_args, "-multipass", "0", *quality_args, "-pix_fmt", "nv12"]
 
     if allow_hardware and _ffmpeg_supports_encoder(ffmpeg_path, "h264_qsv") and _ffmpeg_qsv_works(ffmpeg_path):
         qsv_preset = {"fast": "7", "balanced": "4", "max": "1"}[profile]
         quality_args = rate_args or ["-global_quality", {"fast": "26", "balanced": "23", "max": "20"}[profile]]
-        return ["-c:v", "h264_qsv", "-preset:v", qsv_preset, *quality_args, "-pix_fmt", "nv12"]
+        return ["-c:v", "h264_qsv", "-preset:v", qsv_preset, "-async_depth", "4", *quality_args, "-pix_fmt", "nv12"]
 
     if allow_hardware and _ffmpeg_supports_encoder(ffmpeg_path, "h264_amf") and _ffmpeg_amf_works(ffmpeg_path):
         amf_quality = {"fast": "speed", "balanced": "balanced", "max": "quality"}[profile]
         quality_args = rate_args or ["-rc", "cqp", "-qp_p", {"fast": "26", "balanced": "22", "max": "19"}[profile]]
-        return ["-c:v", "h264_amf", "-quality", amf_quality, *quality_args, "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_amf", "-quality", amf_quality, *quality_args, "-pix_fmt", "nv12"]
 
     cpu_preset = {"fast": "ultrafast", "balanced": "veryfast", "max": "medium"}[profile]
     quality_args = rate_args or ["-crf", {"fast": "24", "balanced": "21", "max": "18"}[profile]]
@@ -2196,6 +2193,9 @@ def embed_ass_subtitles(video_path, ass_path, output_path, ffmpeg_path=None, blu
             # application log.
             'verbose',
             '-y',
+            '-threads', '0',
+            '-filter_threads', '0',
+            '-filter_complex_threads', '0',
             *_hardware_decode_args(video_encoder_args),
             '-i', video_path,
         ]
@@ -2337,6 +2337,9 @@ def _build_logo_overlay_command(ffmpeg, video_path, ass_path, output_path, logo_
         '-loglevel',
         'error',
         '-y',
+        '-threads', '0',
+        '-filter_threads', '0',
+        '-filter_complex_threads', '0',
         *_hardware_decode_args(video_encoder_args),
         '-i', video_path,
     ]

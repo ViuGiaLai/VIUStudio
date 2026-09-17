@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -821,11 +822,11 @@ def build_start_group(gui, left_layout):
 
     gui.translation_model_label = QLabel("AI Model:")
     gui.translation_model_edit = QLineEdit()
-    gui.translation_model_edit.setPlaceholderText("Example: gemini-2.5-flash")
+    gui.translation_model_edit.setPlaceholderText("Example: gemini-3.6-flash")
 
     gui.translation_polish_model_label = QLabel("Quality Model (fix / review sentences):")
     gui.translation_polish_model_edit = QLineEdit()
-    gui.translation_polish_model_edit.setPlaceholderText("Blank = use AI Model above (e.g. gemini-2.5-pro)")
+    gui.translation_polish_model_edit.setPlaceholderText("Blank = use AI Model above (e.g. gemini-3.6-flash)")
 
     gui.translation_base_url_label = QLabel("API URL:")
     gui.translation_base_url_edit = QLineEdit()
@@ -1008,15 +1009,15 @@ def build_start_group(gui, left_layout):
     media_workflow_card, media_workflow_layout = _build_collapsible_section("Media Workflow")
     source_card, source_layout = _section_card()
     source_header = QHBoxLayout()
-    source_title = QLabel("SOURCE VIDEOS · V1")
+    source_title = QLabel("SOURCE MEDIA · V1")
     source_title.setObjectName("sectionTitle")
-    gui.source_video_summary_label = QLabel("1 video")
+    gui.source_video_summary_label = QLabel("1 clip")
     gui.source_video_summary_label.setObjectName("helperLabel")
     source_header.addWidget(source_title)
     source_header.addStretch(1)
     source_header.addWidget(gui.source_video_summary_label)
     source_layout.addLayout(source_header)
-    source_hint = QLabel("Videos are placed back-to-back on V1. Generate uses this exact order and each clip's current trim.")
+    source_hint = QLabel("Videos & images are placed back-to-back on V1. Generate uses this exact order and clip trims.")
     source_hint.setObjectName("helperLabel")
     source_hint.setWordWrap(True)
     source_layout.addWidget(source_hint)
@@ -1027,20 +1028,47 @@ def build_start_group(gui, left_layout):
     gui.source_video_list.itemClicked.connect(lambda _item: gui.select_source_video_in_timeline())
     gui.source_video_list.itemDoubleClicked.connect(lambda _item: gui.select_source_video_in_timeline())
     source_layout.addWidget(gui.source_video_list)
+
+    menu_style = (
+        "QMenu { background: #141824; color: #e2e8f0; border: 1px solid #2a3347; padding: 4px; border-radius: 6px; }"
+        "QMenu::item { padding: 6px 18px 6px 10px; border-radius: 4px; font-size: 12px; }"
+        "QMenu::item:selected { background: #2563eb; color: #ffffff; }"
+    )
+
+    media_add_layout = QHBoxLayout()
+    media_add_layout.setSpacing(6)
+
+    gui.add_video_btn = QPushButton("+ Video ▾")
+    gui.add_video_btn.setToolTip("Thêm video vào timeline V1")
+    video_menu = QMenu(gui.add_video_btn)
+    video_menu.setStyleSheet(menu_style)
+    video_menu.addAction("➕ Thêm video vào cuối", lambda: gui.add_videos_to_timeline(insert_front=False))
+    video_menu.addAction("🎬 Chèn video vào đầu", lambda: gui.add_videos_to_timeline(insert_front=True))
+    gui.add_video_btn.setMenu(video_menu)
+
+    gui.add_image_btn = QPushButton("+ Ảnh / Intro ▾")
+    gui.add_image_btn.setToolTip("Chèn ảnh vào đầu (Intro) hoặc thêm vào cuối timeline V1")
+    image_menu = QMenu(gui.add_image_btn)
+    image_menu.setStyleSheet(menu_style)
+    image_menu.addAction("🖼️ Chèn ảnh vào đầu (Intro)", lambda: gui.add_images_to_timeline(insert_front=True))
+    image_menu.addAction("➕ Thêm ảnh vào cuối", lambda: gui.add_images_to_timeline(insert_front=False))
+    gui.add_image_btn.setMenu(image_menu)
+
+    media_add_layout.addWidget(gui.add_video_btn, 1)
+    media_add_layout.addWidget(gui.add_image_btn, 1)
+    source_layout.addLayout(media_add_layout)
+
     source_buttons = QHBoxLayout()
     source_buttons.setSpacing(6)
-    gui.add_video_btn = QPushButton("+ Add Video")
-    gui.add_video_btn.setToolTip("Add one or more videos after the current V1 clips")
-    gui.add_video_btn.clicked.connect(gui.add_videos_to_timeline)
-    gui.source_video_up_btn = QPushButton("↑")
-    gui.source_video_up_btn.setToolTip("Move selected video earlier")
+    gui.source_video_up_btn = QPushButton("↑ Lên")
+    gui.source_video_up_btn.setToolTip("Di chuyển clip lên trước")
     gui.source_video_up_btn.clicked.connect(lambda: gui.move_selected_source_video(-1))
-    gui.source_video_down_btn = QPushButton("↓")
-    gui.source_video_down_btn.setToolTip("Move selected video later")
+    gui.source_video_down_btn = QPushButton("↓ Xuống")
+    gui.source_video_down_btn.setToolTip("Di chuyển clip ra sau")
     gui.source_video_down_btn.clicked.connect(lambda: gui.move_selected_source_video(1))
-    gui.source_video_remove_btn = QPushButton("Remove")
+    gui.source_video_remove_btn = QPushButton("Xóa")
+    gui.source_video_remove_btn.setToolTip("Xóa clip khỏi V1")
     gui.source_video_remove_btn.clicked.connect(gui.remove_selected_source_video)
-    source_buttons.addWidget(gui.add_video_btn, 1)
     source_buttons.addWidget(gui.source_video_up_btn)
     source_buttons.addWidget(gui.source_video_down_btn)
     source_buttons.addWidget(gui.source_video_remove_btn)

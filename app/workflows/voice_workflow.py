@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import importlib.util
 import os
 import json
@@ -37,13 +39,14 @@ def predict_speed_ratios(segments):
         if pre_speed is not None:
             continue
         if is_dict:
-            raw_text = " ".join(str(seg.get("dubbing_vi") or seg.get("text") or seg.get("final_text") or "").replace("\n", " ").split()).strip()
-            start_val = float(seg.get("start", 0.0) or 0.0)
-            end_val = float(seg.get("end", 0.0) or 0.0)
+            raw_text = " ".join(str(seg.get("dubbing_vi") or seg.get("tts_text") or seg.get("text") or seg.get("final_text") or "").replace("\n", " ").split()).strip()
+            start_val = float(seg.get("voice_start", seg.get("_audio_start", seg.get("start", 0.0))) or 0.0)
+            end_val = float(seg.get("voice_end", seg.get("_audio_end", seg.get("end", 0.0))) or 0.0)
         else:
+            meta = getattr(seg, "metadata", {}) or {}
             raw_text = " ".join(str(getattr(seg, "tts_text", "") or getattr(seg, "final_text", "") or getattr(seg, "original_text", "") or getattr(seg, "text", "") or "").replace("\n", " ").split()).strip()
-            start_val = float(getattr(seg, "start", 0.0) or 0.0)
-            end_val = float(getattr(seg, "end", 0.0) or 0.0)
+            start_val = float(meta.get("voice_start", getattr(seg, "start", 0.0)) or 0.0)
+            end_val = float(meta.get("voice_end", getattr(seg, "end", 0.0)) or 0.0)
         if not raw_text:
             if is_dict:
                 seg["pre_speed_ratio"] = 1.0
@@ -220,12 +223,10 @@ class VoiceWorkflow:
         current = dict(seg or {})
         if bool(current.get("tts_suppressed")):
             return ""
-        subtitle_text = str(current.get("text") or "").strip()
-        if bool(current.get("voice_edited")):
-            edited_text = str(current.get("tts_text") or current.get("dubbing_vi") or "").strip()
-            if edited_text:
-                return edited_text
-        return subtitle_text
+        dub_text = str(current.get("tts_text") or current.get("dubbing_vi") or "").strip()
+        if dub_text:
+            return dub_text
+        return str(current.get("text") or current.get("final_text") or "").strip()
 
     def _provider_native_speed(self, *, provider: str, requested_speed: float) -> float:
         return provider_native_speed(provider=provider, requested_speed=requested_speed)
@@ -766,25 +767,34 @@ class VoiceWorkflow:
     ):
         from services import AsrVocalizationFilterService
 
-        source_segments = list(segments or [])
+        source_segments = []
+        for source_index, seg in enumerate(segments or []):
+            item = dict(seg or {})
+            if "_voice_source_index" not in item:
+                item["_voice_source_index"] = source_index
+            source_segments.append(item)
+
+        try:
+            from services.segment_regroup_service import SegmentRegroupService
+            source_segments = SegmentRegroupService.expand_short_cues_into_gaps(source_segments, enable_ai=True)
+        except Exception as e:
+            logger.warning(f"Failed to expand cues into gaps: {e}")
+
         prepared = []
-        for source_index, seg in enumerate(source_segments):
-            current = dict(seg or {})
-            # Imported rows can be out of order. Keep their original identity
-            # while sorting for audio assembly.
-            current["_voice_source_index"] = source_index
+        for current in source_segments:
+            source_index = current.get("_voice_source_index", len(prepared))
             _kept, suppressed_count = AsrVocalizationFilterService.filter_tts_segments([current])
             current["tts_suppressed"] = bool(suppressed_count)
             subtitle_text = (current.get("text") or "").strip()
             voice_edited = bool(current.get("voice_edited"))
             spoken_text = self._segment_tts_text(current)
-            duration_sec = max(0.0, float(current.get("end", 0.0)) - float(current.get("start", 0.0)))
+            duration_sec = max(0.0, float(current.get("voice_end", current.get("end", 0.0))) - float(current.get("voice_start", current.get("start", 0.0))))
             speech_cost = self._estimate_speech_cost(subtitle_text)
             max_words_vi = self._max_words_vi(duration_sec, speech_cost)
             original_words = self._count_words(subtitle_text)
             spoken_words = self._count_spoken_words(spoken_text, voice_provider=voice_provider)
             action_taken = "manual_voice" if voice_edited else "accept"
-            current["tts_text"] = spoken_text if voice_edited and spoken_text != subtitle_text else ""
+            current["tts_text"] = spoken_text
             current["dubbing_vi"] = spoken_text
             current["subtitle_vi"] = subtitle_text
             current["voice_edited"] = voice_edited
@@ -809,7 +819,7 @@ class VoiceWorkflow:
             print(f"[Voice Workflow] Prepared TTS text: adjusted=0/{len(prepared)}")
         # Keep WAV indexing and subtitle indexing together, including imports
         # whose rows are not chronological.
-        prepared.sort(key=lambda item: float(item.get("start", 0.0)))
+        prepared.sort(key=lambda item: float(item.get("voice_start", item.get("start", 0.0))))
         from services.voice_timing_service import cue_windows
         cue_windows(prepared)
         return prepared
@@ -1429,6 +1439,28 @@ class VoiceWorkflow:
                     preload_tts_voice(first_voice, on_progress=None)
                 except Exception:
                     pass
+            elif pending_providers == {"zerotts"}:
+                configured_workers = int(os.getenv("VIUSTUDIO_ZEROTTS_WORKERS", 3))
+                worker_count = max(1, min(configured_workers, len(pending_jobs), (os.cpu_count() or 4)))
+                try:
+                    first_voice = pending_jobs[0]["voice_name"]
+                    from tts_processor import preload_tts_voice
+                    if on_progress:
+                        on_progress("Loading ZeroTTS model...")
+                    preload_tts_voice(first_voice, on_progress=None)
+                except Exception:
+                    pass
+            elif pending_providers == {"kokoro"}:
+                configured_workers = int(os.getenv("VIUSTUDIO_KOKORO_WORKERS", 4))
+                worker_count = max(1, min(configured_workers, len(pending_jobs), (os.cpu_count() or 4)))
+                try:
+                    first_voice = pending_jobs[0]["voice_name"]
+                    from tts_processor import preload_tts_voice
+                    if on_progress:
+                        on_progress("Loading Kokoro model...")
+                    preload_tts_voice(first_voice, on_progress=None)
+                except Exception:
+                    pass
             elif pending_providers == {"edge"}:
                 worker_count = 1
             else:
@@ -1721,6 +1753,7 @@ class VoiceWorkflow:
             segments=segments, wavs=wavs, engine=self.engine_runtime,
             tmp_dir=tmp_dir, mode=timing_sync_mode,
             requested_speed=safe_voice_speed, provider_speed=provider_speed,
+            max_fit_speed=1.20,
             cancellation_check=cancellation_check,
         )
 

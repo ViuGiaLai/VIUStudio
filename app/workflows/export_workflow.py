@@ -303,6 +303,9 @@ class ExportWorkflow:
         )
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-threads", "0",
+            "-filter_threads", "0",
+            "-filter_complex_threads", "0",
             *_hardware_decode_args(encoder_args),
             "-ss", f"{start:.6f}", "-i", source,
         ]
@@ -1002,6 +1005,49 @@ class ExportWorkflow:
         ass_style = dict(subtitle_style)
         render_canvas_w = int(target_w or source_w or 1920)
         render_canvas_h = int(target_h or source_h or 1080)
+        first_video_start = 0.0
+        try:
+            from services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+        except ImportError:
+            from app.services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+        first_video_start = resolve_timeline_content_offset(timeline_clips)
+
+        if first_video_start > 0.05 and srt_path and os.path.isfile(srt_path):
+            try:
+                from translation.srt_utils import parse_srt, to_srt, align_segments_to_video_start
+                with open(srt_path, "r", encoding="utf-8-sig") as handle:
+                    raw_text = handle.read().strip()
+                parsed = parse_srt(raw_text)
+                if parsed and not is_already_timeline_relative(parsed, first_video_start):
+                    aligned = align_segments_to_video_start(parsed, first_video_start)
+                    aligned_srt_dir = os.path.join(project_temp_dir or self.workspace_root, "temp")
+                    os.makedirs(aligned_srt_dir, exist_ok=True)
+                    aligned_srt_path = os.path.join(aligned_srt_dir, "aligned_export.srt")
+                    with open(aligned_srt_path, "w", encoding="utf-8") as out_h:
+                        out_h.write(to_srt(aligned))
+                    srt_path = aligned_srt_path
+                    ass_path = ""
+                    if audio_path and os.path.isfile(audio_path):
+                        aligned_audio_path = os.path.join(aligned_srt_dir, "aligned_export_audio.wav")
+                        try:
+                            import subprocess
+                            from runtime_paths import bin_path
+                            ffmpeg_exe = str(bin_path("ffmpeg", "ffmpeg.exe"))
+                            delay_ms = int(round(first_video_start * 1000))
+                            cmd = [
+                                ffmpeg_exe, "-y", "-i", audio_path,
+                                "-filter:a", f"adelay={delay_ms}|{delay_ms}",
+                                "-ar", "48000", "-ac", "2",
+                                aligned_audio_path
+                            ]
+                            subprocess.run(cmd, capture_output=True, check=True, timeout=60)
+                            if os.path.isfile(aligned_audio_path):
+                                audio_path = aligned_audio_path
+                        except Exception as a_exc:
+                            print(f"[Export] Audio alignment offset warning: {a_exc}")
+            except Exception as e:
+                print(f"[Export] Subtitle alignment check skipped: {e}")
+
         ass_path = self._ensure_subtitle_ass(
             ass_path, srt_path, ass_style, video_path, render_canvas_w, render_canvas_h
         )
@@ -1088,10 +1134,15 @@ class ExportWorkflow:
             )
         text_image_layers = self._build_text_layer_images(text_layers, project_temp_dir, render_w or 1920, render_h or 1080)
         print(f"[Export] Extracted {len(mask_regions)} mask(s), {len(logo_layers)} logo(s), {len(text_layers)} text layer(s), {len(blur_regions)} blur(s)")
+        try:
+            from services.timeline_video_sequence import is_image_file
+        except ImportError:
+            from app.services.timeline_video_sequence import is_image_file
 
         timeline_clips = [dict(clip) for clip in (timeline_clips or []) if isinstance(clip, dict)]
-        timeline_edit_required = len(timeline_clips) > 1
-        if len(timeline_clips) == 1:
+        has_image_clip = any(is_image_file(str(clip.get("source", "") or "")) for clip in timeline_clips)
+        timeline_edit_required = len(timeline_clips) > 1 or has_image_clip
+        if len(timeline_clips) == 1 and not has_image_clip:
             clip = timeline_clips[0]
             timeline_edit_required = float(clip.get("source_start", 0.0) or 0.0) > 0.01
             if not timeline_edit_required:
@@ -1109,6 +1160,7 @@ class ExportWorkflow:
                     timeline_edit_required = False
         single_clip_simple_export = bool(
             not anti_duplicate_enabled
+            and not has_image_clip
             and len(timeline_clips) == 1
             and (timeline_edit_required or mode == "voice")
             and mode in {"original", "voice"}

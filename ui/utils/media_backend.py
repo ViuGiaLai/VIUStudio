@@ -266,12 +266,26 @@ class QtMediaPlayerBackend(QObject):
         self._dubbed_output = QAudioOutput(self)
         self._dubbed_player.setAudioOutput(self._dubbed_output)
 
+        self._is_image = False
+        self._image_position_ms = 0
+        self._image_duration_ms = 3000
+        self._image_timer = QTimer(self)
+        self._image_timer.setInterval(33)
+        self._image_timer.timeout.connect(self._on_image_tick)
+        self._last_image_tick = 0.0
+
         self._player.positionChanged.connect(self._on_player_position_changed)
-        self._player.durationChanged.connect(self.durationChanged.emit)
+        self._player.durationChanged.connect(
+            lambda d: None if getattr(self, "_is_image", False) else self.durationChanged.emit(d)
+        )
         if hasattr(self._player, "playbackStateChanged"):
-            self._player.playbackStateChanged.connect(lambda s: self.stateChanged.emit(int(getattr(s, "value", s))))
+            self._player.playbackStateChanged.connect(
+                lambda s: None if getattr(self, "_is_image", False) else self.stateChanged.emit(int(getattr(s, "value", s)))
+            )
         elif hasattr(self._player, "stateChanged"):
-            self._player.stateChanged.connect(lambda s: self.stateChanged.emit(int(getattr(s, "value", s))))
+            self._player.stateChanged.connect(
+                lambda s: None if getattr(self, "_is_image", False) else self.stateChanged.emit(int(getattr(s, "value", s)))
+            )
         self._player.mediaStatusChanged.connect(self._on_media_status)
 
         self._mute_original = False
@@ -279,19 +293,35 @@ class QtMediaPlayerBackend(QObject):
         self._original_vol = 0.5
         self._dubbed_vol = 1.0
 
+    def _resolve_global_position_ms(self, pos: int) -> int:
+        host = getattr(self, "gui", None)
+        if not host and hasattr(self, "video_view"):
+            host = self.video_view.window() if hasattr(self.video_view, "window") else None
+        if host and hasattr(host, "timeline_position_ms"):
+            try:
+                return int(host.timeline_position_ms())
+            except Exception:
+                pass
+        return pos
+
     def _on_player_position_changed(self, pos: int):
+        if getattr(self, "_is_image", False):
+            return
         self.positionChanged.emit(pos)
+        global_pos = self._resolve_global_position_ms(pos)
         # Resync sidecars if drifting
         if self._original_loaded_path and self._original_player.playbackState() == QMediaPlayer.PlayingState:
-            diff = abs(self._original_player.position() - pos)
+            diff = abs(self._original_player.position() - global_pos)
             if diff > 250:
-                self._original_player.setPosition(pos)
+                self._original_player.setPosition(global_pos)
         if self._dubbed_loaded_path and self._dubbed_player.playbackState() == QMediaPlayer.PlayingState:
-            diff = abs(self._dubbed_player.position() - pos)
+            diff = abs(self._dubbed_player.position() - global_pos)
             if diff > 250:
-                self._dubbed_player.setPosition(pos)
+                self._dubbed_player.setPosition(global_pos)
 
     def _on_media_status(self, status):
+        if getattr(self, "_is_image", False):
+            return
         try:
             from PySide6.QtMultimedia import QMediaPlayer as _QMP
             if status == _QMP.EndOfMedia:
@@ -320,46 +350,153 @@ class QtMediaPlayerBackend(QObject):
             return
 
     def setSource(self, source):
-        self._source_path = source.toLocalFile() if isinstance(source, QUrl) else str(source)
+        source_path = source.toLocalFile() if isinstance(source, QUrl) else str(source)
+        self._source_path = source_path
+        from app.services.timeline_video_sequence import is_image_file
+        if is_image_file(source_path):
+            self._is_image = True
+            self._image_position_ms = 0
+            if hasattr(self, "_image_timer"):
+                self._image_timer.stop()
+
+            clip_duration = 0.0
+            try:
+                host = self.video_view.window() if hasattr(self.video_view, "window") else None
+                if host and hasattr(host, "get_timeline_video_clips"):
+                    for clip in host.get_timeline_video_clips(existing_only=True):
+                        if os.path.abspath(clip.get("source", "")) == os.path.abspath(source_path):
+                            dur = float(clip.get("source_duration", 0.0) or clip.get("timeline_duration", 0.0) or 0.0)
+                            if dur > 0:
+                                clip_duration = dur
+                                break
+            except Exception:
+                pass
+
+            if clip_duration <= 0.0:
+                ffprobe_dur = _ffprobe_video_duration(source_path)
+                clip_duration = ffprobe_dur if ffprobe_dur > 0 else 3.0
+
+            self._image_duration_ms = int(clip_duration * 1000)
+
+            try:
+                self._player.stop()
+                self._player.setSource(QUrl())
+            except Exception:
+                pass
+
+            if hasattr(self.video_view, "set_image_source"):
+                self.video_view.set_image_source(source_path)
+
+            self._apply_audio_volumes_and_mutes()
+            self.durationChanged.emit(self._image_duration_ms)
+            self.positionChanged.emit(0)
+            self.stateChanged.emit(int(QMediaPlayer.PausedState.value))
+            return
+
+        self._is_image = False
+        if hasattr(self, "_image_timer"):
+            self._image_timer.stop()
+        if hasattr(self.video_view, "clear_image_source"):
+            self.video_view.clear_image_source()
+
         self._player.setSource(source)
         self._apply_audio_volumes_and_mutes()
 
     def play(self):
-        self._player.play()
+        if getattr(self, "_is_image", False):
+            import time
+            self._last_image_tick = time.time()
+            if hasattr(self, "_image_timer"):
+                self._image_timer.start()
+            self.stateChanged.emit(int(QMediaPlayer.PlayingState.value))
+        else:
+            self._player.play()
         if self._original_loaded_path:
             self._original_player.play()
         if self._dubbed_loaded_path:
             self._dubbed_player.play()
 
     def pause(self):
-        self._player.pause()
+        if getattr(self, "_is_image", False):
+            if hasattr(self, "_image_timer"):
+                self._image_timer.stop()
+            self.stateChanged.emit(int(QMediaPlayer.PausedState.value))
+        else:
+            self._player.pause()
         if self._original_loaded_path:
             self._original_player.pause()
         if self._dubbed_loaded_path:
             self._dubbed_player.pause()
 
     def stop(self):
-        self._player.stop()
+        if getattr(self, "_is_image", False):
+            if hasattr(self, "_image_timer"):
+                self._image_timer.stop()
+            self._image_position_ms = 0
+            self.positionChanged.emit(0)
+            self.stateChanged.emit(int(QMediaPlayer.StoppedState.value))
+        else:
+            self._player.stop()
         if self._original_loaded_path:
             self._original_player.stop()
         if self._dubbed_loaded_path:
             self._dubbed_player.stop()
 
-    def setPosition(self, position):
-        self._player.setPosition(position)
+    def setPosition(self, position, global_position=None):
+        if getattr(self, "_is_image", False):
+            self._image_position_ms = max(0, int(position))
+            self.positionChanged.emit(self._image_position_ms)
+        else:
+            self._player.setPosition(position)
+        sidecar_pos = position if global_position is not None else self._resolve_global_position_ms(position)
         if self._original_loaded_path:
-            self._original_player.setPosition(position)
+            self._original_player.setPosition(sidecar_pos)
         if self._dubbed_loaded_path:
-            self._dubbed_player.setPosition(position)
+            self._dubbed_player.setPosition(sidecar_pos)
 
     def position(self):
+        if getattr(self, "_is_image", False):
+            return self._image_position_ms
         return self._player.position()
 
     def duration(self):
+        if getattr(self, "_is_image", False):
+            try:
+                host = self.video_view.window() if hasattr(self.video_view, "window") else None
+                if host and hasattr(host, "get_timeline_video_clips"):
+                    for clip in host.get_timeline_video_clips(existing_only=True):
+                        if os.path.abspath(clip.get("source", "")) == os.path.abspath(self._source_path):
+                            dur = float(clip.get("source_duration", 0.0) or clip.get("timeline_duration", 0.0) or 0.0)
+                            if dur > 0:
+                                return int(dur * 1000)
+            except Exception:
+                pass
+            return self._image_duration_ms
         return self._player.duration()
 
     def playbackState(self):
+        if getattr(self, "_is_image", False):
+            if hasattr(self, "_image_timer") and self._image_timer.isActive():
+                return QMediaPlayer.PlayingState
+            return QMediaPlayer.PausedState
         return self._player.playbackState()
+
+    def _on_image_tick(self):
+        if not getattr(self, "_is_image", False):
+            return
+        import time
+        now = time.time()
+        last = getattr(self, "_last_image_tick", 0.0) or now
+        delta_ms = int((now - last) * 1000)
+        self._last_image_tick = now
+        step = max(10, min(200, delta_ms))
+        self._image_position_ms += step
+        self.positionChanged.emit(self._image_position_ms)
+        max_dur = self.duration()
+        if max_dur > 0 and self._image_position_ms >= max_dur:
+            if hasattr(self, "_image_timer"):
+                self._image_timer.stop()
+            self.stateChanged.emit(int(QMediaPlayer.PausedState.value))
 
     def is_playing(self):
         return self.playbackState() == QMediaPlayer.PlayingState
@@ -372,7 +509,8 @@ class QtMediaPlayerBackend(QObject):
 
     def set_audio_file(self, audio_path):
         """Load dubbed AI audio file (A2)."""
-        if not audio_path or not os.path.exists(audio_path):
+        from app.services.timeline_video_sequence import is_image_file
+        if not audio_path or not os.path.exists(audio_path) or is_image_file(audio_path):
             self.clear_audio()
             return
         self._audio_path = audio_path
@@ -391,7 +529,8 @@ class QtMediaPlayerBackend(QObject):
 
     def set_original_audio_file(self, audio_path):
         """Load original audio file (A1)."""
-        if not audio_path or not os.path.exists(audio_path):
+        from app.services.timeline_video_sequence import is_image_file
+        if not audio_path or not os.path.exists(audio_path) or is_image_file(audio_path):
             self._clear_original_audio()
             return
         self._original_audio_path = audio_path
@@ -727,6 +866,25 @@ class MpvMediaPlayerBackend(QObject):
         # properties every 200 ms while no media is loaded is needless work.
         if not self._source_path:
             return
+        if getattr(self, "_is_image_source", False):
+            if self._state == QMediaPlayer.PlayingState:
+                import time
+                now = time.time()
+                last = getattr(self, "_last_image_tick", 0.0) or now
+                delta_ms = int((now - last) * 1000)
+                self._last_image_tick = now
+                next_position = self._position_ms + max(50, min(500, delta_ms))
+                self._position_ms = next_position
+                self.positionChanged.emit(next_position)
+                max_dur = self.duration() if hasattr(self, "duration") else self._duration_ms
+                if max_dur > 0 and self._position_ms >= max_dur:
+                    self._state = QMediaPlayer.PausedState
+                    try:
+                        self.stateChanged.emit(int(self._state.value))
+                    except Exception:
+                        pass
+            return
+
         try:
             time_pos = self._read_property("time-pos", "time_pos", 0.0)
             duration = self._read_property("duration", default=0.0)
@@ -785,6 +943,8 @@ class MpvMediaPlayerBackend(QObject):
             self._source_path = ""
             return
 
+        from app.services.timeline_video_sequence import is_image_file
+        self._is_image_source = is_image_file(source_path)
         self._source_path = source_path
         self._position_ms = 0
         self._duration_ms = 0
@@ -795,7 +955,10 @@ class MpvMediaPlayerBackend(QObject):
         # Use ffprobe as fallback for duration detection
         # mpv might not report duration immediately after loading
         ffprobe_duration = _ffprobe_video_duration(source_path)
-        if ffprobe_duration > 0:
+        if self._is_image_source:
+            self._duration_ms = int((ffprobe_duration if ffprobe_duration > 0 else 3.0) * 1000)
+            self.durationChanged.emit(self._duration_ms)
+        elif ffprobe_duration > 0:
             self._duration_ms = int(ffprobe_duration * 1000)
             self.durationChanged.emit(self._duration_ms)
         
@@ -823,6 +986,9 @@ class MpvMediaPlayerBackend(QObject):
     def play(self):
         if not self._source_path:
             return
+        if getattr(self, "_is_image_source", False):
+            import time
+            self._last_image_tick = time.time()
         self._player.pause = False
         if self._original_loaded_path:
             try:
@@ -884,7 +1050,18 @@ class MpvMediaPlayerBackend(QObject):
         except Exception:
             pass
 
-    def setPosition(self, position):
+    def _resolve_global_position_ms(self, pos: int) -> int:
+        host = getattr(self, "gui", None)
+        if not host and hasattr(self, "video_view"):
+            host = self.video_view.window() if hasattr(self.video_view, "window") else None
+        if host and hasattr(host, "timeline_position_ms"):
+            try:
+                return int(host.timeline_position_ms())
+            except Exception:
+                pass
+        return pos
+
+    def setPosition(self, position, global_position=None):
         self._position_ms = int(position)
         if not self._source_path:
             self.positionChanged.emit(self._position_ms)
@@ -894,14 +1071,15 @@ class MpvMediaPlayerBackend(QObject):
             self._player.command("seek", seconds, "absolute")
         except Exception:
             pass
+        sidecar_pos = int(position) if global_position is not None else self._resolve_global_position_ms(int(position))
         if self._original_loaded_path:
             try:
-                self._original_player.setPosition(int(position))
+                self._original_player.setPosition(sidecar_pos)
             except Exception:
                 pass
         if self._dubbed_loaded_path:
             try:
-                self._dubbed_player.setPosition(int(position))
+                self._dubbed_player.setPosition(sidecar_pos)
             except Exception:
                 pass
         self.positionChanged.emit(self._position_ms)
@@ -910,6 +1088,18 @@ class MpvMediaPlayerBackend(QObject):
         return self._position_ms
 
     def duration(self):
+        if getattr(self, "_is_image_source", False):
+            try:
+                host = self.video_view.window() if hasattr(self.video_view, "window") else None
+                if host and hasattr(host, "get_timeline_video_clips"):
+                    for clip in host.get_timeline_video_clips(existing_only=True):
+                        if os.path.abspath(clip.get("source", "")) == os.path.abspath(self._source_path):
+                            dur = float(clip.get("source_duration", 0.0) or clip.get("timeline_duration", 0.0) or 0.0)
+                            if dur > 0:
+                                return int(dur * 1000)
+            except Exception:
+                pass
+            return self._duration_ms
         return self._duration_ms
 
     def playbackState(self):
@@ -1253,7 +1443,8 @@ class MpvMediaPlayerBackend(QObject):
 
     def set_audio_file(self, audio_path):
         """Load the dubbed audio file into the QMediaPlayer sidecar."""
-        if not audio_path or not os.path.exists(audio_path):
+        from app.services.timeline_video_sequence import is_image_file
+        if not audio_path or not os.path.exists(audio_path) or is_image_file(audio_path):
             self.clear_audio()
             return
         self._audio_path = audio_path
@@ -1261,7 +1452,8 @@ class MpvMediaPlayerBackend(QObject):
 
     def set_original_audio_file(self, audio_path):
         """Load the original audio file into the QMediaPlayer sidecar."""
-        if not audio_path or not os.path.exists(audio_path):
+        from app.services.timeline_video_sequence import is_image_file
+        if not audio_path or not os.path.exists(audio_path) or is_image_file(audio_path):
             self._clear_original_audio()
             return
         self._original_audio_path = audio_path
@@ -1365,14 +1557,15 @@ class MpvMediaPlayerBackend(QObject):
             v_pos_ms = 0
         if v_pos_ms < 0:
             v_pos_ms = 0
+        global_pos_ms = self._resolve_global_position_ms(v_pos_ms)
         if self._original_loaded_path:
             try:
-                self._original_player.setPosition(int(v_pos_ms))
+                self._original_player.setPosition(int(global_pos_ms))
             except Exception:
                 pass
         if self._dubbed_loaded_path:
             try:
-                self._dubbed_player.setPosition(int(v_pos_ms))
+                self._dubbed_player.setPosition(int(global_pos_ms))
             except Exception:
                 pass
 
@@ -1428,9 +1621,10 @@ class MpvMediaPlayerBackend(QObject):
                 a_pos_ms = int(self._dubbed_player.position() or 0)
             except Exception:
                 a_pos_ms = 0
-            if abs(v_pos_ms - a_pos_ms) > 300:
+            global_pos_ms = self._resolve_global_position_ms(v_pos_ms)
+            if abs(global_pos_ms - a_pos_ms) > 300:
                 try:
-                    self._dubbed_player.setPosition(int(v_pos_ms))
+                    self._dubbed_player.setPosition(int(global_pos_ms))
                 except Exception:
                     pass
 

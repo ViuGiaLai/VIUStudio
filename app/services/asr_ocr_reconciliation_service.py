@@ -231,6 +231,7 @@ class AsrOcrReconciliationService:
         *,
         source_language: str = "auto",
         padding_seconds: float = 0.15,
+        extend_into_gap: bool = False,
     ) -> list[tuple[float, float]]:
         """Return one tight OCR window per suspect cue without merging cues."""
         return [
@@ -239,6 +240,7 @@ class AsrOcrReconciliationService:
                 asr_segments,
                 source_language=source_language,
                 padding_seconds=padding_seconds,
+                extend_into_gap=extend_into_gap,
             )
         ]
 
@@ -249,11 +251,13 @@ class AsrOcrReconciliationService:
         *,
         source_language: str = "auto",
         padding_seconds: float = 0.15,
+        extend_into_gap: bool = True,
     ) -> list[dict]:
         """Return tight OCR windows together with their expected ASR text."""
         explicit_family = cls._language_family(source_language)
         requests = []
-        for segment in asr_segments or []:
+        cue_list = list(asr_segments or [])
+        for idx, segment in enumerate(cue_list):
             if not cls._has_speech_evidence(segment):
                 continue
             family = explicit_family or cls._detect_family(segment.get("text", ""))
@@ -261,6 +265,19 @@ class AsrOcrReconciliationService:
                 continue
             cue_start = float(segment.get("start", 0.0) or 0.0)
             cue_end = max(cue_start, float(segment.get("end", cue_start) or cue_start))
+
+            # Look ahead to find the onset of the next spoken cue
+            next_start = None
+            for following in cue_list[idx + 1:]:
+                if cls._has_speech_evidence(following):
+                    try:
+                        next_start = float(following.get("start", cue_end) or cue_end)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+
+            trailing_gap = (next_start - cue_end) if next_start is not None else 0.0
+
             # A two-second VAD cue can already contain two burned-in subtitle
             # states. Sequence sampling catches that transition instead of
             # assigning the midpoint text to the whole speech interval.
@@ -268,9 +285,21 @@ class AsrOcrReconciliationService:
             effective_padding = 0.0 if scan_mode == "sequence" else max(float(padding_seconds), 0.15)
             start = max(0.0, cue_start - effective_padding)
             end = max(start, cue_end + effective_padding)
+
+            # When speech was prematurely truncated by VAD (< 1.35s) and a trailing
+            # silence gap exists before the next cue (>= 0.5s), the on-screen subtitle
+            # is almost certainly still visible. Extend the OCR end into the gap so
+            # video text recognition captures the actual on-screen subtitle disappearance.
+            if extend_into_gap and cue_end - cue_start < 1.35 and trailing_gap >= 0.5:
+                text_len = len(str(segment.get("text", "") or "").strip())
+                needed_estimate = max(1.5, text_len * 0.22 + 0.35)
+                max_extension = min(cue_start + needed_estimate, next_start - 0.08)
+                if max_extension > end:
+                    end = max_extension
+
             requests.append({
-                "start": start,
-                "end": end,
+                "start": round(start, 3),
+                "end": round(end, 3),
                 "text": str(segment.get("text", "") or "").strip(),
                 "scan_mode": scan_mode,
             })

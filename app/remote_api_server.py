@@ -13,6 +13,15 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 
+# Ensure repository root and app directory are in sys.path so modules can
+# import packages using either 'app.xxx' or flat 'xxx' regardless of how
+# this worker server was spawned.
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_CURRENT_DIR)
+for _p in (_PROJECT_ROOT, _CURRENT_DIR):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+
 os.environ.setdefault("VIUSTUDIO_RUNTIME_PROFILE", "local")
 
 

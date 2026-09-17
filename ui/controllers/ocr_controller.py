@@ -10,8 +10,16 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
 )
-from worker_adapters import OcrTranslatorCaptureWorker, OcrTranslatorTranslationWorker
-from utils.thread_lifecycle import release_thread_when_stopped
+try:
+    from ui.worker_adapters import OcrTranslatorCaptureWorker, OcrTranslatorTranslationWorker
+except ImportError:
+    from worker_adapters import OcrTranslatorCaptureWorker, OcrTranslatorTranslationWorker
+
+try:
+    from ui.utils.thread_lifecycle import release_thread_when_stopped
+except ImportError:
+    from utils.thread_lifecycle import release_thread_when_stopped
+
 
 
 class OcrController:

@@ -14,6 +14,8 @@ if APP_DIR not in sys.path:
 from app.layers.timeline import Timeline
 from app.services.timeline_video_sequence import (
     append_video,
+    insert_media,
+    is_image_file,
     move_video,
     normalize_v1_sequence,
     remove_video,
@@ -330,6 +332,127 @@ class TimelineSequenceExportTests(unittest.TestCase):
             )
             self.assertAlmostEqual(float(audio_probe.stdout.strip()), 1.0, delta=0.08)
 
+
+    def test_insert_media_intro_image_and_properties(self):
+        self.assertTrue(is_image_file("cover.PNG"))
+        self.assertTrue(is_image_file("slide.jpg"))
+        self.assertTrue(is_image_file("photo.webp"))
+        self.assertFalse(is_image_file("clip.mp4"))
+
+        timeline = Timeline()
+        append_video(timeline, "main_video.mp4", 10.0)
+        intro_layer = insert_media(timeline, "intro.png", 3.0, index=0)
+        
+        clips = timeline_video_clips(timeline)
+        self.assertEqual(len(clips), 2)
+        self.assertEqual(os.path.basename(clips[0].source), "intro.png")
+        self.assertTrue(clips[0].is_image)
+        self.assertAlmostEqual(clips[0].timeline_start, 0.0)
+        self.assertAlmostEqual(clips[0].timeline_end, 3.0)
+
+        self.assertEqual(os.path.basename(clips[1].source), "main_video.mp4")
+        self.assertFalse(clips[1].is_image)
+        self.assertAlmostEqual(clips[1].timeline_start, 3.0)
+        self.assertAlmostEqual(clips[1].timeline_end, 13.0)
+        self.assertAlmostEqual(timeline.duration, 13.0)
+
+        # Check A1 audio track: image has NO audio layer, only video does
+        audio_tracks = [track for track in timeline.tracks if track.name.startswith("A1")]
+        self.assertTrue(len(audio_tracks) > 0)
+        self.assertEqual(len(audio_tracks[0].layers), 1)
+        video_audio = audio_tracks[0].layers[0]
+        self.assertEqual(video_audio.volume, 1.0)
+        self.assertFalse(video_audio.muted)
+        self.assertAlmostEqual(video_audio.start, 3.0)
+        self.assertAlmostEqual(video_audio.end, 13.0)
+
+    def test_shift_timeline_timed_elements_keeps_subtitles_synced_with_video(self):
+        from ui.features.multi_video_timeline import MultiVideoTimelineMixin
+
+        class DummyGui(MultiVideoTimelineMixin):
+            def __init__(self, timeline_model):
+                self.timeline = type("Widget", (), {"_timeline": timeline_model, "set_duration": lambda *a: None, "_redraw": lambda *a: None})()
+                self.current_segments = [{"start": 1.0, "end": 3.0, "text": "Hello"}]
+                self.current_translated_segments = [{"start": 1.0, "end": 3.0, "text": "Xin chào"}]
+
+        timeline = Timeline()
+        vid = append_video(timeline, "vid.mp4", 10.0)
+        gui = DummyGui(timeline)
+
+        # 1. Insert 2.5s intro image at front
+        first_vid_before = vid.start  # 0.0
+        insert_media(timeline, "intro.png", 2.5, index=0)
+        first_vid_after = vid.start   # 2.5
+        shift = first_vid_after - first_vid_before
+        gui.shift_timeline_timed_elements(shift)
+
+        # Subtitle should be shifted by +2.5s
+        self.assertAlmostEqual(gui.current_segments[0]["start"], 3.5)
+        self.assertAlmostEqual(gui.current_segments[0]["end"], 5.5)
+        # Relative offset to video start remains 1.0s (exact sync with speech)
+        self.assertAlmostEqual(gui.current_segments[0]["start"] - vid.start, 1.0)
+
+        # 2. User trims intro image down to 1.5s (delta = -1.0s)
+        intro_layer = timeline.tracks[0].layers[0]
+        intro_layer.end = 1.5
+        first_vid_before = vid.start  # 2.5
+        normalize_v1_sequence(timeline)
+        first_vid_after = vid.start   # 1.5 (video rippled close, no gap!)
+        self.assertAlmostEqual(vid.start, 1.5)
+        self.assertAlmostEqual(intro_layer.end, 1.5)
+
+        shift = first_vid_after - first_vid_before  # -1.0s
+        gui.shift_timeline_timed_elements(shift)
+
+        # Subtitle should be shifted to 2.5s
+        self.assertAlmostEqual(gui.current_segments[0]["start"], 2.5)
+        self.assertAlmostEqual(gui.current_segments[0]["end"], 4.5)
+        # Relative offset to video start remains exactly 1.0s!
+        self.assertAlmostEqual(gui.current_segments[0]["start"] - vid.start, 1.0)
+
+    def test_export_timeline_with_intro_image(self):
+        from app.services.timeline_sequence_export import export_timeline_sequence
+        from runtime_paths import bin_path, subprocess_hidden_kwargs
+
+        ffmpeg = bin_path("ffmpeg", "ffmpeg.exe")
+        ffprobe = bin_path("ffmpeg", "ffprobe.exe")
+        if not (os.path.isfile(ffmpeg) and os.path.isfile(ffprobe)):
+            self.skipTest("ffmpeg binaries unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            img_path = os.path.join(temp_dir, "intro.png")
+            vid_path = os.path.join(temp_dir, "video.mp4")
+            
+            # Generate 1-frame image fixture
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1",
+                 "-frames:v", "1", img_path],
+                check=True, capture_output=True, **subprocess_hidden_kwargs(),
+            )
+            # Generate 1-second video fixture with audio
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=1.0",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=1.0",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", vid_path],
+                check=True, capture_output=True, **subprocess_hidden_kwargs(),
+            )
+
+            timeline = Timeline()
+            append_video(timeline, vid_path, 1.0)
+            insert_media(timeline, img_path, 1.0, index=0)
+            clips = [clip.to_dict() for clip in timeline_video_clips(timeline)]
+
+            output = os.path.join(temp_dir, "intro_and_video.mp4")
+            export_timeline_sequence(clips, output, output_fps=24)
+            self.assertTrue(os.path.isfile(output))
+
+            probe = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", output],
+                check=True, capture_output=True, text=True, **subprocess_hidden_kwargs(),
+            )
+            self.assertAlmostEqual(float(probe.stdout.strip()), 2.0, delta=0.25)
 
 if __name__ == "__main__":
     unittest.main()

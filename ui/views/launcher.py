@@ -689,6 +689,15 @@ class LauncherWindow(QDialog):
         self.srt_tts_btn.clicked.connect(self._on_srt_tts_project)
         action_row_one.addWidget(self.srt_tts_btn)
 
+        self.movie_review_btn = QPushButton("Movie Review Editor")
+        self.movie_review_btn.setMinimumHeight(38)
+        self.movie_review_btn.setMinimumWidth(150)
+        self.movie_review_btn.setCursor(Qt.PointingHandCursor)
+        self.movie_review_btn.setStyleSheet(sec_btn_style)
+        self.movie_review_btn.setToolTip("Open the independent scene-based movie recap workspace.")
+        self.movie_review_btn.clicked.connect(self._on_movie_review_project)
+        action_row_two.addWidget(self.movie_review_btn)
+
         self.split_btn = QPushButton("Split Video")
         self.split_btn.setMinimumHeight(38)
         self.split_btn.setMinimumWidth(100)
@@ -1086,6 +1095,14 @@ class LauncherWindow(QDialog):
         if getattr(self, "_is_accepting", False):
             return
         self.selected_launch_mode = "srt_tts"
+        self.selected_video = ""
+        self.selected_project_state_path = ""
+        self.accept()
+
+    def _on_movie_review_project(self):
+        if getattr(self, "_is_accepting", False):
+            return
+        self.selected_launch_mode = "movie_review"
         self.selected_video = ""
         self.selected_project_state_path = ""
         self.accept()

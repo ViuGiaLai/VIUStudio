@@ -308,18 +308,32 @@ class TimelineSelectionMixin:
                 if bool(getattr(layer, "locked", False)):
                     return
                 layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
-                if layer_type == "video":
-                    from app.services.timeline_video_sequence import normalize_v1_sequence
+                is_v1_clip = layer_type in {"video", "image"} and str(getattr(track, "name", "")).startswith("V1")
+                if is_v1_clip or str(getattr(track, "name", "")).startswith("V1"):
+                    from app.services.timeline_video_sequence import normalize_v1_sequence, ordered_video_layers, is_image_file
+
+                    # Track first video start before normalizing
+                    first_vid_before = next((float(l.start) for l in ordered_video_layers(self.timeline._timeline) if not is_image_file(l.source)), None)
 
                     normalize_v1_sequence(self.timeline._timeline)
                     self.timeline.set_duration(int(self.timeline._timeline.duration * 1000))
                     self.timeline._redraw()
+
+                    # Track first video start after normalizing and shift timed elements
+                    first_vid_after = next((float(l.start) for l in ordered_video_layers(self.timeline._timeline) if not is_image_file(l.source)), None)
+                    if first_vid_before is not None and first_vid_after is not None:
+                        shift_delta = first_vid_after - first_vid_before
+                        if abs(shift_delta) > 0.001 and hasattr(self, "shift_timeline_timed_elements"):
+                            self.shift_timeline_timed_elements(shift_delta, after_time=0.0)
+
+                    if hasattr(self, "_sync_canonical_source_after_change"):
+                        self._sync_canonical_source_after_change()
                     if hasattr(self, "refresh_source_video_list"):
                         self.refresh_source_video_list()
                     self.persist_current_timeline_project_data()
                     return
                 is_logo = layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
-                if layer_type not in {"blur", "mask", "text"} and not is_logo:
+                if layer_type not in {"blur", "mask", "text", "subtitle", "dub_subtitle"} and not is_logo:
                     return
                 layer.start = max(0.0, float(start))
                 layer.end = max(layer.start + float(getattr(self.timeline, "MIN_DUR", 0.1)), float(end))
@@ -381,8 +395,10 @@ class TimelineSelectionMixin:
         can_modify_layer = not bool(getattr(track, "locked", False)) and not bool(getattr(layer, "locked", False))
         if hasattr(self, "timeline_split_btn"):
             self.timeline_split_btn.setEnabled(
-                not is_review_mode and can_modify_layer and (layer_type in {"subtitle", "dub_subtitle", "blur", "mask", "text"}
-                or (layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo")
+                not is_review_mode and can_modify_layer and (
+                    layer_type in {"video", "subtitle", "dub_subtitle", "blur", "mask", "text"}
+                    or (layer_type == "image" and str(getattr(track, "name", "")) in {"L1 Logo", "V1 Video"})
+                    or str(getattr(track, "name", "")).startswith("V1")
                 )
             )
         if hasattr(self, "timeline_delete_btn"):

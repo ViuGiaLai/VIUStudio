@@ -137,10 +137,15 @@ class ModelSettingsMixin:
         layout.addWidget(whisper_title)
 
         whisper_combo = QComboBox(dialog)
-        whisper_combo.addItem("Base", "base")
-        whisper_combo.addItem("Small (Fast)", "small")
-        if os.environ.get("VIUSTUDIO_DEVICE", "cuda").strip().lower() == "cuda":
-            whisper_combo.addItem("Medium (Auto)", "medium")
+        is_gpu = os.environ.get("VIUSTUDIO_DEVICE", "cuda").strip().lower() == "cuda"
+        if is_gpu:
+            whisper_combo.addItem("Whisper Large-v3 (NÊN CÓ ⭐⭐⭐⭐⭐)", "large-v3")
+            whisper_combo.addItem("Whisper Large-v3-Turbo (Tùy chọn ⭐⭐⭐⭐½)", "large-v3-turbo")
+            whisper_combo.addItem("Whisper Medium (Cân bằng ⭐⭐⭐⭐)", "medium")
+        else:
+            whisper_combo.addItem("Whisper Medium", "medium")
+        whisper_combo.addItem("Whisper Small (Fast)", "small")
+        whisper_combo.addItem("Whisper Base", "base")
         current_whisper = str(getattr(self, "selected_whisper_model_name", "auto") or "auto").strip().lower()
         if current_whisper == "auto":
             current_whisper = self.get_whisper_model_name()
@@ -266,11 +271,11 @@ class ModelSettingsMixin:
         polish_model_layout = QVBoxLayout()
         polish_model_label = QLabel("Quality Model (fix / review sentences):")
         polish_model_edit = QLineEdit(dialog)
-        polish_model_edit.setPlaceholderText("Blank = use AI Model above (e.g. gemini-2.5-pro)")
+        polish_model_edit.setPlaceholderText("Blank = use AI Model above (e.g. gemini-3.6-flash)")
         polish_model_layout.addWidget(polish_model_label)
         polish_model_layout.addWidget(polish_model_edit)
         _polish_defaults = {
-            "google_ai_studio": ("GOOGLE_AI_STUDIO_POLISH_MODEL", "gemini-2.5-pro"),
+            "google_ai_studio": ("GOOGLE_AI_STUDIO_POLISH_MODEL", "gemini-3.6-flash"),
             "openai": ("OPENAI_POLISH_MODEL", ""),
         }
         _polish_env, _polish_default = _polish_defaults.get(current_provider, ("", ""))
@@ -326,8 +331,8 @@ class ModelSettingsMixin:
                 model_edit.setText(model)
                 base_url_edit.setText(base_url or "https://generativelanguage.googleapis.com/v1beta/openai/")
                 if not model_edit.text().strip():
-                    model_edit.setText("gemini-2.5-flash")
-                polish_model_edit.setText(os.getenv("GOOGLE_AI_STUDIO_POLISH_MODEL", "") or "gemini-2.5-pro")
+                    model_edit.setText("gemini-3.6-flash")
+                polish_model_edit.setText(os.getenv("GOOGLE_AI_STUDIO_POLISH_MODEL", "") or "gemini-3.6-flash")
                 provider_hint.setText("Use a Google AI Studio Gemini API key: https://aistudio.google.com/apikey")
             elif is_openai:
                 model_label.setText("AI Model:")
@@ -529,8 +534,8 @@ class ModelSettingsMixin:
                     "AI_POLISHER_PROVIDER": "google_ai_studio",
                     "OPENAI_PROVIDER": "google_ai_studio",
                     "GOOGLE_AI_STUDIO_API_KEY": new_key,
-                    "GOOGLE_AI_STUDIO_MODEL": new_model or "gemini-2.5-flash",
-                    "GOOGLE_AI_STUDIO_POLISH_MODEL": new_polish_model or "gemini-2.5-pro",
+                    "GOOGLE_AI_STUDIO_MODEL": new_model or "gemini-3.6-flash",
+                    "GOOGLE_AI_STUDIO_POLISH_MODEL": new_polish_model or "gemini-3.6-flash",
                     "GOOGLE_AI_STUDIO_BASE_URL": new_base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
                 }
             elif new_provider == "ollama":

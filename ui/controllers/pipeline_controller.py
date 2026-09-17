@@ -179,6 +179,11 @@ class PipelineController:
             "cuda" if str(processing_device or os.getenv("VIUSTUDIO_DEVICE", "cpu")).strip().lower() == "cuda"
             else "cpu"
         )
+        pp_entries = [app_root, os.path.join(app_root, "app"), os.path.join(app_root, "ui")]
+        existing_pp = env.get("PYTHONPATH", "")
+        if existing_pp:
+            pp_entries.append(existing_pp)
+        env["PYTHONPATH"] = os.pathsep.join(pp_entries)
 
         process_kwargs = subprocess_hidden_kwargs()
         if os.name == "nt":

@@ -20,6 +20,10 @@ from services import (
     SegmentService,
 )
 from services.resource_download_service import ResourceDownloadService
+try:
+    from services.timeline_video_sequence import is_image_file
+except ImportError:
+    from app.services.timeline_video_sequence import is_image_file
 
 
 def _ocr_quality_key() -> str:
@@ -586,7 +590,7 @@ class PrepareWorkflow:
         jobs = []
         for clip in timeline_clips:
             source = os.path.abspath(str(clip.get("source", "") or ""))
-            if not source or not os.path.isfile(source):
+            if not source or not os.path.isfile(source) or is_image_file(source):
                 continue
             source_start = max(0.0, float(clip.get("source_start", 0.0) or 0.0))
             source_duration = max(0.0, float(clip.get("source_duration", 0.0) or 0.0))
@@ -837,7 +841,7 @@ class PrepareWorkflow:
                 readiness_issues.extend(resource_service.validate_sensevoice_runtime())
             if prefetch_voice_name:
                 readiness_issues.extend(
-                    resource_service.validate_piper_voice_runtime(prefetch_voice_name)
+                    resource_service.validate_tts_voice_runtime(prefetch_voice_name)
                 )
             if readiness_issues:
                 details = "\n".join(f"- {detail}" for _code, detail in readiness_issues)
@@ -865,10 +869,28 @@ class PrepareWorkflow:
         streamed_translation_enabled = False
         timeline_clips = [dict(clip) for clip in (timeline_clips or []) if isinstance(clip, dict)]
         project_source_path = video_path
+        first_video_start = 0.0
         if timeline_clips:
-            first_timeline_source = str(timeline_clips[0].get("source", "") or "").strip()
-            if first_timeline_source and os.path.isfile(first_timeline_source):
-                project_source_path = first_timeline_source
+            first_video_clip = next(
+                (
+                    c for c in timeline_clips
+                    if str(c.get("source", "") or "").strip()
+                    and os.path.isfile(str(c.get("source", "") or "").strip())
+                    and not is_image_file(str(c.get("source", "") or "").strip())
+                ),
+                None,
+            )
+            if first_video_clip is not None:
+                first_video_source = str(first_video_clip.get("source", "") or "").strip()
+                first_video_start = max(0.0, float(first_video_clip.get("timeline_start", 0.0) or 0.0))
+            else:
+                first_video_source = ""
+            if first_video_source:
+                project_source_path = first_video_source
+            else:
+                first_timeline_source = str(timeline_clips[0].get("source", "") or "").strip()
+                if first_timeline_source and os.path.isfile(first_timeline_source):
+                    project_source_path = first_timeline_source
         project_state = self.project_service.ensure_project(
             project_source_path,
             mode=mode,
@@ -950,8 +972,11 @@ class PrepareWorkflow:
                 if is_timeline_sequence:
                     raw_segments = []
                     for clip in timeline_clips:
+                        source = str(clip.get("source", "") or "")
+                        if not source or not os.path.isfile(source) or is_image_file(source):
+                            continue
                         clip_segments = self.engine_runtime.transcribe_video_ocr(
-                            str(clip.get("source", "")), region=ocr_region
+                            source, region=ocr_region
                         )
                         source_start = float(clip.get("source_start", 0.0) or 0.0)
                         source_end = source_start + float(clip.get("source_duration", 0.0) or 0.0)
@@ -1325,6 +1350,21 @@ class PrepareWorkflow:
                 raw_segments = self.project_service.load_json_artifact(project_state, "transcript_raw", default=[])
                 if not raw_segments and segment_models:
                     raw_segments = [segment.to_original_subtitle_dict() for segment in segment_models]
+                if is_timeline_sequence and first_video_start > 0.05 and raw_segments:
+                    first_sub_start = float(raw_segments[0].get("start", 0.0) or 0.0)
+                    if first_sub_start < first_video_start - 0.05:
+                        offset = round(first_video_start, 3)
+                        aligned_raw = []
+                        for s in raw_segments:
+                            item = dict(s)
+                            st = round(float(item.get("start", 0.0) or 0.0) + offset, 3)
+                            et = round(float(item.get("end", st + 0.1) or (st + 0.1)) + offset, 3)
+                            item["start"] = max(first_video_start, st)
+                            item["end"] = max(item["start"] + 0.05, et)
+                            aligned_raw.append(item)
+                        raw_segments = aligned_raw
+                        segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
+                        print(f"[Prepare Workflow] Auto-aligned transcript by +{offset:.2f}s to match main video start.")
                 if has_imported_transcript:
                     print("[Prepare Workflow] Using imported transcript segments. Skipping transcription.")
                 else:
@@ -1507,6 +1547,18 @@ class PrepareWorkflow:
                         "No translatable speech remained after recognition quality checks. "
                         "Only unsupported breaths, effects, or filler sounds were detected."
                     )
+                if is_timeline_sequence and first_video_start > 0.05 and raw_segments:
+                    filtered_raw = []
+                    for seg in raw_segments:
+                        seg_end = float(seg.get("end", 0.0) or 0.0)
+                        if seg_end <= first_video_start:
+                            continue
+                        seg_start = float(seg.get("start", 0.0) or 0.0)
+                        if seg_start < first_video_start:
+                            seg["start"] = first_video_start
+                        filtered_raw.append(seg)
+                    if filtered_raw:
+                        raw_segments = filtered_raw
                 raw_segments = self.segment_regroup_service.deduplicate_and_clamp_timeline(raw_segments)
                 segment_models = self.segment_service.transcript_dicts_to_models(raw_segments)
                 project_state.set_setting("transcription_signature", transcription_signature)
@@ -1689,6 +1741,9 @@ class PrepareWorkflow:
                             speaker = str(segment_models[index].metadata.get("speaker", "") or "").strip()
                             if speaker:
                                 cached_model.metadata["speaker"] = speaker
+                            if is_timeline_sequence and first_video_start > 0.05:
+                                cached_model.start = float(segment_models[index].start)
+                                cached_model.end = float(segment_models[index].end)
                         segment_models = cached_models
                         print("[Prepare Workflow] Reusing cached Vietnamese subtitles. Generate did not call AI again.")
                     else:

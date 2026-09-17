@@ -1,14 +1,30 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from typing import Iterable
+
+_SERVICES_DIR = os.path.dirname(os.path.abspath(__file__))
+_APP_DIR = os.path.dirname(_SERVICES_DIR)
+_REPO_ROOT = os.path.dirname(_APP_DIR)
+for _p in (_REPO_ROOT, _APP_DIR):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from app.layers.audio import AudioLayer
 from app.layers.base import LayerType
 from app.layers.timeline import Timeline, Track
 from app.layers.transform import Transform
 from app.layers.video import VideoLayer
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
+
+def is_image_file(path: str) -> bool:
+    if not path:
+        return False
+    return os.path.splitext(str(path).strip())[1].lower() in IMAGE_EXTENSIONS
 
 
 @dataclass(frozen=True)
@@ -30,6 +46,10 @@ class TimelineVideoClip:
     def source_duration(self) -> float:
         return self.duration * max(0.01, self.speed)
 
+    @property
+    def is_image(self) -> bool:
+        return is_image_file(self.source)
+
     def to_dict(self) -> dict:
         return {
             "layer_id": self.layer_id,
@@ -41,6 +61,7 @@ class TimelineVideoClip:
             "speed": self.speed,
             "muted": self.muted,
             "volume": self.volume,
+            "is_image": self.is_image,
         }
 
 
@@ -133,7 +154,7 @@ def normalize_v1_sequence(timeline: Timeline, layers: Iterable[VideoLayer] | Non
     cursor = 0.0
     for index, layer in enumerate(ordered):
         duration = max(0.001, float(layer.end) - float(layer.start))
-        if getattr(layer, "source", ""):
+        if getattr(layer, "source", "") and not is_image_file(layer.source):
             try:
                 from ui.views.editor.timeline import EditorTimeline
                 source_dur = EditorTimeline._probe_video_duration(layer.source)
@@ -156,6 +177,9 @@ def normalize_v1_sequence(timeline: Timeline, layers: Iterable[VideoLayer] | Non
     }
     audio_layers = []
     for index, video in enumerate(ordered):
+        is_img = is_image_file(video.source)
+        if is_img:
+            continue
         audio = previous.get(str(video.id))
         if audio is None:
             audio = AudioLayer()
@@ -182,16 +206,48 @@ def append_video(timeline: Timeline, source: str, duration: float) -> VideoLayer
     if track is None:
         track = timeline.add_track("V1 Video", LayerType.VIDEO)
         track.height = 80
+    is_img = is_image_file(source)
     end = max((float(layer.end) for layer in ordered_video_layers(timeline)), default=0.0)
     layer = VideoLayer(
         name=os.path.basename(source),
         source=source,
         start=end,
         end=end + duration,
+        volume=0.0 if is_img else 1.0,
+        muted=True if is_img else False,
         transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
     )
+    if is_img:
+        layer.metadata["media_type"] = "image"
     track.layers.append(layer)
     normalize_v1_sequence(timeline)
+    return layer
+
+
+def insert_media(timeline: Timeline, source: str, duration: float, index: int = 0) -> VideoLayer:
+    """Insert a video or image clip at a specific index in the V1 sequence (e.g. index=0 for intro)."""
+    source = os.path.abspath(str(source))
+    duration = max(0.001, float(duration))
+    track = video_track(timeline)
+    if track is None:
+        track = timeline.add_track("V1 Video", LayerType.VIDEO)
+        track.height = 80
+    is_img = is_image_file(source)
+    layer = VideoLayer(
+        name=os.path.basename(source),
+        source=source,
+        start=0.0,
+        end=duration,
+        volume=0.0 if is_img else 1.0,
+        muted=True if is_img else False,
+        transform=Transform(x=0, y=0, scale_x=1.0, scale_y=1.0),
+    )
+    if is_img:
+        layer.metadata["media_type"] = "image"
+    current = ordered_video_layers(timeline)
+    insert_at = max(0, min(int(index), len(current)))
+    current.insert(insert_at, layer)
+    normalize_v1_sequence(timeline, current)
     return layer
 
 
@@ -213,3 +269,31 @@ def remove_video(timeline: Timeline, layer_id: str) -> bool:
         return False
     normalize_v1_sequence(timeline, remaining)
     return True
+
+
+def resolve_timeline_content_offset(timeline_clips: list[dict] | None) -> float:
+    """Calculate the global timeline offset where primary video content begins,
+    accounting for preceding intro image/video bumper clips.
+    This is the single source of truth for intro offset across all exporters.
+    """
+    if not timeline_clips:
+        return 0.0
+    for clip in timeline_clips:
+        if not isinstance(clip, dict):
+            continue
+        source = str(clip.get("source", "") or "").strip()
+        if source and not is_image_file(source):
+            return max(0.0, float(clip.get("timeline_start", 0.0) or 0.0))
+    return 0.0
+
+
+def is_already_timeline_relative(cues_or_segments: list[dict] | None, content_offset: float) -> bool:
+    """Detect whether subtitles or audio cues are ALREADY positioned in timeline-relative space.
+    Guards against double-offsetting when downstream exporters process cues.
+    """
+    if not cues_or_segments or content_offset <= 0.05:
+        return True
+    if any(bool(s.get("_timeline_relative")) for s in cues_or_segments if isinstance(s, dict)):
+        return True
+    first_start = float(cues_or_segments[0].get("start", 0.0) or 0.0)
+    return first_start >= content_offset - 0.05

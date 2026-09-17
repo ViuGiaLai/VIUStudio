@@ -14,6 +14,9 @@ class RemoteTranslatorAdapter:
         enable_polish: bool = True,
         optimize_subtitles: bool = False,
         style_instruction: str = "",
+        on_progress=None,
+        cancellation_check=None,
+        **kwargs,
     ) -> str:
         response = remote_api_post(
             "/v1/translate-srt",
@@ -39,6 +42,9 @@ class RemoteTranslatorAdapter:
         optimize_subtitles: bool = False,
         style_instruction: str = "",
         batch_callback=None,
+        on_progress=None,
+        cancellation_check=None,
+        **kwargs,
     ):
         response = remote_api_post(
             "/v1/translate-segments",

@@ -395,7 +395,7 @@ class ProjectStateMixin:
             if not loaded.tracks:
                 return False
 
-            from app.services.timeline_video_sequence import ordered_video_layers, timeline_video_clips
+            from app.services.timeline_video_sequence import ordered_video_layers, timeline_video_clips, is_image_file
 
             loaded_clips = timeline_video_clips(loaded)
             loaded_sources = [os.path.normcase(os.path.abspath(clip.source)) for clip in loaded_clips]
@@ -403,10 +403,25 @@ class ProjectStateMixin:
             recap_source = os.path.normcase(os.path.abspath(str(artifacts.get("auto_recap_video", "") or "")))
             allowed_first_sources = {source for source in (canonical_source, recap_source) if source}
 
+            lineage = list(getattr(state, "settings", {}).get("timeline_video_clips") or [])
+            lineage_sources = [
+                os.path.normcase(os.path.abspath(str(item.get("source", "") or "")))
+                for item in lineage if isinstance(item, dict) and item.get("source")
+            ]
+            if lineage_sources:
+                allowed_first_sources.add(lineage_sources[0])
+            first_real_video = next((src for src in loaded_sources if not is_image_file(src)), None)
+            target_source = first_real_video if first_real_video is not None else (loaded_sources[0] if loaded_sources else None)
+
             # A restored V1 whose first clip belongs to another imported
             # video is evidence of the old project-switch leak. Never let it
             # replace the selected project's source in the editor.
-            if loaded_sources and loaded_sources[0] not in allowed_first_sources:
+            first_clip_mismatch = (
+                bool(target_source)
+                and bool(canonical_source)
+                and target_source not in allowed_first_sources
+            )
+            if first_clip_mismatch:
                 self._project_media_source_mismatch = True
                 self.log(
                     "[Project Recovery] Saved Timeline belongs to another source; "
@@ -416,12 +431,6 @@ class ProjectStateMixin:
                 if callable(reset_timeline):
                     reset_timeline()
                 return False
-
-            lineage = list(getattr(state, "settings", {}).get("timeline_video_clips") or [])
-            lineage_sources = [
-                os.path.normcase(os.path.abspath(str(item.get("source", "") or "")))
-                for item in lineage if isinstance(item, dict) and item.get("source")
-            ]
             # The prepare pipeline records the exact source order used to
             # produce transcript/translation/voice artifacts. If the saved
             # editor Timeline now points at a different video set, those
@@ -550,9 +559,15 @@ class ProjectStateMixin:
         recap_source_for_lineage = os.path.normcase(os.path.abspath(str(
             getattr(state, "artifacts", {}).get("auto_recap_video", "") or ""
         )))
+        from app.services.timeline_video_sequence import is_image_file
+        first_video_in_lineage = next(
+            (src for src in lineage_sources if not is_image_file(src)),
+            lineage_sources[0] if lineage_sources else None
+        )
         if (
             lineage_sources
             and lineage_sources[0] not in {canonical_source, recap_source_for_lineage}
+            and first_video_in_lineage not in {canonical_source, recap_source_for_lineage}
         ):
             self._project_media_source_mismatch = True
 

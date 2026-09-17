@@ -10,6 +10,10 @@ from app.services.segment_regroup_service import SegmentRegroupService
 
 
 class SegmentRegroupServiceTests(unittest.TestCase):
+    def setUp(self):
+        SegmentRegroupService._QUOTA_EXHAUSTED_UNTIL = 0.0
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+
     def test_long_chinese_cue_without_word_timing_is_split(self):
         service = SegmentRegroupService()
         result = service.regroup(
@@ -127,8 +131,175 @@ class SegmentRegroupServiceTests(unittest.TestCase):
             {"start": "bad", "end": 4.0, "text": "忽略"},
         ])
         self.assertEqual([item["text"] for item in result], ["第一句", "第二句"])
-        self.assertEqual(result[0]["start"], 0.0)
+    def test_short_cue_followed_by_silence_expands_into_gap(self):
+        # Truncated 0.42s Chinese cue followed by 1.35s gap before next cue
+        service = SegmentRegroupService()
+        result = service.expand_short_cues_into_gaps([
+            {
+                "start": 53.839,
+                "end": 54.261,
+                "text": "你倒是挺大方的",
+                "dubbing_vi": "Anh hào phóng thật đấy.",
+            },
+            {
+                "start": 55.606,
+                "end": 57.241,
+                "text": "拿着吧 赶紧趁热吃",
+                "dubbing_vi": "Cầm lấy, ăn nóng đi cháu.",
+            },
+        ])
+        self.assertEqual(len(result), 2)
+        # Subtitle timeline is strictly IMMUTABLE (preserves video sync)
+        self.assertEqual(result[0]["start"], 53.839)
+        self.assertEqual(result[0]["end"], 54.261)
+        self.assertEqual(result[0]["sub_start"], 53.839)
+        self.assertEqual(result[0]["sub_end"], 54.261)
+
+        # Voice speech window expands into the gap to provide comfortable speech duration
+        self.assertGreater(result[0]["voice_end"], 55.0)
+        # But must not collide with Cue 2 onset (safe margin 0.08s)
+        self.assertLessEqual(result[0]["voice_end"], 55.606 - 0.08)
+        self.assertAlmostEqual(result[1]["start"], 55.606)
+
+    def test_short_cue_without_gap_is_not_expanded_over_next_cue(self):
+        service = SegmentRegroupService()
+        result = service.expand_short_cues_into_gaps([
+            {"start": 1.0, "end": 1.4, "text": "Đợi đã"},
+            {"start": 1.45, "end": 2.5, "text": "Tôi tới ngay"},
+        ])
+        self.assertEqual(len(result), 2)
+        # Gap is only 0.05s (< safe_gap 0.08s), cue 1 must not overshoot cue 2
+        self.assertLessEqual(result[0]["end"], 1.45)
+
+    def test_ai_shorten_text_for_tts_mocked(self):
+        from unittest.mock import MagicMock, patch
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Hôm nay tôi rất vui vẻ."
+        mock_response.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("openai.OpenAI", return_value=mock_client), \
+             patch.dict("os.environ", {"GOOGLE_AI_STUDIO_API_KEY": "fake_test_key", "GOOGLE_AI_STUDIO_MODEL": "gemini-3.6-flash"}):
+            shortened = SegmentRegroupService.ai_shorten_text_for_tts(
+                "Hôm nay tôi cảm thấy thực sự vô cùng rất là vui vẻ và hạnh phúc.",
+                available_duration=1.2,
+                context_prev="Chào bạn,",
+            )
+            self.assertEqual(shortened, "Hôm nay tôi rất vui vẻ.")
+            self.assertTrue(mock_client.chat.completions.create.called)
+            call_kwargs = mock_client.chat.completions.create.call_args[1]
+            self.assertEqual(call_kwargs["model"], "gemini-3.6-flash")
+            # Verify prompt mentions context and constraints
+            prompt_content = call_kwargs["messages"][0]["content"]
+            self.assertIn("Chào bạn,", prompt_content)
+            self.assertIn("rút gọn", prompt_content.lower())
+
+    def test_ai_shorten_text_for_tts_rejects_dropping_negation(self):
+        from unittest.mock import MagicMock, patch
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        # AI hallucinated and dropped "không"
+        mock_choice.message.content = "Tôi đồng ý với việc này."
+        mock_response.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("openai.OpenAI", return_value=mock_client), \
+             patch.dict("os.environ", {"GOOGLE_AI_STUDIO_API_KEY": "fake_test_key"}):
+            original = "Tôi không đồng ý với việc này đâu."
+            result = SegmentRegroupService.ai_shorten_text_for_tts(original, available_duration=1.0)
+            # Must reject and return original to protect semantics
+            self.assertEqual(result, original)
+
+    def test_ai_shorten_text_for_tts_rejects_longer_output(self):
+        from unittest.mock import MagicMock, patch
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        # AI generated a longer sentence
+        mock_choice.message.content = "Tôi đang cảm thấy vô cùng háo hức và mong chờ từng giây phút một."
+        mock_response.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("openai.OpenAI", return_value=mock_client), \
+             patch.dict("os.environ", {"GOOGLE_AI_STUDIO_API_KEY": "fake_test_key"}):
+            original = "Tôi đang rất háo hức."
+            result = SegmentRegroupService.ai_shorten_text_for_tts(original, available_duration=0.8)
+            self.assertEqual(result, original)
+
+    def test_expand_short_cues_uses_ai_shortening_on_overflow(self):
+        from unittest.mock import patch
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+
+        # Mock ai_shorten_text_for_tts to return a succinct sentence
+        with patch.object(
+            SegmentRegroupService,
+            "ai_shorten_text_for_tts",
+            return_value="Đừng đi lung tung.",
+        ) as mock_ai:
+            segments = [
+                {
+                    "start": 10.0,
+                    "end": 10.8,
+                    "text": "Tuyệt đối không được phép chạy lung tung khắp mọi nơi như vậy.",
+                }
+            ]
+            result = SegmentRegroupService.expand_short_cues_into_gaps(segments, enable_ai=True)
+            self.assertEqual(len(result), 1)
+            # The AI candidate should be used for dubbing_vi and tts_text
+            self.assertEqual(result[0]["dubbing_vi"], "Đừng đi lung tung.")
+            self.assertEqual(result[0]["tts_text"], "Đừng đi lung tung.")
+            self.assertTrue(mock_ai.called)
+
+    def test_expand_short_cues_skips_ai_when_enable_ai_false(self):
+        from unittest.mock import patch
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+
+        with patch.object(SegmentRegroupService, "ai_shorten_text_for_tts") as mock_ai:
+            segments = [
+                {
+                    "start": 10.0,
+                    "end": 10.8,
+                    "text": "Tuyệt đối không được phép chạy lung tung khắp mọi nơi như vậy.",
+                }
+            ]
+            # Default enable_ai is False (used during UI timeline / project loading)
+            result = SegmentRegroupService.expand_short_cues_into_gaps(segments, enable_ai=False)
+            self.assertEqual(len(result), 1)
+            # Must NOT call AI to prevent blocking the UI thread
+            self.assertFalse(mock_ai.called)
+
+    def test_ai_shorten_circuit_breaker_on_429(self):
+        from unittest.mock import MagicMock, patch
+        SegmentRegroupService._AI_SHORTEN_CACHE.clear()
+        SegmentRegroupService._QUOTA_EXHAUSTED_UNTIL = 0.0
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = Exception("429 RESOURCE_EXHAUSTED: Quota exceeded")
+
+        with patch("openai.OpenAI", return_value=mock_client), \
+             patch.dict("os.environ", {"GOOGLE_AI_STUDIO_API_KEY": "fake_test_key"}):
+            original = "Hôm nay tôi rất vui vẻ và hạnh phúc."
+            # First call triggers 429
+            res1 = SegmentRegroupService.ai_shorten_text_for_tts(original, available_duration=1.0)
+            self.assertEqual(res1, original)
+            self.assertTrue(SegmentRegroupService._QUOTA_EXHAUSTED_UNTIL > 0.0)
+
+            # Second call should be intercepted by circuit breaker instantly without calling API
+            mock_client.chat.completions.create.reset_mock()
+            res2 = SegmentRegroupService.ai_shorten_text_for_tts("Một câu khác nữa", available_duration=1.0)
+            self.assertEqual(res2, "Một câu khác nữa")
+            self.assertFalse(mock_client.chat.completions.create.called)
 
 
 if __name__ == "__main__":
     unittest.main()
+

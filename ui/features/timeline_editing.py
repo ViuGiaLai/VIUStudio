@@ -4,7 +4,7 @@ from uuid import uuid4
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, QComboBox,
-                             QDoubleSpinBox,
+                             QDoubleSpinBox, QLineEdit, QCheckBox,
                              QFrame, QMessageBox,
                              QDialog, QSizePolicy)
 from PySide6.QtCore import Qt, QUrl, QTimer, QPoint, QRect
@@ -142,7 +142,8 @@ class TimelineEditingMixin:
             return
         index = int(getattr(self, "_selected_segment_index", -1))
         if not (0 <= index < len(segments)):
-            index = self._find_active_segment_index(self.media_player.position(), segments)
+            pos = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else self.media_player.position()
+            index = self._find_active_segment_index(pos, segments)
         if not (0 <= index < len(segments)):
             return
 
@@ -171,7 +172,8 @@ class TimelineEditingMixin:
             return
         index = int(getattr(self, "_selected_segment_index", -1))
         if not (0 <= index < len(segments)):
-            index = self._find_active_segment_index(self.media_player.position(), segments)
+            pos = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else self.media_player.position()
+            index = self._find_active_segment_index(pos, segments)
         if not (0 <= index < len(segments)):
             return
 
@@ -287,7 +289,8 @@ class TimelineEditingMixin:
             return
         index = int(getattr(self, "_selected_segment_index", -1))
         if not (0 <= index < len(segments)):
-            index = self._find_active_segment_index(self.media_player.position(), segments)
+            pos = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else self.media_player.position()
+            index = self._find_active_segment_index(pos, segments)
         if not (0 <= index < len(segments)):
             QMessageBox.information(self, "Split Segment", "Please select an audio/subtitle block first.")
             return
@@ -742,7 +745,8 @@ class TimelineEditingMixin:
             QMessageBox.information(self, "Layer Locked", "Unlock this layer before splitting it.")
             return True
         layer_type = str(getattr(getattr(selected_layer, "type", ""), "value", getattr(selected_layer, "type", ""))).lower()
-        if layer_type == "video":
+        is_v1_clip = layer_type == "video" or str(getattr(selected_track, "name", "")).startswith("V1")
+        if is_v1_clip:
             split_time = self.timeline_position_seconds() if hasattr(self, "timeline_position_seconds") else float(self.media_player.position()) / 1000.0
             if selection:
                 candidates = [float(value) for value in selection]
@@ -753,7 +757,7 @@ class TimelineEditingMixin:
             start, end = float(selected_layer.start), float(selected_layer.end)
             min_duration = max(0.1, float(getattr(timeline, "MIN_DUR", 0.1)))
             if not (start + min_duration < split_time < end - min_duration):
-                QMessageBox.information(self, "Split Video", "Place the playhead inside the selected video before splitting.")
+                QMessageBox.information(self, "Split Video", "Place the playhead inside the selected clip before splitting.")
                 return True
             first = copy.deepcopy(selected_layer)
             second = copy.deepcopy(selected_layer)
@@ -769,9 +773,15 @@ class TimelineEditingMixin:
             timeline._selected_layer_id = second.id
             timeline.set_duration(int(timeline._timeline.duration * 1000))
             timeline._redraw()
-            self.refresh_source_video_list()
+            if hasattr(self, "_sync_canonical_source_after_change"):
+                self._sync_canonical_source_after_change()
+            if hasattr(self, "refresh_source_video_list"):
+                self.refresh_source_video_list()
+            if hasattr(self, "schedule_timeline_visual_refresh"):
+                self.schedule_timeline_visual_refresh(waveform=True, thumbnails=True)
             self.persist_current_timeline_project_data()
             return True
+
         is_logo = layer_type == "image" and str(getattr(selected_track, "name", "")) == "L1 Logo"
         if layer_type not in {"blur", "mask", "text"} and not is_logo:
             return False
@@ -910,12 +920,14 @@ class TimelineEditingMixin:
             self.current_translated_segment_models = []
             self._single_line_split_cache = None
             self._selected_segment_index = -1
-            if hasattr(self, "subtitle_list_model"):
-                self.subtitle_list_model.layoutChanged.emit()
-            if hasattr(self, "transcript_text"):
-                self.transcript_text.clear()
-            if hasattr(self, "translated_text"):
-                self.translated_text.clear()
+            self._syncing_hidden_editor_text = True
+            try:
+                if hasattr(self, "transcript_text"):
+                    self.transcript_text.clear()
+                if hasattr(self, "translated_text"):
+                    self.translated_text.clear()
+            finally:
+                self._syncing_hidden_editor_text = False
             self._invalidate_dubbed_output_after_subtitle_edit()
             self.last_original_srt_path = ""
             self.last_translated_srt_path = ""
@@ -1030,19 +1042,27 @@ class TimelineEditingMixin:
                         self.timeline._selected_layer_id = ""
                         self._selected_segment_index = segment_index
                         return self.delete_selected_timeline_segment()
-                    if layer_type == "video":
-                        from app.services.timeline_video_sequence import ordered_video_layers, remove_video
+                    is_v1_clip = (
+                        layer_type in {"video", "image"}
+                        or str(getattr(track, "name", "")).startswith("V1")
+                    )
+                    if is_v1_clip:
+                        from app.services.timeline_video_sequence import ordered_video_layers, remove_video, is_image_file
                         if len(ordered_video_layers(self.timeline._timeline)) <= 1:
-                            QMessageBox.information(self, "Delete Video", "A project must keep at least one video on V1.")
+                            QMessageBox.information(self, "Delete Clip", "A project must keep at least one clip on V1.")
                             return
+                        first_vid_before = next((float(l.start) for l in ordered_video_layers(self.timeline._timeline) if not is_image_file(l.source)), None)
                         remove_video(self.timeline._timeline, layer.id)
+                        first_vid_after = next((float(l.start) for l in ordered_video_layers(self.timeline._timeline) if not is_image_file(l.source)), None)
+                        if first_vid_before is not None and first_vid_after is not None:
+                            shift_delta = first_vid_after - first_vid_before
+                            if abs(shift_delta) > 0.001 and hasattr(self, "shift_timeline_timed_elements"):
+                                self.shift_timeline_timed_elements(shift_delta, after_time=0.0)
                         self.timeline._selected_layer_id = ""
                         self.timeline.set_duration(int(self.timeline._timeline.duration * 1000))
                         self.timeline._redraw()
                         if hasattr(self, "_sync_canonical_source_after_change"):
                             self._sync_canonical_source_after_change()
-                        if hasattr(self, "_invalidate_artifacts_after_timeline_change"):
-                            self._invalidate_artifacts_after_timeline_change()
                         self.refresh_source_video_list()
                         self.persist_current_timeline_project_data()
                         return
@@ -1179,7 +1199,8 @@ class TimelineEditingMixin:
             if matching:
                 index = matching[0]
         if not (0 <= index < len(segments)):
-            index = self._find_active_segment_index(self.media_player.position(), segments)
+            pos = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else self.media_player.position()
+            index = self._find_active_segment_index(pos, segments)
         if not (0 <= index < len(segments)):
             QMessageBox.information(self, "Delete Segment", "Please select an audio/subtitle block first.")
             return
@@ -1627,7 +1648,7 @@ class TimelineEditingMixin:
             return
         if position_ms is None:
             try:
-                position_ms = int(self.media_player.position())
+                position_ms = int(self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else self.media_player.position())
             except Exception:
                 return
         else:
@@ -1699,23 +1720,64 @@ class TimelineEditingMixin:
                 card_layout.setContentsMargins(4, 4, 4, 4)
                 card_layout.setSpacing(6)
 
-                # Start/End timing chips with duration
+                # Start/End timing chips with duration and nudge/sync controls
                 timing_meta_layout = QHBoxLayout()
                 timing_meta_layout.setContentsMargins(0, 0, 0, 0)
-                timing_meta_layout.setSpacing(6)
-                start_label = QLabel(f"Start  {self.format_timestamp(row['start'])}")
-                start_label.setObjectName("timingChip")
-                start_label.setFixedHeight(24)
-                end_label = QLabel(f"End  {self.format_timestamp(row['end'])}")
-                end_label.setObjectName("timingChip")
-                end_label.setFixedHeight(24)
+                timing_meta_layout.setSpacing(5)
+
+                start_lbl_tag = QLabel("Bắt đầu:")
+                start_lbl_tag.setStyleSheet("color: #64748b; font-size: 11px; font-weight: 600;")
+                start_edit = QLineEdit(self.format_timestamp(row['start']))
+                start_edit.setFixedHeight(24)
+                start_edit.setFixedWidth(102)
+                start_edit.setStyleSheet(
+                    "QLineEdit { background: #0c1420; color: #38bdf8; border: 1px solid #23354d; border-radius: 4px; "
+                    "font-family: Consolas, monospace; font-size: 11px; padding: 2px 4px; }"
+                    "QLineEdit:focus { border-color: #3b82f6; background: #101c2e; }"
+                )
+                start_edit.setToolTip("Thời gian bắt đầu (Enter để cập nhật: HH:MM:SS,mmm hoặc giây)")
+
+                end_lbl_tag = QLabel("Kết thúc:")
+                end_lbl_tag.setStyleSheet("color: #64748b; font-size: 11px; font-weight: 600;")
+                end_edit = QLineEdit(self.format_timestamp(row['end']))
+                end_edit.setFixedHeight(24)
+                end_edit.setFixedWidth(102)
+                end_edit.setStyleSheet(
+                    "QLineEdit { background: #0c1420; color: #38bdf8; border: 1px solid #23354d; border-radius: 4px; "
+                    "font-family: Consolas, monospace; font-size: 11px; padding: 2px 4px; }"
+                    "QLineEdit:focus { border-color: #3b82f6; background: #101c2e; }"
+                )
+                end_edit.setToolTip("Thời gian kết thúc (Enter để cập nhật: HH:MM:SS,mmm hoặc giây)")
+
                 duration_sec = max(0.0, float(row.get('end', 0) or 0) - float(row.get('start', 0) or 0))
                 dur_label = QLabel(f"{duration_sec:.2f}s")
                 dur_label.setObjectName("durationChip")
                 dur_label.setFixedHeight(24)
-                dur_label.setToolTip("Duration of this subtitle cue")
-                timing_meta_layout.addWidget(start_label)
-                timing_meta_layout.addWidget(end_label)
+                dur_label.setToolTip("Độ dài câu phụ đề (Duration)")
+
+                def _on_start_edited(target_idx=idx, s_edit=start_edit, orig_st=float(row['start']), orig_en=float(row.get('end', 0) or 0)):
+                    from ui.helpers.srt_helpers import parse_timestamp
+                    parsed = parse_timestamp(s_edit.text())
+                    if parsed is not None and abs(parsed - orig_st) > 0.001:
+                        cur_dur = max(0.05, orig_en - orig_st)
+                        new_end = parsed + cur_dur
+                        self.on_timeline_segment_timing_changed(target_idx, parsed, new_end)
+
+                def _on_end_edited(target_idx=idx, e_edit=end_edit, orig_st=float(row['start']), orig_en=float(row.get('end', 0) or 0)):
+                    from ui.helpers.srt_helpers import parse_timestamp
+                    parsed = parse_timestamp(e_edit.text())
+                    if parsed is not None and parsed > orig_st and abs(parsed - orig_en) > 0.001:
+                        self.on_timeline_segment_timing_changed(target_idx, orig_st, parsed)
+
+                start_edit.returnPressed.connect(_on_start_edited)
+                start_edit.editingFinished.connect(_on_start_edited)
+                end_edit.returnPressed.connect(_on_end_edited)
+                end_edit.editingFinished.connect(_on_end_edited)
+
+                timing_meta_layout.addWidget(start_lbl_tag)
+                timing_meta_layout.addWidget(start_edit)
+                timing_meta_layout.addWidget(end_lbl_tag)
+                timing_meta_layout.addWidget(end_edit)
                 timing_meta_layout.addWidget(dur_label)
                 timing_meta_layout.addStretch()
                 card_layout.addLayout(timing_meta_layout)
@@ -2780,3 +2842,15 @@ class TimelineEditingMixin:
         self._mask_color_handler = _on_color_clicked
         if hasattr(self, "mask_inspector_color_btn"):
             self.mask_inspector_color_btn.clicked.connect(_on_color_clicked)
+
+    def open_subtitle_timing_dialog(self, target_index: int | None = None):
+        """Open the SubtitleSyncDialog to shift, snap, or ripple-sync subtitle timings."""
+        from ui.dialogs.subtitle_sync_dialog import SubtitleSyncDialog
+        if target_index is None:
+            target_index = getattr(self, "_selected_segment_index", -1)
+            if target_index < 0:
+                pos = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else self.media_player.position()
+                segments = list(self.get_active_segments() or [])
+                target_index = self._find_active_segment_index(pos, segments)
+        dialog = SubtitleSyncDialog(self, selected_index=int(target_index), parent=self)
+        dialog.exec()

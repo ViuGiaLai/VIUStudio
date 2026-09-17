@@ -179,7 +179,7 @@ class TranslationProviderConfigTests(unittest.TestCase):
                 harness = _ProviderHarness()
                 harness.translation_engine_combo = _Combo("google_ai_studio")
                 harness.translation_api_key_edit = _LineEdit("gemini-test-key")
-                harness.translation_model_edit = _LineEdit("gemini-2.5-flash")
+                harness.translation_model_edit = _LineEdit("gemini-3.6-flash")
                 harness.translation_base_url_edit = _LineEdit(
                     "https://generativelanguage.googleapis.com/v1beta/openai/"
                 )
@@ -192,7 +192,7 @@ class TranslationProviderConfigTests(unittest.TestCase):
                 self.assertIn("OPENAI_PROVIDER=google_ai_studio", content)
                 self.assertIn("AI_POLISHER_PROVIDER=google_ai_studio", content)
                 self.assertIn("GOOGLE_AI_STUDIO_API_KEY=gemini-test-key", content)
-                self.assertIn("GOOGLE_AI_STUDIO_MODEL=gemini-2.5-flash", content)
+                self.assertIn("GOOGLE_AI_STUDIO_MODEL=gemini-3.6-flash", content)
         finally:
             for key, value in old_values.items():
                 if value is None:

@@ -4,7 +4,7 @@ import unittest
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path[:0] = [os.path.join(ROOT, "ui"), ROOT]
+sys.path[:0] = [os.path.join(ROOT, "app"), os.path.join(ROOT, "ui"), ROOT]
 
 from helpers.srt_helpers import normalize_subtitle_timing
 

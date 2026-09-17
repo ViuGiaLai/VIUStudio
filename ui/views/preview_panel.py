@@ -27,8 +27,12 @@ from PySide6.QtWidgets import (
 
 from runtime_paths import asset_path
 from widgets import MpvVideoView, VideoView
-from utils.icon_utils import load_icon
-from utils.media_backend import is_mpv_backend_available
+try:
+    from ui.utils.icon_utils import load_icon
+    from ui.utils.media_backend import is_mpv_backend_available
+except ImportError:
+    from utils.icon_utils import load_icon
+    from utils.media_backend import is_mpv_backend_available
 
 
 class _PreviewTimelineHandle(QSplitterHandle):
@@ -871,6 +875,21 @@ def build_preview_panel(gui):
     gui.timeline.addSubtitleAtRequested.connect(
         lambda _t: gui.on_add_timeline_layer("subtitle") if hasattr(gui, "on_add_timeline_layer") else None
     )
+    gui.timeline.rippleNudgeRequested.connect(
+        lambda idx, delta: (
+            gui.set_selected_segment_index(idx, sync_ui=False) if hasattr(gui, "set_selected_segment_index") else None,
+            gui.ripple_nudge_selected_timeline_segment(delta) if hasattr(gui, "ripple_nudge_selected_timeline_segment") else None,
+        )
+    )
+    gui.timeline.syncSubtitlesRequested.connect(
+        lambda idx=-1: gui.open_subtitle_timing_dialog(idx if idx >= 0 else None) if hasattr(gui, "open_subtitle_timing_dialog") else None
+    )
+    def _align_sub_to_video(idx):
+        from ui.dialogs.subtitle_sync_dialog import SubtitleSyncDialog
+        dialog = SubtitleSyncDialog(gui, selected_index=idx, parent=gui)
+        dialog.btn_preset_video.click()
+        dialog._on_apply()
+    gui.timeline.alignToVideoStartRequested.connect(_align_sub_to_video)
     gui.time_label = QLabel("00:00 / 00:00")
     gui.time_label.setObjectName("previewTimeLabel")
     gui.time_label.setMinimumWidth(100)
@@ -1291,6 +1310,10 @@ def build_preview_panel(gui):
     gui._layer_menu.addAction("Logo / Watermark", lambda: gui.on_add_timeline_layer("logo"))
     gui._layer_menu.addAction("Blur", lambda: gui.on_add_timeline_layer("blur"))
     gui._layer_menu.addAction("Mask", lambda: gui.on_add_timeline_layer("mask"))
+    gui._layer_menu.addSeparator()
+    gui._layer_menu.addAction("🖼️ Chèn ảnh vào đầu (Intro)", lambda: gui.add_images_to_timeline(insert_front=True))
+    gui._layer_menu.addAction("➕ Thêm ảnh vào cuối V1", lambda: gui.add_images_to_timeline(insert_front=False))
+    gui._layer_menu.addAction("🎬 Thêm video vào V1", lambda: gui.add_videos_to_timeline(insert_front=False))
     gui.add_layer_btn.setMenu(gui._layer_menu)
 
     timeline_toolbar_style = (

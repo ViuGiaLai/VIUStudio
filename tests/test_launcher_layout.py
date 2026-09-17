@@ -35,10 +35,15 @@ class LauncherLayoutTests(unittest.TestCase):
                     self.app.processEvents()
                     self.assertEqual(window.grid.count(), 5)
                     self.assertEqual(window.project_scroll.horizontalScrollBar().maximum(), 0)
-                    buttons = [window.new_btn, window.srt_tts_btn, window.split_btn, window.resource_btn]
-                    for first, second in zip(buttons, buttons[1:]):
-                        self.assertFalse(first.geometry().intersects(second.geometry()))
+                    for buttons in (
+                        [window.new_btn, window.srt_tts_btn, window.split_btn, window.resource_btn],
+                        [window.movie_review_btn, window.open_project_btn, window.clean_video_btn, window.about_btn],
+                    ):
+                        for first, second in zip(buttons, buttons[1:]):
+                            self.assertFalse(first.geometry().intersects(second.geometry()))
                 load.assert_not_called()
+                window._on_movie_review_project()
+                self.assertEqual(window.selected_launch_mode, "movie_review")
             finally:
                 window.close()
                 window.deleteLater()

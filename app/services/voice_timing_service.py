@@ -47,7 +47,8 @@ def wav_duration(path: str) -> float:
 def cue_windows(segments: list[dict]) -> list[tuple[float, float]]:
     windows = []
     for index, segment in enumerate(segments):
-        start, end = float(segment["start"]), float(segment["end"])
+        start = float(segment.get("voice_start", segment.get("_audio_start", segment.get("start", 0.0))))
+        end = float(segment.get("voice_end", segment.get("_audio_end", segment.get("end", start))))
         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
             raise ValueError(f"Cue {index + 1}: invalid subtitle timing ({start}, {end}).")
         if windows and start < windows[-1][0]:
@@ -57,7 +58,8 @@ def cue_windows(segments: list[dict]) -> list[tuple[float, float]]:
 
 
 def align_voice_clips(*, segments, wavs, engine, tmp_dir, mode="smart",
-                      requested_speed=1.0, provider_speed=1.0, cancellation_check=None):
+                      requested_speed=1.0, provider_speed=1.0, max_fit_speed=None,
+                      cancellation_check=None):
     """Keep text and subtitle timestamps unchanged; fit only overflowing audio.
 
     Smart automatically increases speed just enough to meet every deadline.
@@ -128,9 +130,18 @@ def align_voice_clips(*, segments, wavs, engine, tmp_dir, mode="smart",
             # atrim to discard speech at the end of the sentence.
             # FFmpeg atempo rounds at packet/sample boundaries. Re-measure and
             # make one correction so milliseconds cannot accumulate per cue.
+            MAX_CEILING = float(max_fit_speed) if max_fit_speed is not None else None
             for attempt in range(2):
                 target = max(0.001, available - max(0.012, available * 0.01))
-                correction_speed = max(1.021, duration / target)
+                needed_speed = duration / target
+                if MAX_CEILING is not None:
+                    avail_ratio = max(1.0, MAX_CEILING / max(0.001, applied_fit_speed))
+                    correction_speed = min(avail_ratio, max(1.021, needed_speed))
+                else:
+                    correction_speed = max(1.021, needed_speed)
+
+                if correction_speed <= 1.01 and MAX_CEILING is not None and applied_fit_speed >= MAX_CEILING:
+                    break
                 applied_fit_speed *= correction_speed
                 current = engine.change_wav_speed(
                     input_wav_path=current,
@@ -143,19 +154,10 @@ def align_voice_clips(*, segments, wavs, engine, tmp_dir, mode="smart",
                 if duration <= available + 0.002:
                     break
             if duration > available + 0.002:
-                try:
-                    current = engine.cap_wav_to_duration(
-                        input_wav_path=current,
-                        output_wav_path=os.path.join(tmp_dir, f"aligned_{index:04d}_fit_cap.wav"),
-                        target_duration_seconds=available,
-                        fade_out_seconds=0.02,
-                    )
-                    duration = wav_duration(current)
-                except Exception:
-                    pass
-            if duration > available + 0.002:
-                problems.append(f"Cue {index + 1}: fitted speech still exceeds its subtitle window.")
-                continue
+                # User requirement: NEVER truncate words with fade-out or atrim!
+                # Retain full speech waveform and record overflow metrics.
+                seg["_tts_overflow"] = True
+                seg["_tts_overflow_seconds"] = round(duration - available, 3)
         fitted[index] = current
         seg["_audio_start"] = start
         seg["_audio_end"] = start + duration

@@ -682,6 +682,42 @@ class PipelineLifecycleMixin:
                 QMessageBox.warning(self, "Voiceover", message)
             return
 
+        # Ensure voiceover segments never speak during intro images/clips
+        first_video_start = 0.0
+        if hasattr(self, "get_timeline_video_clips"):
+            try:
+                clips = self.get_timeline_video_clips(existing_only=False)
+                if clips:
+                    first_vid = next((c for c in clips if not getattr(c, "is_image", False)), None)
+                    if first_vid is not None:
+                        first_video_start = float(
+                            first_vid.timeline_start
+                            if hasattr(first_vid, "timeline_start")
+                            else (first_vid.get("timeline_start", 0.0) if isinstance(first_vid, dict) else 0.0)
+                        )
+            except Exception:
+                first_video_start = 0.0
+
+        if first_video_start > 0.05 and segments:
+            from ui.helpers.srt_helpers import align_segments_to_video_start
+            aligned = align_segments_to_video_start(segments, first_video_start)
+            if aligned != segments:
+                segments = aligned
+                if self.current_translated_segments:
+                    self.current_translated_segments = list(segments)
+                    if hasattr(self, "translated_text"):
+                        self.translated_text.setText(self.format_to_srt(segments))
+                elif self.current_segments:
+                    self.current_segments = list(segments)
+                    if hasattr(self, "transcript_text"):
+                        self.transcript_text.setText(self.format_to_srt(segments))
+                if hasattr(self, "_commit_subtitle_mutation"):
+                    self._commit_subtitle_mutation(selected_index=0)
+                self.log(
+                    f"[Voiceover] Tự động đồng bộ {len(segments)} câu voiceover bắt đầu từ video chính "
+                    f"({first_video_start:.2f}s, bỏ qua intro)."
+                )
+
         out_dir = self.voice_output_folder_edit.text().strip() or os.path.join(self.workspace_root, "output")
         bg_path = self.resolve_background_audio_path()
         audio_handling_mode = self.get_audio_handling_mode()

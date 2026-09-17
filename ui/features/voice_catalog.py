@@ -697,9 +697,9 @@ class VoiceCatalogMixin:
                 "key_env": "GOOGLE_AI_STUDIO_API_KEY", "model_env": "GOOGLE_AI_STUDIO_MODEL",
                 "url_env": "GOOGLE_AI_STUDIO_BASE_URL",
                 "default_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                "default_model": "gemini-2.5-flash",
+                "default_model": "gemini-3.6-flash",
                 "polish_env": "GOOGLE_AI_STUDIO_POLISH_MODEL",
-                "default_polish_model": "gemini-2.5-pro",
+                "default_polish_model": "gemini-3.6-flash",
                 "link": "Get a free API key: <a href='https://aistudio.google.com/apikey'>Google AI Studio</a>",
             },
             "deepseek": {

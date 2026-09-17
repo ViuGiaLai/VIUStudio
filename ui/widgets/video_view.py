@@ -44,7 +44,14 @@ class VideoView(QGraphicsView):
         self.setScene(self._scene)
 
         self.video_item = QGraphicsVideoItem()
+        self.video_item.setZValue(1)
         self._scene.addItem(self.video_item)
+
+        self.image_item = QGraphicsPixmapItem()
+        self.image_item.setZValue(1)
+        self._scene.addItem(self.image_item)
+        self.image_item.hide()
+        self._current_image_path = ""
         self._last_video_image = QImage()
         self._blur_effect_regions: list[dict] = []
         self._blur_preview_items: list[QGraphicsPixmapItem] = []
@@ -101,6 +108,8 @@ class VideoView(QGraphicsView):
         content_rect = self.get_video_content_rect()
         self.video_item.setPos(content_rect.topLeft())
         self.video_item.setSize(QSizeF(content_rect.width(), content_rect.height()))
+        if getattr(self, "_current_image_path", ""):
+            self._layout_image_item()
         self.reposition_subtitle()
         self.reposition_logo()
         self._refresh_blur_preview_items()
@@ -110,9 +119,14 @@ class VideoView(QGraphicsView):
     def set_video_dimensions(self, width: int, height: int):
         self.video_source_width = max(0, int(width or 0))
         self.video_source_height = max(0, int(height or 0))
+        if self.video_source_width and self.video_source_height:
+            self._last_video_width = self.video_source_width
+            self._last_video_height = self.video_source_height
         content_rect = self.get_video_content_rect()
         self.video_item.setPos(content_rect.topLeft())
         self.video_item.setSize(QSizeF(content_rect.width(), content_rect.height()))
+        if getattr(self, "_current_image_path", ""):
+            self._layout_image_item()
         self.reposition_subtitle()
         self._refresh_blur_preview_items()
 
@@ -121,6 +135,8 @@ class VideoView(QGraphicsView):
         content_rect = self.get_video_content_rect()
         self.video_item.setPos(content_rect.topLeft())
         self.video_item.setSize(QSizeF(content_rect.width(), content_rect.height()))
+        if getattr(self, "_current_image_path", ""):
+            self._layout_image_item()
         self.reposition_subtitle()
         self._refresh_blur_preview_items()
         self.blur_overlay.sync_to_view()
@@ -131,6 +147,8 @@ class VideoView(QGraphicsView):
         content_rect = self.get_video_content_rect()
         self.video_item.setPos(content_rect.topLeft())
         self.video_item.setSize(QSizeF(content_rect.width(), content_rect.height()))
+        if getattr(self, "_current_image_path", ""):
+            self._layout_image_item()
         self.reposition_subtitle()
         self._refresh_blur_preview_items()
         self.blur_overlay.sync_to_view()
@@ -142,6 +160,8 @@ class VideoView(QGraphicsView):
         content_rect = self.get_video_content_rect()
         self.video_item.setPos(content_rect.topLeft())
         self.video_item.setSize(QSizeF(content_rect.width(), content_rect.height()))
+        if getattr(self, "_current_image_path", ""):
+            self._layout_image_item()
         self.reposition_subtitle()
         self._refresh_blur_preview_items()
         self.blur_overlay.sync_to_view()
@@ -535,6 +555,75 @@ class VideoView(QGraphicsView):
                 offset_x = canvas_rect.left() + (canvas_rect.width() - content_w) / 2.0
                 offset_y = canvas_rect.top()
         return QRectF(offset_x, offset_y, content_w, content_h)
+
+    def _layout_image_item(self, pixmap: QPixmap | None = None):
+        if not hasattr(self, "image_item") or not getattr(self, "_current_image_path", ""):
+            return
+        if pixmap is None or pixmap.isNull():
+            pixmap = QPixmap(self._current_image_path)
+            if pixmap.isNull():
+                return
+        content_rect = self.get_video_content_rect()
+        if content_rect.width() <= 0 or content_rect.height() <= 0:
+            return
+        target_w = max(1, int(round(content_rect.width())))
+        target_h = max(1, int(round(content_rect.height())))
+        scaled = pixmap.scaled(
+            target_w,
+            target_h,
+            Qt.IgnoreAspectRatio if str(getattr(self, "preview_scale_mode", "fit") or "fit").lower() == "fill" else Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.image_item.setPixmap(scaled)
+        pos_x = content_rect.left() + (content_rect.width() - scaled.width()) / 2.0
+        pos_y = content_rect.top() + (content_rect.height() - scaled.height()) / 2.0
+        self.image_item.setPos(pos_x, pos_y)
+
+    def set_image_source(self, image_path: str):
+        self._current_image_path = str(image_path or "")
+        if not self._current_image_path or not os.path.exists(self._current_image_path):
+            self.clear_image_source()
+            return
+        pixmap = QPixmap(self._current_image_path)
+        if pixmap.isNull():
+            self.clear_image_source()
+            return
+        if getattr(self, "video_source_width", 0) and getattr(self, "video_source_height", 0):
+            if not getattr(self, "_last_video_width", 0):
+                self._last_video_width = self.video_source_width
+                self._last_video_height = self.video_source_height
+        self.video_source_width = pixmap.width()
+        self.video_source_height = pixmap.height()
+        self._last_video_image = pixmap.toImage()
+        self._layout_image_item(pixmap)
+        self.image_item.show()
+        self.video_item.hide()
+        self.reposition_subtitle()
+        self.reposition_logo()
+        self._refresh_blur_preview_items()
+        if hasattr(self, "blur_overlay"):
+            self.blur_overlay.sync_to_view()
+        self.viewport().update()
+
+    def clear_image_source(self):
+        self._current_image_path = ""
+        if hasattr(self, "image_item"):
+            self.image_item.hide()
+            self.image_item.setPixmap(QPixmap())
+        if hasattr(self, "video_item"):
+            self.video_item.show()
+        if getattr(self, "_last_video_width", 0) and getattr(self, "_last_video_height", 0):
+            self.video_source_width = self._last_video_width
+            self.video_source_height = self._last_video_height
+            content_rect = self.get_video_content_rect()
+            self.video_item.setPos(content_rect.topLeft())
+            self.video_item.setSize(QSizeF(content_rect.width(), content_rect.height()))
+            self.reposition_subtitle()
+            self.reposition_logo()
+            self._refresh_blur_preview_items()
+            if hasattr(self, "blur_overlay"):
+                self.blur_overlay.sync_to_view()
+        self.viewport().update()
 
     def reposition_subtitle(self):
         item = self.subtitle_item

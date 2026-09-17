@@ -1,10 +1,13 @@
 import os
 import math
+import logging
 import subprocess
 import tempfile
 import wave
 
 from runtime_paths import bin_path, sanitize_ffmpeg_diagnostics, subprocess_text_kwargs
+
+logger = logging.getLogger(__name__)
 
 
 VOICE_TRACK_IN_MEMORY_MAX_SECONDS = 30 * 60
@@ -552,12 +555,31 @@ def build_voice_track_from_srt_segments(
     previous_audio_end = 0.0
     max_end = 0.0
     for seg, wav_path in zip(segments, tts_wav_paths):
-        requested_start = float(_seg_val(seg, "start", 0.0) or 0.0)
-        declared_end = float(_seg_val(seg, "end", 0.0) or 0.0)
+        # Prioritize voice window, then audio window, then subtitle window
+        v_start = _seg_val(seg, "voice_start", None)
+        if v_start is None:
+            v_start = _seg_val(seg, "_audio_start", None)
+        if v_start is None:
+            v_start = _seg_val(seg, "start", 0.0)
+
+        v_end = _seg_val(seg, "voice_end", None)
+        if v_end is None:
+            v_end = _seg_val(seg, "_audio_end", None)
+        if v_end is None:
+            v_end = _seg_val(seg, "end", 0.0)
+
+        requested_start = float(v_start or 0.0)
+        declared_end = float(v_end or 0.0)
         if not math.isfinite(requested_start) or not math.isfinite(declared_end):
             raise ValueError("Voice cue timing must be finite.")
         if requested_start < 0 or declared_end <= requested_start:
-            raise ValueError("Voice cue has an invalid subtitle window.")
+            s_start = float(_seg_val(seg, "start", 0.0) or 0.0)
+            s_end = float(_seg_val(seg, "end", 0.0) or 0.0)
+            if math.isfinite(s_start) and math.isfinite(s_end) and s_end > s_start >= 0:
+                requested_start = s_start
+                declared_end = s_end
+            else:
+                raise ValueError("Voice cue has an invalid subtitle window.")
         start = requested_start
         placements.append(start)
         actual_end = declared_end
@@ -567,11 +589,32 @@ def build_voice_track_from_srt_segments(
         if wav_path:
             if not os.path.isfile(wav_path):
                 raise FileNotFoundError(f"Voice clip not found: {wav_path}")
+            wav_dur = _probe_wav_duration_seconds(wav_path)
+            measured_end = start + wav_dur
+
             if start < previous_audio_end - 0.002:
-                raise ValueError("Voice clips overlap. Align voice to subtitle timing before export.")
-            measured_end = start + _probe_wav_duration_seconds(wav_path)
+                overlap_sec = round(previous_audio_end - start, 3)
+                logger.warning(
+                    f"Voice cues overlap at {start:.3f}s (previous ended at {previous_audio_end:.3f}s, overlap={overlap_sec:.3f}s). Mixing additively."
+                )
+                if isinstance(seg, dict):
+                    seg["timing_conflict"] = True
+                    seg["_audio_overlap"] = True
+                elif hasattr(seg, "timing_conflict"):
+                    seg.timing_conflict = True
+
             if measured_end > declared_end + 0.002:
-                raise ValueError("Voice exceeds subtitle end. Regenerate voice with timing alignment.")
+                overflow_sec = round(measured_end - declared_end, 3)
+                logger.warning(
+                    f"Voice cue {start:.3f}-{declared_end:.3f}s exceeds declared end by {overflow_sec:.3f}s (ends at {measured_end:.3f}s). Retaining full speech."
+                )
+                if isinstance(seg, dict):
+                    seg["timing_conflict"] = True
+                    seg["_tts_overflow"] = True
+                    seg["_tts_overflow_seconds"] = overflow_sec
+                elif hasattr(seg, "timing_conflict"):
+                    seg.timing_conflict = True
+
             actual_end = max(actual_end, measured_end)
             previous_audio_end = measured_end
         max_end = max(max_end, declared_end, actual_end)
@@ -579,9 +622,12 @@ def build_voice_track_from_srt_segments(
         total_duration_ms = int(round(max_end * 1000))
     else:
         # A regenerated TTS clip may be slightly longer than its subtitle slot.
-        # Size once before allocating so a disk memmap never needs a costly copy.
+        # Expand total_duration_ms to avoid cutting off spoken speech.
         if int(total_duration_ms) < int(round(max_end * 1000)):
-            raise ValueError("Output duration would cut off subtitle speech.")
+            logger.info(
+                f"Expanding total voice track duration from {int(total_duration_ms)} ms to {int(round(max_end * 1000))} ms to accommodate complete speech."
+            )
+            total_duration_ms = int(round(max_end * 1000))
 
     sr = 16000
     total_samples = int(round(max(0, total_duration_ms) * sr / 1000))

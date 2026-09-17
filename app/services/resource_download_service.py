@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import importlib
 import importlib.util
+import importlib.metadata
 import ensurepip
 import fnmatch
 import os
@@ -22,6 +24,9 @@ class ResourceDownloadService:
         "base": "models--Systran--faster-whisper-base.zip",
         "small": "models--Systran--faster-whisper-small.zip",
         "medium": "models--Systran--faster-whisper-medium.zip",
+        "large-v3": "models--Systran--faster-whisper-large-v3.zip",
+        "large-v3-turbo": "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo.zip",
+        "turbo": "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo.zip",
     }
 
     HF_RESOURCE_REPO = os.getenv("VIUSTUDIO_RESOURCE_REPO", "Hacht/CapCapResource").strip() or "Hacht/CapCapResource"
@@ -294,22 +299,75 @@ class ResourceDownloadService:
             "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
         )
 
+    @staticmethod
+    def _matches_whisper_model_name(candidate_name: str, target_model: str) -> bool:
+        c_name = str(candidate_name or "").strip().lower()
+        t_model = str(target_model or "").strip().lower()
+
+        if t_model in {"large-v3-turbo", "turbo"}:
+            if c_name in {"large-v3-turbo", "turbo"}:
+                return True
+            if "turbo" in c_name:
+                return True
+            return False
+
+        if t_model == "large-v3":
+            if "turbo" in c_name:
+                return False
+            if c_name in {"large-v3", "large"}:
+                return True
+            if "large-v3" in c_name:
+                return True
+            return False
+
+        if t_model == "medium":
+            if "medium" in c_name and "distil" not in c_name:
+                return True
+            return False
+
+        if t_model == "small":
+            if "small" in c_name and "distil" not in c_name:
+                return True
+            return False
+
+        if t_model == "base":
+            if "base" in c_name:
+                return True
+            return False
+
+        return t_model in c_name
+
     def _whisper_cache_dirs(self, model_name: str) -> list[str]:
         root = Path(self._whisper_cache_root())
         if not root.exists():
             return []
-        normalized = str(model_name or "").strip().lower()
         matches: list[str] = []
         for child in root.iterdir():
             if not child.is_dir():
                 continue
             name = child.name.lower()
-            if normalized == name:
+            if self._matches_whisper_model_name(name, model_name):
                 matches.append(str(child))
-                continue
-            if name.startswith("models--") and normalized in name:
-                matches.append(str(child))
+                try:
+                    for sub in child.iterdir():
+                        if sub.is_dir() and self._matches_whisper_model_name(sub.name, model_name):
+                            matches.append(str(sub))
+                except Exception:
+                    pass
         return matches
+
+    @staticmethod
+    def _is_whisper_model_dir_valid(directory: str) -> bool:
+        d = Path(directory)
+        if not d.is_dir():
+            return False
+        for item in d.rglob("*"):
+            if item.is_file() and item.name in {"model.bin", "model.safetensors"} and item.stat().st_size > 0:
+                return True
+        try:
+            return any(f.is_file() and f.stat().st_size > 0 for f in d.iterdir())
+        except Exception:
+            return False
 
     _OCR_MODEL_SETS = [
         ("ch_PP-OCRv4_det_mobile.onnx", "ch_PP-OCRv4_rec_mobile.onnx"),
@@ -402,7 +460,7 @@ class ResourceDownloadService:
     def validate_piper_voice_runtime(self, voice_id: str) -> list[tuple[str, str]]:
         """Check the chosen local Piper voice before a default Both run."""
         voice_id = str(voice_id or "").strip()
-        if not voice_id or voice_id.startswith(("edge:", "f5:")):
+        if not voice_id or voice_id.startswith(("edge:", "f5:", "zerotts:", "kokoro:", "openai:", "custom:")):
             return []
         issues: list[tuple[str, str]] = []
         entry = self._find_voice_entry(voice_id)
@@ -476,7 +534,16 @@ class ResourceDownloadService:
             os.path.join("onnx", "prefix_step.onnx"),
             os.path.join("onnx", "local_frame_decode.onnx"),
         )
-        return all(os.path.isfile(os.path.join(model_dir, relative)) for relative in required)
+        if not all(os.path.isfile(os.path.join(model_dir, relative)) for relative in required):
+            return False
+        te_path = os.path.join(model_dir, "onnx", "text_encoder.onnx")
+        try:
+            # New text_encoder with cross_kv is 323MB (>200MB); old one was ~150MB
+            if os.path.getsize(te_path) < 200_000_000:
+                return False
+        except Exception:
+            pass
+        return True
 
     def validate_pipeline_runtime(self) -> list[tuple[str, str]]:
         """Check local executables and writable working folders before a worker starts."""
@@ -669,15 +736,43 @@ class ResourceDownloadService:
                 "description": "Faster speech-recognition model for CPU transcription.",
             },
             {
+                "id": "whisper:large-v3",
+                "name": "Whisper Large-v3 (NÊN CÓ ⭐⭐⭐⭐⭐)",
+                "kind": "whisper",
+                "status": "installed" if self.is_resource_installed("whisper:large-v3") else "missing",
+                "target_dir": self._whisper_cache_root(),
+                "download_url": "https://huggingface.co/Systran/faster-whisper-large-v3",
+                "expected_filename": "models--Systran--faster-whisper-large-v3 (hoặc large-v3)",
+                "auto_download_supported": True,
+                "description": (
+                    "Mô hình nhận diện giọng nói chuẩn xác nhất hiện nay cho GPU (Khuyên dùng - NÊN CÓ ⭐⭐⭐⭐⭐). "
+                    "Độ chính xác cao vượt trội, nhận diện tiếng Việt và đa ngôn ngữ chuẩn nhất."
+                ),
+            },
+            {
+                "id": "whisper:large-v3-turbo",
+                "name": "Whisper Large-v3-Turbo (Tùy chọn ⭐⭐⭐⭐½)",
+                "kind": "whisper",
+                "status": "installed" if self.is_resource_installed("whisper:large-v3-turbo") else "missing",
+                "target_dir": self._whisper_cache_root(),
+                "download_url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+                "expected_filename": "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo (hoặc large-v3-turbo, turbo)",
+                "auto_download_supported": True,
+                "description": (
+                    "Mô hình tối ưu tốc độ nhanh gấp ~4x so với Large-v3 nhưng giữ độ chính xác gần tương đương "
+                    "(Tùy chọn ⭐⭐⭐⭐½). Tiết kiệm VRAM và xử lý siêu tốc."
+                ),
+            },
+            {
                 "id": "whisper:medium",
-                "name": "Whisper Medium",
+                "name": "Whisper Medium (Cân bằng CPU/GPU ⭐⭐⭐⭐)",
                 "kind": "whisper",
                 "status": "installed" if self.is_resource_installed("whisper:medium") else "missing",
                 "target_dir": self._whisper_cache_root(),
-                "download_url": self._hf_blob_url("zipResource/models--Systran--faster-whisper-medium.zip"),
-                "expected_filename": "models--Systran--faster-whisper-medium.zip",
-                "auto_download_supported": False,
-                "description": "Speech-recognition model used to create the original transcript.",
+                "download_url": "https://huggingface.co/Systran/faster-whisper-medium",
+                "expected_filename": "models--Systran--faster-whisper-medium.zip (hoặc medium)",
+                "auto_download_supported": True,
+                "description": "Mô hình nhận diện giọng nói cân bằng tốt giữa tài nguyên CPU và GPU.",
             },
             {
                 "id": "cuda:whisper",
@@ -888,13 +983,25 @@ class ResourceDownloadService:
         if resource_id == "diarization:embedding":
             return os.path.isfile(self._speaker_diarization_embedding_path())
         if resource_id.startswith("whisper:"):
+            import zipfile
             model_name = resource_id.split(":", 1)[1].strip().lower()
             for model_dir in self._whisper_cache_dirs(model_name):
                 try:
-                    if os.path.isdir(model_dir) and any(Path(model_dir).iterdir()):
+                    if self._is_whisper_model_dir_valid(model_dir):
                         return True
                 except Exception:
                     continue
+            root = Path(self._whisper_cache_root())
+            if root.exists():
+                for zip_path in root.glob("*.zip"):
+                    if zip_path.is_file() and zip_path.stat().st_size > 1024 * 1024:
+                        if self._matches_whisper_model_name(zip_path.name, model_name):
+                            try:
+                                with zipfile.ZipFile(zip_path, "r") as zf:
+                                    self._safe_extract_zip(zf, str(root))
+                                return True
+                            except Exception:
+                                return True
             return False
         if resource_id == "voice:pack":
             return self._usable_piper_voice_count("vi") > 0
@@ -911,7 +1018,16 @@ class ResourceDownloadService:
             except (ImportError, ModuleNotFoundError, ValueError):
                 return False
             if resource_id == "tts:zerotts":
-                return runtime_found and self._zerotts_model_ready()
+                if not (runtime_found and self._zerotts_model_ready()):
+                    return False
+                try:
+                    from packaging.version import parse as parse_version
+                    if parse_version(importlib.metadata.version("zerotts")) < parse_version("0.1.5"):
+                        return False
+                except Exception:
+                    pass
+                return True
+
             if resource_id == "tts:kokoro":
                 from kokoro_support import installation_ready
                 return installation_ready()
@@ -961,6 +1077,197 @@ class ResourceDownloadService:
             ):
                 return voice
         return None
+
+    def _download_whisper_model(self, model_key: str, progress_cb=None) -> None:
+        model_key = str(model_key or "").strip().lower()
+        repo_map = {
+            "large-v3": "Systran/faster-whisper-large-v3",
+            "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+            "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+            "medium": "Systran/faster-whisper-medium",
+            "small": "Systran/faster-whisper-small",
+            "base": "Systran/faster-whisper-base",
+        }
+        repo_id = repo_map.get(model_key, f"Systran/faster-whisper-{model_key}")
+        cache_root = self._whisper_cache_root()
+        os.makedirs(cache_root, exist_ok=True)
+
+        # Check if model has a pre-packaged zip on CapCapResource
+        zip_filename = self.WHISPER_ZIP_FILES.get(model_key)
+        if zip_filename:
+            try:
+                zip_url = self._hf_blob_url(f"zipResource/{zip_filename}")
+                self._download_and_extract_zip(zip_url, cache_root, progress_cb)
+                if self.is_resource_installed(f"whisper:{model_key}"):
+                    if progress_cb:
+                        progress_cb(100, f"Whisper {model_key} installed and verified.")
+                    return
+            except Exception as e:
+                print(f"[Whisper] CapCapResource zip download failed for {model_key}, using HF Hub: {e}")
+
+        if progress_cb:
+            progress_cb(5, f"Connecting to Hugging Face ({repo_id})...")
+
+        try:
+            from huggingface_hub import HfApi, snapshot_download
+        except ImportError as exc:
+            raise ImportError("huggingface_hub is required to download Whisper models.") from exc
+
+        allow_patterns = [
+            "config.json",
+            "preprocessor_config.json",
+            "model.bin",
+            "tokenizer.json",
+            "vocabulary.*",
+        ]
+
+        total_expected_bytes = 0
+        try:
+            api = HfApi()
+            repo_files = list(api.list_repo_tree(repo_id))
+            total_expected_bytes = sum(
+                f.size for f in repo_files
+                if getattr(f, "size", None) and any(fnmatch.fnmatch(f.path, pat) for pat in allow_patterns)
+            )
+        except Exception:
+            total_expected_bytes = 0
+
+        progress_lock = threading.Lock()
+        progress_state = {
+            "downloaded_bytes": 0,
+            "last_pct": 5,
+            "last_update_time": 0.0,
+        }
+
+        class DownloadProgressTqdm:
+            _lock = threading.RLock()
+
+            def __init__(self, *args, **kwargs):
+                if args:
+                    self.iterable = args[0]
+                else:
+                    self.iterable = kwargs.get("iterable")
+                self.total = kwargs.get("total") or 0
+                self.n = kwargs.get("initial") or 0
+                self.desc = kwargs.get("desc") or f"Downloading {model_key}"
+                self.unit = kwargs.get("unit") or ""
+                self.name = kwargs.get("name") or ""
+                self.disable = kwargs.get("disable") or False
+                self.format_dict = {"rate": None, "n": self.n, "total": self.total}
+
+            def update(self, n=1):
+                n = 1 if n is None else n
+                self.n += n
+                self.format_dict["n"] = self.n
+                self.format_dict["total"] = self.total
+
+                is_transfer_bar = (
+                    self.unit == "B"
+                    and (
+                        "transfer" in self.name.lower()
+                        or "downloading bytes" in self.desc.lower()
+                        or not self.name
+                    )
+                )
+
+                if is_transfer_bar and progress_cb:
+                    with progress_lock:
+                        progress_state["downloaded_bytes"] += n
+                        cur_bytes = progress_state["downloaded_bytes"]
+                        now = time.time()
+                        if total_expected_bytes > 0:
+                            pct = min(98, max(5, int((cur_bytes / total_expected_bytes) * 100)))
+                            cur_mb = cur_bytes / (1024 * 1024)
+                            tot_mb = total_expected_bytes / (1024 * 1024)
+                            if pct != progress_state["last_pct"] or (now - progress_state["last_update_time"]) >= 0.5:
+                                progress_state["last_pct"] = pct
+                                progress_state["last_update_time"] = now
+                                progress_cb(pct, f"Downloading {model_key}... {cur_mb:.1f}/{tot_mb:.1f} MB ({pct}%)")
+                        else:
+                            cur_mb = cur_bytes / (1024 * 1024)
+                            if (now - progress_state["last_update_time"]) >= 0.5:
+                                progress_state["last_update_time"] = now
+                                progress_cb(-1, f"Downloading {model_key}... {cur_mb:.1f} MB")
+
+            def refresh(self, *args, **kwargs):
+                pass
+
+            def set_description(self, desc=None, refresh=True):
+                if desc:
+                    self.desc = desc
+
+            def set_description_str(self, desc=None, refresh=True):
+                if desc:
+                    self.desc = desc
+
+            def set_postfix_str(self, s="", refresh=True):
+                pass
+
+            def set_postfix(self, *args, **kwargs):
+                pass
+
+            def reset(self, total=None):
+                if total is not None:
+                    self.total = total
+                    self.format_dict["total"] = total
+                self.n = 0
+                self.format_dict["n"] = 0
+
+            def clear(self, *args, **kwargs):
+                pass
+
+            def write(self, s, *args, **kwargs):
+                pass
+
+            def display(self, *args, **kwargs):
+                pass
+
+            def unpause(self):
+                pass
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                pass
+
+            def __iter__(self):
+                return iter(self.iterable) if getattr(self, "iterable", None) is not None else iter(())
+
+            def __len__(self):
+                return self.total if self.total else 0
+
+            def __getattr__(self, item):
+                if item.startswith("__") and item.endswith("__"):
+                    raise AttributeError(item)
+                return lambda *args, **kwargs: None
+
+            @classmethod
+            def get_lock(cls):
+                return cls._lock
+
+            @classmethod
+            def set_lock(cls, lock):
+                cls._lock = lock
+
+        if progress_cb:
+            progress_cb(10, f"Downloading {model_key} from {repo_id}...")
+
+        downloaded_dir = snapshot_download(
+            repo_id,
+            cache_dir=cache_root,
+            allow_patterns=allow_patterns,
+            tqdm_class=DownloadProgressTqdm,
+        )
+
+        if not self.is_resource_installed(f"whisper:{model_key}"):
+            raise RuntimeError(f"Download finished for {model_key}, but verification failed at {downloaded_dir}.")
+
+        if progress_cb:
+            progress_cb(100, f"Whisper {model_key} installed and verified.")
 
     def _download_and_extract_zip(self, zip_url: str, extract_to: str, progress_cb=None) -> None:
         import tempfile
@@ -1156,9 +1463,9 @@ class ResourceDownloadService:
             return
 
         if resource_id.startswith("whisper:"):
-            raise ValueError(
-                "Whisper models are downloaded manually. Use Open Download Page, then extract the ZIP into models/faster_whisper."
-            )
+            model_key = resource_id.split(":", 1)[1].strip().lower()
+            self._download_whisper_model(model_key, progress_cb)
+            return
 
         if resource_id == "cuda:whisper":
             zip_url = self._hf_blob_url("zipResource/cuda12_fw.zip")
@@ -1320,7 +1627,8 @@ class ResourceDownloadService:
             "-m",
             "pip",
             "install",
-            "zerotts",
+            "--upgrade",
+            "zerotts>=0.1.5",
             "--disable-pip-version-check",
             "--progress-bar",
             "off",

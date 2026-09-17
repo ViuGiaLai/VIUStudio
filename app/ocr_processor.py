@@ -346,11 +346,11 @@ def crop_subtitle_region(image, region="bottom"):
             pass
     effective_region = (os.getenv("OCR_SUBTITLE_REGION") or region or "bottom").strip().lower()
     if effective_region == "bottom":
-        ratio = float(os.getenv("OCR_CROP_RATIO", "0.30"))
+        ratio = float(os.getenv("OCR_CROP_RATIO", "0.28"))
         top = int(h * (1.0 - ratio))
         return image[top:h, 0:w]
     elif effective_region == "top":
-        ratio = float(os.getenv("OCR_CROP_RATIO", "0.30"))
+        ratio = float(os.getenv("OCR_CROP_RATIO", "0.28"))
         return image[0:int(h * ratio), 0:w]
     else:
         return image
@@ -445,9 +445,16 @@ def _subtitle_lines_from_result(result, image_shape) -> list[str]:
             # Explicitly vertical text box (e.g. vertical title card / column)
             continue
 
-        # Vertical position filter: discard upper noise outside subtitle zone
+        # Vertical position filter: discard upper noise outside subtitle zone.
+        # Threshold of 0.08 preserves the upper line of 2-line burned subtitles.
         norm_y = center_y / max(1.0, float(height))
-        if norm_y < 0.15:
+        if norm_y < 0.08:
+            continue
+
+        # Horizontal edge filter: dialogue subtitles are horizontally centered.
+        # Discard small corner marks (watermarks, logos, channel IDs, episode markers)
+        normalized_center_x = center_x / max(1.0, float(width))
+        if (normalized_center_x < 0.10 or normalized_center_x > 0.90) and (box_width / float(width)) < 0.35:
             continue
 
         # Geometric score calculation
@@ -461,7 +468,6 @@ def _subtitle_lines_from_result(result, image_shape) -> list[str]:
         score += max(0.0, 1.0 - norm_x_offset * 2.0)
         # Length bonus (complete dialogue line vs tiny noise)
         key_len = len(_ocr_consensus_key(cleaned))
-        normalized_center_x = center_x / max(1.0, float(width))
         if key_len <= 1 and not 0.20 <= normalized_center_x <= 0.80:
             # A lone glyph in a far corner is almost always a watermark/title
             # marker, not the horizontally centred dialogue subtitle.

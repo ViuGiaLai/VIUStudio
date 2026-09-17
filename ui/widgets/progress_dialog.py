@@ -97,6 +97,7 @@ class ExportProgressDialog(QDialog):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self._is_backgrounded = False
         layout.addWidget(self.progress_bar)
 
         btn_row = QHBoxLayout()
@@ -123,8 +124,22 @@ class ExportProgressDialog(QDialog):
         self.canceled.emit()
 
     def _on_bg_clicked(self):
+        self._is_backgrounded = True
         self.bg_requested.emit()
         self.hide()
+
+    def is_backgrounded(self) -> bool:
+        return bool(getattr(self, "_is_backgrounded", False))
+
+    def set_backgrounded(self, value: bool) -> None:
+        self._is_backgrounded = bool(value)
+
+    def closeEvent(self, event):
+        # Closing the progress window with 'X' switches to background without stopping export
+        self._is_backgrounded = True
+        self.bg_requested.emit()
+        self.hide()
+        event.ignore()
 
     def setLabelText(self, text: str):
         self.label.setText(str(text or ""))

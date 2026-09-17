@@ -427,7 +427,7 @@ class TranslationOrchestrator:
         if provider_type in {"gemini", "google"}:  # backward compatibility
             provider_type = "google_ai_studio"
         definitions = {
-            "google_ai_studio": ("Google AI Studio (Gemini)", "GOOGLE_AI_STUDIO", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash"),
+            "google_ai_studio": ("Google AI Studio (Gemini)", "GOOGLE_AI_STUDIO", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-3.6-flash"),
             "deepseek": ("DeepSeek AI", "DEEPSEEK", "https://api.deepseek.com/v1", "deepseek-chat"),
             "openai": ("OpenAI", "OPENAI", "https://api.openai.com/v1/", "gpt-4o-mini"),
             "ollama": ("Ollama (Local)", "OLLAMA", "http://localhost:11434/v1", "qwen2.5:7b"),
@@ -474,7 +474,7 @@ class TranslationOrchestrator:
         if role == "quality":
             model_env_key = f"{env_prefix}_POLISH_MODEL"
             if not os.getenv(model_env_key, "").strip():
-                review_defaults = {"google_ai_studio": "gemini-2.5-pro"}
+                review_defaults = {"google_ai_studio": "gemini-3.6-flash"}
                 default_model = review_defaults.get(provider_type) or default_model
         polisher = OpenAICompatiblePolisherProvider(
             provider_id=provider_type,
@@ -484,6 +484,13 @@ class TranslationOrchestrator:
             default_model=default_model,
             model_env=model_env_key,
         )
+        if (
+            provider_type == "google_ai_studio"
+            and str(polisher.model_name or "").strip().lower().removeprefix("models/") == "gemini-2.5-pro"
+        ):
+            # Google no longer grants this model to new API users. Keep stale
+            # .env/OS settings from failing Movie Review with a 404.
+            polisher.model_name = "gemini-3.6-flash"
         polisher.config_error = config_error
         return provider_type, polisher
 

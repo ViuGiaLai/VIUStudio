@@ -185,8 +185,10 @@ class WorkflowActionsMixin:
                     has_selected_timeline_layer = True
                     selected_layer_locked = bool(getattr(track, "locked", False)) or bool(getattr(layer, "locked", False))
                     layer_type = str(getattr(getattr(layer, "type", ""), "value", getattr(layer, "type", ""))).lower()
-                    selected_overlay_is_splittable = layer_type in {"blur", "mask", "text"} or (
-                        layer_type == "image" and str(getattr(track, "name", "")) == "L1 Logo"
+                    selected_overlay_is_splittable = (
+                        layer_type in {"video", "blur", "mask", "text"}
+                        or (layer_type == "image" and str(getattr(track, "name", "")) in {"L1 Logo", "V1 Video"})
+                        or str(getattr(track, "name", "")).startswith("V1")
                     )
                     break
                 if selected_overlay_is_splittable:
@@ -799,28 +801,43 @@ class WorkflowActionsMixin:
     def get_whisper_model_name(self) -> str:
         selected = str(getattr(self, "selected_whisper_model_name", "auto") or "auto").strip().lower()
         is_gpu_mode = os.environ.get("VIUSTUDIO_DEVICE", "cuda").strip().lower() == "cuda"
-        if not is_gpu_mode and selected == "medium":
+        if not is_gpu_mode and selected in {"large-v3", "large-v3-turbo", "turbo", "medium"}:
             selected = "auto"
         if selected and selected != "auto":
             return selected
         model_root = os.path.join(self.workspace_root, "models", "faster_whisper")
-        preferred_models = ("medium", "small", "base", "tiny") if is_gpu_mode else ("small", "base", "tiny")
+        preferred_models = (
+            "large-v3",
+            "large-v3-turbo",
+            "medium",
+            "small",
+            "base",
+            "tiny",
+        ) if is_gpu_mode else ("small", "base", "tiny")
         for candidate in preferred_models:
             model_dir = os.path.join(model_root, candidate)
             if os.path.isdir(model_dir) and any(
                 name.endswith(".bin") for name in os.listdir(model_dir)
             ):
                 return candidate
-            snapshots_dir = os.path.join(
-                model_root,
-                f"models--Systran--faster-whisper-{candidate}",
-                "snapshots",
-            )
-            if os.path.isdir(snapshots_dir):
-                for snapshot_name in os.listdir(snapshots_dir):
-                    if os.path.isfile(os.path.join(snapshots_dir, snapshot_name, "model.bin")):
-                        return candidate
-        return "medium"
+            hf_names = [f"models--Systran--faster-whisper-{candidate}"]
+            if candidate in {"large-v3-turbo", "turbo"}:
+                hf_names.extend([
+                    "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+                    "models--deepdml--faster-whisper-large-v3-turbo-ct2",
+                ])
+            for hf_name in hf_names:
+                candidate_dir = os.path.join(model_root, hf_name)
+                if not os.path.isdir(candidate_dir):
+                    continue
+                if any(name.endswith(".bin") for name in os.listdir(candidate_dir)):
+                    return candidate
+                snapshots_dir = os.path.join(candidate_dir, "snapshots")
+                if os.path.isdir(snapshots_dir):
+                    for snapshot_name in os.listdir(snapshots_dir):
+                        if os.path.isfile(os.path.join(snapshots_dir, snapshot_name, "model.bin")):
+                            return candidate
+        return "large-v3" if is_gpu_mode else "small"
 
     def get_whisper_model_path(self) -> str:
         return os.path.join(self.workspace_root, "models", "ggml-medium.bin")

@@ -188,15 +188,16 @@ def stop_video(gui):
 
 
 def position_changed(gui, position):
-    gui.timeline.set_position(position)
-    update_duration_label(gui, position, gui.media_player.duration())
+    effective_pos = gui.timeline_position_ms() if hasattr(gui, "timeline_position_ms") else position
+    gui.timeline.set_position(effective_pos)
+    update_duration_label(gui, effective_pos, gui.media_player.duration())
     try:
-        gui.refresh_timed_layer_preview(position)
+        gui.refresh_timed_layer_preview(effective_pos)
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] timed layer refresh error: {exc}")
     try:
-        gui.update_playback_subtitle_highlight(position)
+        gui.update_playback_subtitle_highlight(effective_pos)
     except Exception as exc:
         if hasattr(gui, "log"):
             gui.log(f"[Preview] position highlight error: {exc}")

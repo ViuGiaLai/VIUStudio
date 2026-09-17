@@ -13,15 +13,25 @@ from PySide6.QtGui import QColor, QPixmap, QTextCursor
 
 from video_processor import srt_to_ass
 from audio_mixer import ffprobe_wav_duration
-from utils.display_utils import (
-    show_frame_preview_dialog as show_frame_preview_dialog_impl,
-)
+try:
+    from utils.display_utils import (
+        show_frame_preview_dialog as show_frame_preview_dialog_impl,
+    )
+except ImportError:
+    from ui.utils.display_utils import (
+        show_frame_preview_dialog as show_frame_preview_dialog_impl,
+    )
+
 from worker_adapters import (
     SegmentAudioPreviewWorker,
     VoiceSamplePreviewWorker,
     VoiceExportWorker,
 )
-from utils.thread_lifecycle import release_thread_when_stopped
+
+try:
+    from utils.thread_lifecycle import release_thread_when_stopped
+except ImportError:
+    from ui.utils.thread_lifecycle import release_thread_when_stopped
 
 from workflows.voice_workflow import predict_speed_ratios
 
@@ -524,7 +534,19 @@ class VoiceSubtitlePreviewMixin:
                 pass
             self._voice_export_worker = None
 
-        worker = VoiceExportWorker(voice_path, output_path, bitrate="256k")
+        offset = 0.0
+        if hasattr(self, "get_timeline_video_clips"):
+            try:
+                from app.services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+                clips = self.get_timeline_video_clips(existing_only=True)
+                raw_offset = resolve_timeline_content_offset(clips)
+                active_segs = self.get_active_segments() if hasattr(self, "get_active_segments") else []
+                if not is_already_timeline_relative(active_segs, raw_offset):
+                    offset = raw_offset
+            except Exception:
+                offset = 0.0
+
+        worker = VoiceExportWorker(voice_path, output_path, bitrate="256k", timeline_offset_seconds=offset)
         self._voice_export_worker = worker
 
         def on_finished(success: bool, dest: str, err: str):
@@ -633,6 +655,38 @@ class VoiceSubtitlePreviewMixin:
             f"Voice audio imported successfully:\n\n{os.path.basename(target_path)}\n\nYou can now preview or mix with background audio and export.",
         )
 
+    def _check_and_prompt_subtitle_video_alignment(self, imported_segments: list) -> list:
+        """If timeline has an intro clip / image before the main video (video starts at T > 0.05),
+        automatically align imported subtitles to start from the main video without displaying on intro.
+        """
+        if not imported_segments:
+            return imported_segments
+        video_start = 0.0
+        if hasattr(self, "get_timeline_video_clips"):
+            try:
+                clips = self.get_timeline_video_clips(existing_only=False)
+                if clips:
+                    first_vid = next((c for c in clips if not getattr(c, "is_image", False)), None)
+                    if first_vid is not None:
+                        video_start = float(
+                            first_vid.timeline_start
+                            if hasattr(first_vid, "timeline_start")
+                            else (first_vid.get("timeline_start", 0.0) if isinstance(first_vid, dict) else 0.0)
+                        )
+            except Exception:
+                video_start = 0.0
+
+        if video_start > 0.05:
+            from ui.helpers.srt_helpers import align_segments_to_video_start
+            imported_segments = align_segments_to_video_start(imported_segments, video_start)
+            first_st = float(imported_segments[0].get("start", 0.0)) if imported_segments else 0.0
+            if hasattr(self, "log"):
+                self.log(
+                    f"[Import] Tự động đồng bộ {len(imported_segments)} câu phụ đề bắt đầu từ video chính "
+                    f"(đầu video: {video_start:.2f}s, câu 1: {first_st:.2f}s, bỏ qua intro)."
+                )
+        return imported_segments
+
     def import_original_srt(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -659,6 +713,7 @@ class VoiceSubtitlePreviewMixin:
             QMessageBox.warning(self, "Import Failed", "The selected file could not be parsed as a valid SRT subtitle.")
             return
         imported_segments = self.normalize_subtitle_timing(imported_segments)
+        imported_segments = self._check_and_prompt_subtitle_video_alignment(imported_segments)
         srt_text = self.format_to_srt(imported_segments)
 
         self.current_segments = imported_segments
@@ -702,6 +757,7 @@ class VoiceSubtitlePreviewMixin:
             QMessageBox.warning(self, "Import Failed", "The selected file could not be parsed as a valid SRT subtitle.")
             return
         imported_segments = self.normalize_subtitle_timing(imported_segments)
+        imported_segments = self._check_and_prompt_subtitle_video_alignment(imported_segments)
 
         # An SRT only stores text/timestamps. Keep diarization metadata from
         # the current translated transcript first (manual speaker corrections
@@ -1113,7 +1169,8 @@ class VoiceSubtitlePreviewMixin:
             self._loaded_live_ass_signature = signature
             if hasattr(self, "video_view"):
                 self.video_view.subtitle_item.set_text_rendering(can_render_libass)
-            self.update_playback_subtitle_highlight(int(self.media_player.position() or 0))
+            pos = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else int(self.media_player.position() or 0)
+            self.update_playback_subtitle_highlight(pos)
         except Exception as exc:
             self.runtime_log_received.emit(f"[Subtitle Background] Could not apply exact layout: {exc}")
 
@@ -1501,7 +1558,10 @@ class VoiceSubtitlePreviewMixin:
             self.video_view.subtitle_item.hide()
             return
         try:
-            position_ms = int(self.media_player.position())
+            if hasattr(self, "timeline_position_ms"):
+                position_ms = int(self.timeline_position_ms())
+            else:
+                position_ms = int(self.media_player.position())
         except Exception:
             position_ms = 0
         active_indices = self._find_active_segment_indices(position_ms, items)
@@ -1542,7 +1602,10 @@ class VoiceSubtitlePreviewMixin:
         if self._preview_is_playing():
             return
         try:
-            position_ms = int(getattr(self.media_player, "position", lambda: 0)() or 0)
+            if hasattr(self, "timeline_position_ms"):
+                position_ms = int(self.timeline_position_ms())
+            else:
+                position_ms = int(getattr(self.media_player, "position", lambda: 0)() or 0)
         except Exception:
             position_ms = 0
         items = list(self.live_preview_segments or self.get_active_segments() or [])
@@ -1603,7 +1666,7 @@ class VoiceSubtitlePreviewMixin:
                         # The Qt item remains present for dragging but MPV's
                         # libass renderer supplies the visible subtitle.
                         self.video_view.subtitle_item.set_text_rendering(False)
-                    position = int(self.media_player.position() or 0)
+                    position = self.timeline_position_ms() if hasattr(self, "timeline_position_ms") else int(self.media_player.position() or 0)
                     self.update_playback_subtitle_highlight(position)
                     return
             self.media_player.clear_subtitle()
@@ -1622,7 +1685,10 @@ class VoiceSubtitlePreviewMixin:
             self.live_preview_segments = list(self.get_active_segments() or [])
         position = 0
         try:
-            position = int(self.media_player.position())
+            if hasattr(self, "timeline_position_ms"):
+                position = int(self.timeline_position_ms())
+            else:
+                position = int(self.media_player.position())
         except Exception:
             pass
         self.update_playback_subtitle_highlight(position)
