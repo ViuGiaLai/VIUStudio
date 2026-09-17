@@ -718,6 +718,24 @@ class RuntimeMediaMixin:
                 return "dubbed"
         return "original"
 
+    def voice_baked_timeline_offset(self) -> float:
+        """Intro duration that was mixed into the current voice WAV, in seconds.
+
+        New generations always mix in source-video time, so this is 0.0.
+        Preview/export add the *current* intro on top of this value.
+        """
+        state = getattr(self, "current_project_state", None)
+        if state is None:
+            return 0.0
+        try:
+            if hasattr(state, "get_setting"):
+                raw = state.get_setting("voice_baked_timeline_offset", 0.0)
+            else:
+                raw = (getattr(state, "settings", None) or {}).get("voice_baked_timeline_offset", 0.0)
+            return max(0.0, float(raw or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
     def sync_preview_audio_track_to_output(self, *, apply_to_player: bool = True, force: bool = False):
         target_mode = self._preferred_preview_audio_track_mode()
         self._preview_audio_track_mode = target_mode
@@ -790,7 +808,7 @@ class RuntimeMediaMixin:
                 self.media_player.set_audio_file(dubbed_audio)
             else:
                 self.media_player.clear_audio()
-            if current_position > 0:
+            if not should_reset_source and current_position > 0:
                 try:
                     self.media_player.setPosition(current_position)
                 except Exception:

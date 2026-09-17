@@ -262,6 +262,7 @@ class MultiVideoTimelineMixin:
             return
 
         # 1. Shift current_segments and current_translated_segments (canonical transcript / TTS cues)
+        from ui.helpers.srt_helpers import _shift_segment_timeline
         for seg_list_name in ("current_segments", "current_translated_segments"):
             segments = getattr(self, seg_list_name, None)
             if isinstance(segments, list):
@@ -269,10 +270,7 @@ class MultiVideoTimelineMixin:
                     if isinstance(seg, dict):
                         st = float(seg.get("start", 0.0) or 0.0)
                         if st >= after_time - 0.001:
-                            dur = max(0.1, float(seg.get("end", st + 0.1) or (st + 0.1)) - st)
-                            new_st = max(0.0, round(st + delta, 3))
-                            seg["start"] = new_st
-                            seg["end"] = round(new_st + dur, 3)
+                            seg.update(_shift_segment_timeline(seg, delta))
 
         # 2. Shift segment models if present
         for model_list_name in ("current_segment_models", "current_translated_segment_models"):
@@ -307,7 +305,20 @@ class MultiVideoTimelineMixin:
             timeline_widget.set_duration(int(round(float(model.duration) * 1000.0)))
             timeline_widget._redraw()
 
-        # 5. Refresh UI components that display subtitles or overlays
+        # 5. Keep subtitle text widgets in sync with shifted segment timings
+        if hasattr(self, "format_to_srt"):
+            if hasattr(self, "transcript_text") and getattr(self, "current_segments", None):
+                try:
+                    self.transcript_text.setText(self.format_to_srt(self.current_segments))
+                except Exception:
+                    pass
+            if hasattr(self, "translated_text") and getattr(self, "current_translated_segments", None):
+                try:
+                    self.translated_text.setText(self.format_to_srt(self.current_translated_segments))
+                except Exception:
+                    pass
+
+        # 6. Refresh UI components that display subtitles or overlays
         if hasattr(self, "refresh_segment_table"):
             try:
                 self.refresh_segment_table()

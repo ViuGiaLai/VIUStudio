@@ -14,11 +14,13 @@ if APP_DIR not in sys.path:
 from app.layers.timeline import Timeline
 from app.services.timeline_video_sequence import (
     append_video,
+    clip_is_image,
     insert_media,
     is_image_file,
     move_video,
     normalize_v1_sequence,
     remove_video,
+    resolve_timeline_content_offset,
     resolve_timeline_time,
     timeline_video_clips,
 )
@@ -366,14 +368,26 @@ class TimelineSequenceExportTests(unittest.TestCase):
         self.assertAlmostEqual(video_audio.start, 3.0)
         self.assertAlmostEqual(video_audio.end, 13.0)
 
+        dict_clips = [clip.to_dict() for clip in clips]
+        self.assertTrue(clip_is_image(dict_clips[0]))
+        self.assertFalse(clip_is_image(dict_clips[1]))
+        self.assertEqual(resolve_timeline_content_offset(dict_clips), 3.0)
+
+        intro_layer.end = 2.0
+        normalize_v1_sequence(timeline)
+        trimmed = [clip.to_dict() for clip in timeline_video_clips(timeline)]
+        self.assertAlmostEqual(trimmed[0]["timeline_end"], 2.0)
+        self.assertAlmostEqual(trimmed[1]["timeline_start"], 2.0)
+        self.assertEqual(resolve_timeline_content_offset(trimmed), 2.0)
+
     def test_shift_timeline_timed_elements_keeps_subtitles_synced_with_video(self):
         from ui.features.multi_video_timeline import MultiVideoTimelineMixin
 
         class DummyGui(MultiVideoTimelineMixin):
             def __init__(self, timeline_model):
                 self.timeline = type("Widget", (), {"_timeline": timeline_model, "set_duration": lambda *a: None, "_redraw": lambda *a: None})()
-                self.current_segments = [{"start": 1.0, "end": 3.0, "text": "Hello"}]
-                self.current_translated_segments = [{"start": 1.0, "end": 3.0, "text": "Xin chào"}]
+                self.current_segments = [{"start": 1.0, "end": 3.0, "voice_start": 1.0, "voice_end": 3.0, "text": "Hello"}]
+                self.current_translated_segments = [{"start": 1.0, "end": 3.0, "voice_start": 1.0, "voice_end": 3.0, "text": "Xin chào"}]
 
         timeline = Timeline()
         vid = append_video(timeline, "vid.mp4", 10.0)
@@ -389,6 +403,8 @@ class TimelineSequenceExportTests(unittest.TestCase):
         # Subtitle should be shifted by +2.5s
         self.assertAlmostEqual(gui.current_segments[0]["start"], 3.5)
         self.assertAlmostEqual(gui.current_segments[0]["end"], 5.5)
+        self.assertAlmostEqual(gui.current_segments[0]["voice_start"], 3.5)
+        self.assertAlmostEqual(gui.current_segments[0]["voice_end"], 5.5)
         # Relative offset to video start remains 1.0s (exact sync with speech)
         self.assertAlmostEqual(gui.current_segments[0]["start"] - vid.start, 1.0)
 
@@ -407,6 +423,8 @@ class TimelineSequenceExportTests(unittest.TestCase):
         # Subtitle should be shifted to 2.5s
         self.assertAlmostEqual(gui.current_segments[0]["start"], 2.5)
         self.assertAlmostEqual(gui.current_segments[0]["end"], 4.5)
+        self.assertAlmostEqual(gui.current_segments[0]["voice_start"], 2.5)
+        self.assertAlmostEqual(gui.current_translated_segments[0]["voice_start"], 2.5)
         # Relative offset to video start remains exactly 1.0s!
         self.assertAlmostEqual(gui.current_segments[0]["start"] - vid.start, 1.0)
 

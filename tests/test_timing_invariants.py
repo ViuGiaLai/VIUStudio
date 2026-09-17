@@ -10,8 +10,18 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path[:0] = [os.path.join(ROOT, "app"), os.path.join(ROOT, "ui"), ROOT]
 
 from app.services.segment_regroup_service import SegmentRegroupService
-from ui.helpers.srt_helpers import expand_short_cues_into_gaps, align_segments_to_video_start
-from app.services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+from ui.helpers.srt_helpers import (
+    expand_short_cues_into_gaps,
+    align_segments_to_video_start,
+    segments_to_source_video_time,
+)
+from app.services.timeline_video_sequence import (
+    clip_is_image,
+    resolve_timeline_content_offset,
+    is_already_timeline_relative,
+    resolve_source_audio_position_ms,
+    resolve_voice_export_delay_seconds,
+)
 from app.tts_processor import _insert_natural_prosody_pauses, normalize_text_for_tts
 from app.ocr_processor import _subtitle_lines_from_result
 from app.workflows.voice_workflow import predict_speed_ratios
@@ -109,6 +119,102 @@ class TimingInvariantsTests(unittest.TestCase):
         double_aligned = align_segments_to_video_start(aligned, first_video_start=content_offset)
         self.assertEqual(double_aligned[0]["start"], 3.5)
         self.assertEqual(double_aligned[0]["end"], 5.5)
+
+    def test_content_offset_uses_dict_is_image_after_intro_trim(self):
+        # Same shape as get_timeline_video_clips() → to_dict() after user trims 3s → 2s
+        clips = [
+            {
+                "source": "intro.png",
+                "timeline_start": 0.0,
+                "timeline_end": 2.0,
+                "is_image": True,
+            },
+            {
+                "source": "main_video.mp4",
+                "timeline_start": 2.0,
+                "timeline_end": 14.0,
+                "is_image": False,
+            },
+        ]
+        self.assertTrue(clip_is_image(clips[0]))
+        self.assertFalse(clip_is_image(clips[1]))
+        self.assertEqual(resolve_timeline_content_offset(clips), 2.0)
+
+        # getattr(dict, "is_image") is the production bug: it always looks like video.
+        self.assertFalse(getattr(clips[0], "is_image", False))
+
+        late_cues = [
+            {"start": 5.0, "end": 7.0, "text": "First spoken line"},
+        ]
+        # Without force_offset the late first cue is mistaken for already-aligned.
+        unforced = align_segments_to_video_start(late_cues, first_video_start=2.0)
+        self.assertEqual(unforced[0]["start"], 5.0)
+
+        imported = align_segments_to_video_start(late_cues, first_video_start=2.0, force_offset=True)
+        self.assertEqual(imported[0]["start"], 7.0)
+        self.assertEqual(imported[0]["end"], 9.0)
+        self.assertTrue(imported[0].get("_timeline_relative"))
+
+    def test_preview_sidecar_uses_local_time_after_intro_trim(self):
+        """Voice WAV is source-video-relative. After trimming intro 3s → 2s,
+        play at the first video frame must seek the sidecar to 0, not 2000/3000.
+        """
+        self.assertIsNone(
+            resolve_source_audio_position_ms(800, baked_offset_ms=0, is_intro_image=True)
+        )
+        self.assertEqual(
+            resolve_source_audio_position_ms(0, baked_offset_ms=0, is_intro_image=False),
+            0,
+        )
+        self.assertEqual(
+            resolve_source_audio_position_ms(1000, baked_offset_ms=0, is_intro_image=False),
+            1000,
+        )
+        # Legacy WAV that still has a 3s intro baked in, current intro is 2s:
+        # local 0 of the video should play WAV at 3000ms.
+        self.assertEqual(
+            resolve_source_audio_position_ms(0, baked_offset_ms=3000, is_intro_image=False),
+            3000,
+        )
+
+        self.assertEqual(resolve_voice_export_delay_seconds(2.0, 0.0), 2.0)
+        self.assertEqual(resolve_voice_export_delay_seconds(2.0, 2.0), 0.0)
+        self.assertEqual(resolve_voice_export_delay_seconds(2.0, 3.0), -1.0)
+
+        # Export delay must NOT be skipped just because the first spoken line
+        # starts after the intro length (the old is_already_timeline_relative trap).
+        late_cues = [{"start": 5.0, "end": 7.0, "text": "First spoken line"}]
+        self.assertTrue(is_already_timeline_relative(late_cues, 2.0))
+        self.assertEqual(resolve_voice_export_delay_seconds(2.0, 0.0), 2.0)
+
+    def test_tts_mix_converts_timeline_cues_back_to_source_video_time(self):
+        timeline_cues = [
+            {
+                "start": 2.32,
+                "end": 4.50,
+                "voice_start": 2.32,
+                "voice_end": 4.50,
+                "text": "Câu 1",
+                "_timeline_relative": True,
+            },
+            {
+                "start": 7.00,
+                "end": 9.20,
+                "voice_start": 7.00,
+                "voice_end": 9.20,
+                "text": "Câu muộn",
+                "_timeline_relative": True,
+            },
+        ]
+        mixed = segments_to_source_video_time(timeline_cues, 2.0)
+        self.assertAlmostEqual(mixed[0]["start"], 0.32)
+        self.assertAlmostEqual(mixed[0]["end"], 2.50)
+        self.assertAlmostEqual(mixed[0]["voice_start"], 0.32)
+        self.assertAlmostEqual(mixed[1]["start"], 5.00)
+        self.assertAlmostEqual(mixed[1]["end"], 7.20)
+        self.assertFalse(mixed[0].get("_timeline_relative"))
+        # UI copy stays on the timeline clock.
+        self.assertAlmostEqual(timeline_cues[0]["start"], 2.32)
 
     def test_prosody_pauses_rules(self):
         self.assertEqual(_insert_natural_prosody_pauses("bố và mẹ"), "bố và mẹ")

@@ -283,6 +283,10 @@ class ProjectStateMixin:
 
         # Save timeline data (includes mask and logo layers)
         if hasattr(self, "timeline") and self.timeline._timeline:
+            from app.services.timeline_video_sequence import timeline_video_clips
+            clips = timeline_video_clips(self.timeline._timeline)
+            if clips:
+                state.set_setting("timeline_video_clips", [c.to_dict() for c in clips])
             timeline_data = self.timeline._timeline.to_dict()
             # Save timeline to a file in the project directory
             timeline_path = os.path.join(state.project_root, "timeline", "timeline.json")

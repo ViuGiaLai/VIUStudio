@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -112,6 +113,60 @@ class ZeroTTSIntegrationTests(unittest.TestCase):
                 sys.modules.pop("zerotts", None)
             else:
                 sys.modules["zerotts"] = previous_module
+
+
+    def test_implicit_read_text_defaults_to_utf8_for_vietnamese_metadata(self):
+        tts_processor._prefer_utf8_for_implicit_text_reads()
+        with tempfile.TemporaryDirectory() as folder:
+            meta_path = Path(folder) / "meta.json"
+            meta_path.write_text(
+                json.dumps({"gender": "nữ", "tags": ["truyền cảm"]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            # 0x81 closes the UTF-8 form of "ề" and has no cp1252 mapping, which
+            # is exactly what made ZeroTTS voice loading fail on Windows.
+            self.assertIn(b"\x81", meta_path.read_bytes())
+            self.assertEqual(json.loads(meta_path.read_text())["tags"], ["truyền cảm"])
+
+    def test_zerotts_synth_settings_scale_with_cpu_count_and_env_overrides(self):
+        from zerotts_support import codec_threads, synth_threads, synth_workers
+
+        clean_env = {key: value for key, value in os.environ.items() if not key.startswith("VIUSTUDIO_ZEROTTS_")}
+        with patch.dict(os.environ, clean_env, clear=True), \
+             patch("zerotts_support.os.cpu_count", return_value=12):
+            self.assertEqual(synth_workers(41), 6)
+            self.assertEqual(synth_workers(2), 2)
+            self.assertEqual(synth_workers(0), 0)
+            self.assertEqual(synth_threads(), 2)
+            self.assertEqual(codec_threads(), 2)
+
+        with patch.dict(os.environ, clean_env, clear=True), \
+             patch("zerotts_support.os.cpu_count", return_value=2):
+            self.assertEqual(synth_workers(41), 1)
+            self.assertEqual(synth_threads(), 1)
+
+        overridden = {
+            "VIUSTUDIO_ZEROTTS_WORKERS": "8",
+            "VIUSTUDIO_ZEROTTS_THREADS": "3",
+            "VIUSTUDIO_ZEROTTS_CODEC_THREADS": "1",
+        }
+        with patch.dict(os.environ, overridden, clear=True), \
+             patch("zerotts_support.os.cpu_count", return_value=12):
+            self.assertEqual(synth_workers(41), 8)
+            self.assertEqual(synth_threads(), 3)
+            self.assertEqual(codec_threads(), 1)
+
+        with patch.dict(os.environ, {"VIUSTUDIO_ZEROTTS_WORKERS": "not-a-number"}, clear=True), \
+             patch("zerotts_support.os.cpu_count", return_value=12):
+            self.assertEqual(synth_workers(41), 6)
+
+    @unittest.skipUnless(os.name == "nt", "the ANSI fallback only applies on Windows")
+    def test_implicit_read_text_still_accepts_ansi_encoded_files(self):
+        tts_processor._prefer_utf8_for_implicit_text_reads()
+        with tempfile.TemporaryDirectory() as folder:
+            legacy_path = Path(folder) / "legacy.txt"
+            legacy_path.write_bytes("café".encode("cp1252"))
+            self.assertEqual(legacy_path.read_text(), "café")
 
 
 if __name__ == "__main__":

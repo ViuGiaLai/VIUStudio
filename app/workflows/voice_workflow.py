@@ -1440,8 +1440,8 @@ class VoiceWorkflow:
                 except Exception:
                     pass
             elif pending_providers == {"zerotts"}:
-                configured_workers = int(os.getenv("VIUSTUDIO_ZEROTTS_WORKERS", 3))
-                worker_count = max(1, min(configured_workers, len(pending_jobs), (os.cpu_count() or 4)))
+                from zerotts_support import synth_workers
+                worker_count = synth_workers(len(pending_jobs))
                 try:
                     first_voice = pending_jobs[0]["voice_name"]
                     from tts_processor import preload_tts_voice

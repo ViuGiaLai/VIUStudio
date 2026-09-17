@@ -271,7 +271,35 @@ def remove_video(timeline: Timeline, layer_id: str) -> bool:
     return True
 
 
-def resolve_timeline_content_offset(timeline_clips: list[dict] | None) -> float:
+def clip_is_image(clip) -> bool:
+    """True when a timeline clip is a still image (intro/bumper), not video.
+
+    ``get_timeline_video_clips()`` returns dicts from ``TimelineVideoClip.to_dict()``.
+    ``getattr(clip, "is_image", False)`` is always False on a dict, so callers
+    must use this helper (or ``is_image_file(source)``) instead.
+    """
+    if clip is None:
+        return False
+    if isinstance(clip, dict):
+        if "is_image" in clip:
+            return bool(clip.get("is_image"))
+        return is_image_file(str(clip.get("source", "") or ""))
+    explicit = getattr(clip, "is_image", None)
+    if isinstance(explicit, bool):
+        return explicit
+    return is_image_file(str(getattr(clip, "source", "") or ""))
+
+
+def clip_timeline_start(clip) -> float:
+    try:
+        if isinstance(clip, dict):
+            return max(0.0, float(clip.get("timeline_start", 0.0) or 0.0))
+        return max(0.0, float(getattr(clip, "timeline_start", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def resolve_timeline_content_offset(timeline_clips: list | None) -> float:
     """Calculate the global timeline offset where primary video content begins,
     accounting for preceding intro image/video bumper clips.
     This is the single source of truth for intro offset across all exporters.
@@ -279,11 +307,15 @@ def resolve_timeline_content_offset(timeline_clips: list[dict] | None) -> float:
     if not timeline_clips:
         return 0.0
     for clip in timeline_clips:
-        if not isinstance(clip, dict):
+        if clip_is_image(clip):
             continue
-        source = str(clip.get("source", "") or "").strip()
-        if source and not is_image_file(source):
-            return max(0.0, float(clip.get("timeline_start", 0.0) or 0.0))
+        if isinstance(clip, dict):
+            source = str(clip.get("source", "") or "").strip()
+            if source and is_image_file(source):
+                continue
+            if not source and "is_image" not in clip:
+                continue
+        return clip_timeline_start(clip)
     return 0.0
 
 
@@ -297,3 +329,48 @@ def is_already_timeline_relative(cues_or_segments: list[dict] | None, content_of
         return True
     first_start = float(cues_or_segments[0].get("start", 0.0) or 0.0)
     return first_start >= content_offset - 0.05
+
+
+def resolve_source_audio_position_ms(
+    local_ms: int,
+    *,
+    baked_offset_ms: int = 0,
+    is_intro_image: bool = False,
+) -> int | None:
+    """Sidecar seek for a source-video-relative WAV (t=0 = first video frame).
+
+    Intro images live on the timeline *before* that clock, so the return is
+    ``None`` (mute) while an intro is showing. Otherwise the sidecar plays at
+    local video time plus any intro that was baked into the WAV at mix time.
+    """
+    if is_intro_image:
+        return None
+    try:
+        local = max(0, int(local_ms or 0))
+    except (TypeError, ValueError):
+        local = 0
+    try:
+        baked = max(0, int(baked_offset_ms or 0))
+    except (TypeError, ValueError):
+        baked = 0
+    return local + baked
+
+
+def resolve_voice_export_delay_seconds(
+    content_offset: float,
+    baked_offset: float = 0.0,
+) -> float:
+    """Silence to prepend (positive) or trim (negative) so voice sits on the timeline.
+
+    Voice WAVs are mixed in source-video time. Export prepends the *current*
+    intro duration minus whatever intro was already baked into the file.
+    """
+    try:
+        current = max(0.0, float(content_offset or 0.0))
+    except (TypeError, ValueError):
+        current = 0.0
+    try:
+        baked = max(0.0, float(baked_offset or 0.0))
+    except (TypeError, ValueError):
+        baked = 0.0
+    return round(current - baked, 3)

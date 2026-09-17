@@ -192,31 +192,111 @@ def parse_numbered_lines(raw: str) -> list[str]:
     return [text for _number, text in parse_numbered_line_items(raw)]
 
 
-def align_segments_to_video_start(segments: list[dict], first_video_start: float, offset_if_relative: bool = True) -> list[dict]:
-    """Ensure subtitle segments start strictly from the first video clip on the timeline,
-    skipping any intro clips/images. If the first cue starts before first_video_start
-    and offset_if_relative is True, all cues are offset so that the first cue aligns to first_video_start.
-    Any cue lying entirely inside the intro is dropped, and overlapping onset is clamped.
+_CUE_TIME_KEYS = (
+    "start",
+    "end",
+    "voice_start",
+    "voice_end",
+    "sub_start",
+    "sub_end",
+    "tts_group_start",
+    "tts_group_end",
+    "_audio_start",
+    "_audio_end",
+    "_original_end",
+)
+
+
+def _shift_segment_timeline(
+    segment: dict,
+    offset: float,
+    *,
+    timeline_relative: bool | None = True,
+) -> dict:
+    item = dict(segment)
+    for key in _CUE_TIME_KEYS:
+        if key not in item or item[key] is None:
+            continue
+        try:
+            item[key] = round(max(0.0, float(item[key]) + offset), 3)
+        except (TypeError, ValueError):
+            continue
+    if "end" in item and "start" in item:
+        try:
+            item["end"] = max(float(item["start"]) + 0.05, float(item["end"]))
+        except (TypeError, ValueError):
+            pass
+    words = item.get("words")
+    if isinstance(words, list):
+        shifted_words = []
+        for raw_word in words:
+            if not isinstance(raw_word, dict):
+                shifted_words.append(raw_word)
+                continue
+            word = dict(raw_word)
+            for key in ("start", "end"):
+                if key not in word or word[key] is None:
+                    continue
+                try:
+                    word[key] = round(max(0.0, float(word[key]) + offset), 3)
+                except (TypeError, ValueError):
+                    pass
+            shifted_words.append(word)
+        item["words"] = shifted_words
+    if timeline_relative is True:
+        item["_timeline_relative"] = True
+    elif timeline_relative is False:
+        item["_timeline_relative"] = False
+    return item
+
+
+def segments_to_source_video_time(segments: list[dict] | None, content_offset: float) -> list[dict]:
+    """Convert timeline-relative cues back to source-video time for TTS mix."""
+    if not segments:
+        return []
+    try:
+        offset = float(content_offset or 0.0)
+    except (TypeError, ValueError):
+        offset = 0.0
+    if offset <= 0.05:
+        return [dict(item) if isinstance(item, dict) else item for item in segments]
+    return [
+        _shift_segment_timeline(item, -offset, timeline_relative=False)
+        if isinstance(item, dict) else item
+        for item in segments
+    ]
+
+
+def align_segments_to_video_start(
+    segments: list[dict],
+    first_video_start: float,
+    offset_if_relative: bool = True,
+    force_offset: bool = False,
+) -> list[dict]:
+    """Map cues onto the first real video clip, skipping intro images.
+
+    Imported SRT files are authored against the source video (00:00 = first
+    video frame), not the timeline. ``force_offset=True`` always adds
+    ``first_video_start`` so a late first cue is still shifted.
     """
     if not segments or first_video_start <= 0.05:
         return segments
 
     first_sub_start = float(segments[0].get("start", 0.0) or 0.0)
-    # If the imported or existing subtitles were authored relative to 0:00 (i.e. start before video)
-    if offset_if_relative and first_sub_start < first_video_start - 0.05:
+    should_offset = bool(force_offset)
+    if not should_offset and offset_if_relative and first_sub_start < first_video_start - 0.05:
+        should_offset = True
+
+    if should_offset:
         offset = round(first_video_start, 3)
         aligned = []
         for s in segments:
-            item = dict(s)
-            st = round(float(item.get("start", 0.0) or 0.0) + offset, 3)
-            et = round(float(item.get("end", st + 0.1) or (st + 0.1)) + offset, 3)
-            item["start"] = max(first_video_start, st)
-            item["end"] = max(item["start"] + 0.05, et)
+            item = _shift_segment_timeline(s, offset)
+            item["start"] = max(first_video_start, float(item.get("start", 0.0) or 0.0))
+            item["end"] = max(item["start"] + 0.05, float(item.get("end", item["start"] + 0.1) or (item["start"] + 0.1)))
             aligned.append(item)
         segments = aligned
 
-    # Filter out any cues that end at or before the video start,
-    # and clamp any remaining cue to start >= first_video_start
     filtered = []
     for s in segments:
         item = dict(s)
@@ -227,5 +307,6 @@ def align_segments_to_video_start(segments: list[dict], first_video_start: float
         if st < first_video_start:
             item["start"] = first_video_start
         item["end"] = max(item["start"] + 0.05, et)
+        item["_timeline_relative"] = True
         filtered.append(item)
     return filtered

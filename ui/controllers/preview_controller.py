@@ -1161,6 +1161,16 @@ class PreviewController:
             str(getattr(self.gui, "processed_artifacts", {}).get("srt_translated", "") or "").strip(),
         ]
         project_state = getattr(self.gui, "current_project_state", None)
+        project_root = getattr(project_state, "project_root", "") or getattr(self.gui, "workspace_root", "")
+
+        def _is_safe_project_path(p: str) -> bool:
+            if not p or not project_root:
+                return False
+            try:
+                return os.path.abspath(p).startswith(os.path.abspath(project_root))
+            except Exception:
+                return False
+
         if project_state is not None:
             artifacts = getattr(project_state, "artifacts", {}) or {}
             saved_candidates.extend(
@@ -1169,11 +1179,11 @@ class PreviewController:
                     str(artifacts.get("srt_translated", "") or "").strip(),
                 ]
             )
-        existing_path = next((path for path in saved_candidates if path and os.path.exists(path)), "")
+        existing_path = next((path for path in saved_candidates if path and os.path.exists(path) and _is_safe_project_path(path)), "")
         if not segments:
             return existing_path
 
-        out_path = existing_path or str(self.gui.last_translated_srt_path or "").strip()
+        out_path = existing_path
         if not out_path:
             video_path = self._resolve_export_video_path()
             video_name = os.path.splitext(os.path.basename(video_path or "subtitle"))[0]
@@ -1182,7 +1192,7 @@ class PreviewController:
             # workspace; explicit subtitle export remains available through
             # the dedicated subtitle download action.
             out_path = self.gui.get_project_temp_path(
-                "export", f"{video_name}_vi.srt", create_parent=True
+                "subtitle", f"{video_name}_translated.srt", create_parent=True
             )
 
         from subtitle_builder import generate_srt
@@ -1585,6 +1595,10 @@ class PreviewController:
             video_bitrate_kbps=self.gui.get_output_bitrate_kbps(),
             anti_duplicate_enabled=anti_dup,
             anti_duplicate_settings=custom_ad_settings if anti_dup else None,
+            voice_baked_timeline_offset=(
+                self.gui.voice_baked_timeline_offset()
+                if hasattr(self.gui, "voice_baked_timeline_offset") else 0.0
+            ),
         )
         self.gui.export_thread.progress.connect(self.gui.on_export_progress)
         self.gui.export_thread.finished.connect(self.gui.on_export_finished)

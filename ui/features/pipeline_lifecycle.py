@@ -686,15 +686,9 @@ class PipelineLifecycleMixin:
         first_video_start = 0.0
         if hasattr(self, "get_timeline_video_clips"):
             try:
+                from app.services.timeline_video_sequence import resolve_timeline_content_offset
                 clips = self.get_timeline_video_clips(existing_only=False)
-                if clips:
-                    first_vid = next((c for c in clips if not getattr(c, "is_image", False)), None)
-                    if first_vid is not None:
-                        first_video_start = float(
-                            first_vid.timeline_start
-                            if hasattr(first_vid, "timeline_start")
-                            else (first_vid.get("timeline_start", 0.0) if isinstance(first_vid, dict) else 0.0)
-                        )
+                first_video_start = resolve_timeline_content_offset(clips)
             except Exception:
                 first_video_start = 0.0
 
@@ -717,6 +711,10 @@ class PipelineLifecycleMixin:
                     f"[Voiceover] Tự động đồng bộ {len(segments)} câu voiceover bắt đầu từ video chính "
                     f"({first_video_start:.2f}s, bỏ qua intro)."
                 )
+
+        # Mix TTS in source-video time so trimming the intro does not stale the WAV.
+        from ui.helpers.srt_helpers import segments_to_source_video_time
+        mix_segments = segments_to_source_video_time(segments, first_video_start)
 
         out_dir = self.voice_output_folder_edit.text().strip() or os.path.join(self.workspace_root, "output")
         bg_path = self.resolve_background_audio_path()
@@ -810,6 +808,10 @@ class PipelineLifecycleMixin:
         except Exception:
             pass
         self._pending_voice_signature = voice_signature
+        if state is not None:
+            # Only stamp this when a new mix is about to run. A cache hit must
+            # keep whatever offset the existing WAV was actually built with.
+            state.set_setting("voice_baked_timeline_offset", 0.0)
 
         project_state_path = self.project_service.project_file(self.current_project_state.project_root) if self.current_project_state else ""
 
@@ -831,7 +833,7 @@ class PipelineLifecycleMixin:
 
         self.voice_thread = VoiceOverWorker(
             self.workspace_root,
-            segments,
+            mix_segments,
             out_dir,
             bg_path,
             audio_handling_mode,
@@ -965,6 +967,17 @@ class PipelineLifecycleMixin:
     def _regenerate_translated_srt_from_segments(self):
         """Regenerate the project SRT from the visual subtitle timeline."""
         out_path = str(getattr(self, "last_translated_srt_path", "") or "").strip()
+        state = getattr(self, "current_project_state", None)
+        project_root = getattr(state, "project_root", "")
+        if not out_path or (project_root and not os.path.abspath(out_path).startswith(os.path.abspath(project_root))):
+            if hasattr(self, "get_project_temp_path"):
+                out_path = self.get_project_temp_path("subtitle", "subtitle_translated.srt", create_parent=True)
+            elif project_root:
+                out_path = os.path.join(project_root, "subtitle", "subtitle_translated.srt")
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            self.last_translated_srt_path = out_path
+            if state:
+                state.set_artifact("subtitle_translated_srt", out_path)
         if not out_path:
             return
         try:
@@ -979,6 +992,17 @@ class PipelineLifecycleMixin:
     def _regenerate_original_srt_from_segments(self):
         """Keep the project-facing Original SRT aligned with timeline edits."""
         out_path = str(getattr(self, "last_original_srt_path", "") or "").strip()
+        state = getattr(self, "current_project_state", None)
+        project_root = getattr(state, "project_root", "")
+        if not out_path or (project_root and not os.path.abspath(out_path).startswith(os.path.abspath(project_root))):
+            if hasattr(self, "get_project_temp_path"):
+                out_path = self.get_project_temp_path("subtitle", "subtitle_original.srt", create_parent=True)
+            elif project_root:
+                out_path = os.path.join(project_root, "subtitle", "subtitle_original.srt")
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            self.last_original_srt_path = out_path
+            if state:
+                state.set_artifact("subtitle_original_srt", out_path)
         if not out_path:
             return
         try:
@@ -1056,6 +1080,7 @@ class PipelineLifecycleMixin:
             self.schedule_live_subtitle_preview_refresh()
             self.sync_segment_editor_rows()
         if self.current_project_state:
+            self.current_project_state.set_setting("voice_baked_timeline_offset", 0.0)
             self.current_project_state.set_setting("voice_track_partial", False)
             current_signature = self.build_current_voice_signature(
                 segments=self._get_voiceover_segments(),

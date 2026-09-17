@@ -153,6 +153,38 @@ class ExportWorkflow:
         os.makedirs(tmp_dir, exist_ok=True)
         return os.path.join(tmp_dir, f"final_mux_{int(time.time())}.mp4")
 
+    def _offset_audio_to_timeline(self, audio_path: str, output_path: str, delay_seconds: float) -> str:
+        """Shift a source-video-relative WAV onto the timeline clock.
+
+        Positive delay prepends silence (intro). Negative delay trims the start
+        (stale baked intro that is longer than the current intro).
+        """
+        if not audio_path or not os.path.isfile(audio_path) or abs(float(delay_seconds or 0.0)) <= 0.05:
+            return audio_path
+        try:
+            import subprocess
+            from runtime_paths import bin_path
+            ffmpeg_exe = str(bin_path("ffmpeg", "ffmpeg.exe"))
+            delay = float(delay_seconds)
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+            if delay > 0:
+                delay_ms = int(round(delay * 1000))
+                af = f"adelay={delay_ms}|{delay_ms}"
+            else:
+                af = f"atrim=start={abs(delay):.6f},asetpts=PTS-STARTPTS"
+            cmd = [
+                ffmpeg_exe, "-y", "-i", audio_path,
+                "-filter:a", af,
+                "-ar", "48000", "-ac", "2",
+                output_path,
+            ]
+            subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+            if os.path.isfile(output_path):
+                return output_path
+        except Exception as a_exc:
+            print(f"[Export] Audio timeline offset warning: {a_exc}")
+        return audio_path
+
     def _export_single_clip_stream_copy(
         self,
         *,
@@ -995,6 +1027,7 @@ class ExportWorkflow:
         video_bitrate_kbps: int = 2000,
         anti_duplicate_enabled: bool = False,
         anti_duplicate_settings=None,
+        voice_baked_timeline_offset: float = 0.0,
     ) -> str:
         subtitle_style = subtitle_style or {}
         target_w, target_h = self._resolve_target_dimensions(video_path, output_quality, output_ratio)
@@ -1007,10 +1040,19 @@ class ExportWorkflow:
         render_canvas_h = int(target_h or source_h or 1080)
         first_video_start = 0.0
         try:
-            from services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+            from services.timeline_video_sequence import (
+                resolve_timeline_content_offset,
+                is_already_timeline_relative,
+                resolve_voice_export_delay_seconds,
+            )
         except ImportError:
-            from app.services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+            from app.services.timeline_video_sequence import (
+                resolve_timeline_content_offset,
+                is_already_timeline_relative,
+                resolve_voice_export_delay_seconds,
+            )
         first_video_start = resolve_timeline_content_offset(timeline_clips)
+        aligned_dir = os.path.join(project_temp_dir or self.workspace_root, "temp")
 
         if first_video_start > 0.05 and srt_path and os.path.isfile(srt_path):
             try:
@@ -1020,33 +1062,27 @@ class ExportWorkflow:
                 parsed = parse_srt(raw_text)
                 if parsed and not is_already_timeline_relative(parsed, first_video_start):
                     aligned = align_segments_to_video_start(parsed, first_video_start)
-                    aligned_srt_dir = os.path.join(project_temp_dir or self.workspace_root, "temp")
-                    os.makedirs(aligned_srt_dir, exist_ok=True)
-                    aligned_srt_path = os.path.join(aligned_srt_dir, "aligned_export.srt")
+                    os.makedirs(aligned_dir, exist_ok=True)
+                    aligned_srt_path = os.path.join(aligned_dir, "aligned_export.srt")
                     with open(aligned_srt_path, "w", encoding="utf-8") as out_h:
                         out_h.write(to_srt(aligned))
                     srt_path = aligned_srt_path
                     ass_path = ""
-                    if audio_path and os.path.isfile(audio_path):
-                        aligned_audio_path = os.path.join(aligned_srt_dir, "aligned_export_audio.wav")
-                        try:
-                            import subprocess
-                            from runtime_paths import bin_path
-                            ffmpeg_exe = str(bin_path("ffmpeg", "ffmpeg.exe"))
-                            delay_ms = int(round(first_video_start * 1000))
-                            cmd = [
-                                ffmpeg_exe, "-y", "-i", audio_path,
-                                "-filter:a", f"adelay={delay_ms}|{delay_ms}",
-                                "-ar", "48000", "-ac", "2",
-                                aligned_audio_path
-                            ]
-                            subprocess.run(cmd, capture_output=True, check=True, timeout=60)
-                            if os.path.isfile(aligned_audio_path):
-                                audio_path = aligned_audio_path
-                        except Exception as a_exc:
-                            print(f"[Export] Audio alignment offset warning: {a_exc}")
             except Exception as e:
                 print(f"[Export] Subtitle alignment check skipped: {e}")
+
+        # Voice WAV is source-video-relative. Delay it by the current intro even
+        # when the SRT is already timeline-relative (imported/shifted cues).
+        audio_delay = resolve_voice_export_delay_seconds(
+            first_video_start, voice_baked_timeline_offset
+        )
+        if abs(audio_delay) > 0.05 and audio_path and os.path.isfile(audio_path):
+            os.makedirs(aligned_dir, exist_ok=True)
+            audio_path = self._offset_audio_to_timeline(
+                audio_path,
+                os.path.join(aligned_dir, "aligned_export_audio.wav"),
+                audio_delay,
+            )
 
         ass_path = self._ensure_subtitle_ass(
             ass_path, srt_path, ass_style, video_path, render_canvas_w, render_canvas_h

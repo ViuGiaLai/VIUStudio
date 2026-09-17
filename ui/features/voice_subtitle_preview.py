@@ -537,12 +537,16 @@ class VoiceSubtitlePreviewMixin:
         offset = 0.0
         if hasattr(self, "get_timeline_video_clips"):
             try:
-                from app.services.timeline_video_sequence import resolve_timeline_content_offset, is_already_timeline_relative
+                from app.services.timeline_video_sequence import (
+                    resolve_timeline_content_offset,
+                    resolve_voice_export_delay_seconds,
+                )
                 clips = self.get_timeline_video_clips(existing_only=True)
-                raw_offset = resolve_timeline_content_offset(clips)
-                active_segs = self.get_active_segments() if hasattr(self, "get_active_segments") else []
-                if not is_already_timeline_relative(active_segs, raw_offset):
-                    offset = raw_offset
+                baked = self.voice_baked_timeline_offset() if hasattr(self, "voice_baked_timeline_offset") else 0.0
+                offset = resolve_voice_export_delay_seconds(
+                    resolve_timeline_content_offset(clips),
+                    baked,
+                )
             except Exception:
                 offset = 0.0
 
@@ -656,29 +660,31 @@ class VoiceSubtitlePreviewMixin:
         )
 
     def _check_and_prompt_subtitle_video_alignment(self, imported_segments: list) -> list:
-        """If timeline has an intro clip / image before the main video (video starts at T > 0.05),
-        automatically align imported subtitles to start from the main video without displaying on intro.
+        """Map imported SRT timestamps onto the first real video clip.
+
+        SRT files are authored against the source video (00:00 = first video
+        frame). After an intro image is added and possibly trimmed (e.g. 3s → 2s),
+        every cue is shifted by the *current* video start so TTS/subtitles stay
+        locked to picture instead of playing during the intro.
         """
         if not imported_segments:
             return imported_segments
         video_start = 0.0
         if hasattr(self, "get_timeline_video_clips"):
             try:
+                from app.services.timeline_video_sequence import resolve_timeline_content_offset
                 clips = self.get_timeline_video_clips(existing_only=False)
-                if clips:
-                    first_vid = next((c for c in clips if not getattr(c, "is_image", False)), None)
-                    if first_vid is not None:
-                        video_start = float(
-                            first_vid.timeline_start
-                            if hasattr(first_vid, "timeline_start")
-                            else (first_vid.get("timeline_start", 0.0) if isinstance(first_vid, dict) else 0.0)
-                        )
+                video_start = resolve_timeline_content_offset(clips)
             except Exception:
                 video_start = 0.0
 
         if video_start > 0.05:
             from ui.helpers.srt_helpers import align_segments_to_video_start
-            imported_segments = align_segments_to_video_start(imported_segments, video_start)
+            imported_segments = align_segments_to_video_start(
+                imported_segments,
+                video_start,
+                force_offset=True,
+            )
             first_st = float(imported_segments[0].get("start", 0.0)) if imported_segments else 0.0
             if hasattr(self, "log"):
                 self.log(
@@ -719,11 +725,26 @@ class VoiceSubtitlePreviewMixin:
         self.current_segments = imported_segments
         self._invalidate_translation_after_original_change()
         self.transcript_text.setText(srt_text)
-        self.last_original_srt_path = file_path
-        self.processed_artifacts["srt_original"] = file_path
+
+        # Do not overwrite external source files with internal project mutations
+        state = self.ensure_current_project()
+        project_root = getattr(state, "project_root", "") if state else ""
+        if project_root and hasattr(self, "get_project_temp_path"):
+            project_srt = self.get_project_temp_path("subtitle", "subtitle_original.srt", create_parent=True)
+            try:
+                from subtitle_builder import generate_srt
+                generate_srt(imported_segments, project_srt)
+                self.last_original_srt_path = project_srt
+                self.processed_artifacts["srt_original"] = project_srt
+            except Exception:
+                self.last_original_srt_path = file_path
+                self.processed_artifacts["srt_original"] = file_path
+        else:
+            self.last_original_srt_path = file_path
+            self.processed_artifacts["srt_original"] = file_path
+
         self._commit_subtitle_mutation(selected_index=0)
         self._focus_first_imported_subtitle()
-        state = self.ensure_current_project()
         if state:
             state.set_setting("transcription_signature", "")
             self.project_service.save_project(state)
@@ -848,8 +869,24 @@ class VoiceSubtitlePreviewMixin:
                 translated=True,
             )
             self.apply_segments_to_timeline()
-        self.last_translated_srt_path = file_path
-        self.processed_artifacts["srt_translated"] = file_path
+
+        # Do not overwrite external source files with internal project mutations
+        state = self.ensure_current_project()
+        project_root = getattr(state, "project_root", "") if state else ""
+        if project_root and hasattr(self, "get_project_temp_path"):
+            project_srt = self.get_project_temp_path("subtitle", "subtitle_translated.srt", create_parent=True)
+            try:
+                from subtitle_builder import generate_srt
+                generate_srt(self.current_translated_segments, project_srt)
+                self.last_translated_srt_path = project_srt
+                self.processed_artifacts["srt_translated"] = project_srt
+            except Exception:
+                self.last_translated_srt_path = file_path
+                self.processed_artifacts["srt_translated"] = file_path
+        else:
+            self.last_translated_srt_path = file_path
+            self.processed_artifacts["srt_translated"] = file_path
+
         self._commit_subtitle_mutation(
             selected_index=0,
         )

@@ -41,8 +41,18 @@ class DummyHost(MultiVideoTimelineMixin, VoiceSubtitlePreviewMixin, ProjectState
         self._selected_segment_index = -1
         self.last_preview_video_path = ""
         self.video_view = MagicMock()
+        self.project_bridge = MagicMock()
+        self.processed_artifacts = {}
+        self.last_original_srt_path = ""
+        self.last_translated_srt_path = ""
         self._subtitle_track_preview_visible = True
         self._preview_video_has_burned_subtitles = False
+
+    def _blur_effect_enabled(self):
+        return False
+
+    def _current_subtitle_style_controls_state(self):
+        return {}
 
     def _normalize_local_file_path(self, path):
         return str(path or "")
@@ -148,6 +158,30 @@ class TestIntroImageSubtitlePosition(unittest.TestCase):
         self.assertEqual(view.video_source_height, 1080)
         view.deleteLater()
 
+    def test_import_alignment_reads_image_flag_from_dict_clips(self):
+        """Production get_timeline_video_clips() returns dicts; getattr(is_image) is always False."""
+        host = DummyHost()
+        imported = [
+            {"start": 0.5, "end": 2.5, "text": "Câu nói 1"},
+            {"start": 3.0, "end": 5.0, "text": "Câu nói 2"},
+        ]
+        aligned = host._check_and_prompt_subtitle_video_alignment(imported)
+        self.assertEqual(len(aligned), 2)
+        self.assertAlmostEqual(aligned[0]["start"], 2.5)
+        self.assertAlmostEqual(aligned[0]["end"], 4.5)
+        self.assertAlmostEqual(aligned[1]["start"], 5.0)
+        self.assertAlmostEqual(aligned[1]["end"], 7.0)
+
+    def test_import_alignment_offsets_late_first_cue_after_trimmed_intro(self):
+        host = DummyHost()
+        # Speech starts at 5s of the original video; intro on timeline is 2s.
+        imported = [
+            {"start": 5.0, "end": 7.0, "text": "Câu muộn"},
+        ]
+        aligned = host._check_and_prompt_subtitle_video_alignment(imported)
+        self.assertAlmostEqual(aligned[0]["start"], 7.0)
+        self.assertAlmostEqual(aligned[0]["end"], 9.0)
+
     def test_align_segments_to_video_start_offsets_relative_srt(self):
         from ui.helpers.srt_helpers import align_segments_to_video_start
         # Video starts at 2.0s after an intro image
@@ -192,6 +226,174 @@ class TestIntroImageSubtitlePosition(unittest.TestCase):
         self.assertAlmostEqual(aligned[1]["start"], 3.7)
 
 
+    def test_sync_preview_sidecars_no_set_position_jitter_during_playback(self):
+        from ui.utils.media_backend import _sync_preview_sidecars
+        backend = MagicMock()
+        backend._is_image = False
+        backend._is_image_source = False
+        backend.gui = None
+        backend.video_view = None
+        backend._source_path = "video.mp4"
+        orig_player = MagicMock()
+        orig_player.position.return_value = 1020  # only 20ms drift from target 1000
+        from PySide6.QtMultimedia import QMediaPlayer
+        orig_player.playbackState.return_value = QMediaPlayer.PlayingState
+        backend._original_player = orig_player
+        backend._original_loaded_path = "orig.wav"
+        backend._dubbed_player = None
+        backend._dubbed_loaded_path = ""
+
+        # Normal playback tick without force_seek: should NOT call setPosition
+        _sync_preview_sidecars(backend, 1000, playing=None, force_seek=False)
+        orig_player.setPosition.assert_not_called()
+
+        # Explicit seek: SHOULD call setPosition
+        _sync_preview_sidecars(backend, 1000, playing=None, force_seek=True)
+        orig_player.setPosition.assert_called_once_with(1000)
+
+    def test_shift_timeline_timed_elements_updates_srt_text_widgets(self):
+        host = DummyHost()
+        host.transcript_text = MagicMock()
+        host.translated_text = MagicMock()
+        host.format_to_srt = lambda segs: f"SRT count={len(segs)}"
+        host.current_segments = [{"start": 3.0, "end": 5.0, "text": "A"}]
+        host.current_translated_segments = [{"start": 3.0, "end": 5.0, "text": "B"}]
+
+        host.shift_timeline_timed_elements(-1.0, after_time=0.0)
+
+        self.assertAlmostEqual(host.current_segments[0]["start"], 2.0)
+        self.assertAlmostEqual(host.current_translated_segments[0]["start"], 2.0)
+        host.transcript_text.setText.assert_called_once_with("SRT count=1")
+        host.translated_text.setText.assert_called_once_with("SRT count=1")
+
+    def test_persist_current_timeline_project_data_updates_timeline_video_clips_setting(self):
+        from app.layers.timeline import Timeline
+        from app.layers.base import LayerType
+        from app.layers.video import VideoLayer
+
+        tl = Timeline(duration=12.0)
+        v1 = tl.add_track("V1 Video", LayerType.VIDEO)
+        v1.layers.append(VideoLayer(id="c1", name="intro.png", source="intro.png", start=0.0, end=2.0))
+        v1.layers.append(VideoLayer(id="c2", name="main.mp4", source="main.mp4", start=2.0, end=12.0))
+
+        host = DummyHost()
+        host.current_segments = []
+        host.current_translated_segments = []
+        host.timeline = MagicMock()
+        host.timeline._timeline = tl
+
+        state = MagicMock()
+        state.settings = {}
+        state.project_root = "D:/dummy_proj"
+        host.ensure_current_project = MagicMock(return_value=state)
+        host.current_project_state = state
+        host.project_service = MagicMock()
+
+        host.persist_current_timeline_project_data()
+
+        state.set_setting.assert_any_call(
+            "timeline_video_clips",
+            [
+                {
+                    "layer_id": "c1",
+                    "source": os.path.abspath("intro.png"),
+                    "timeline_start": 0.0,
+                    "timeline_end": 2.0,
+                    "source_start": 0.0,
+                    "source_duration": 2.0,
+                    "speed": 1.0,
+                    "muted": False,
+                    "volume": 1.0,
+                    "is_image": True,
+                },
+                {
+                    "layer_id": "c2",
+                    "source": os.path.abspath("main.mp4"),
+                    "timeline_start": 2.0,
+                    "timeline_end": 12.0,
+                    "source_start": 0.0,
+                    "source_duration": 10.0,
+                    "speed": 1.0,
+                    "muted": False,
+                    "volume": 1.0,
+                    "is_image": False,
+                },
+            ]
+        )
+
+    def test_import_srt_without_intro_places_cues_verbatim_at_video_time(self):
+        host = DummyHost()
+        # No intro on timeline
+        host.get_timeline_video_clips = MagicMock(return_value=[
+            {"source": "video.mp4", "timeline_start": 0.0, "timeline_end": 100.0, "is_image": False}
+        ])
+        raw_cues = [
+            {"start": 1.129, "end": 1.905, "text": "Wu shixiong"},
+            {"start": 3.299, "end": 4.879, "text": "Tay con dau khong?"},
+        ]
+        aligned = host._check_and_prompt_subtitle_video_alignment(raw_cues)
+        self.assertAlmostEqual(aligned[0]["start"], 1.129)
+        self.assertAlmostEqual(aligned[0]["end"], 1.905)
+        self.assertAlmostEqual(aligned[1]["start"], 3.299)
+        self.assertAlmostEqual(aligned[1]["end"], 4.879)
+
+    def test_import_srt_with_intro_places_cues_starting_from_video(self):
+        host = DummyHost()
+        # Intro of 2.0s on timeline
+        host.get_timeline_video_clips = MagicMock(return_value=[
+            {"source": "intro.png", "timeline_start": 0.0, "timeline_end": 2.0, "is_image": True},
+            {"source": "video.mp4", "timeline_start": 2.0, "timeline_end": 102.0, "is_image": False},
+        ])
+        raw_cues = [
+            {"start": 1.129, "end": 1.905, "text": "Wu shixiong"},
+            {"start": 3.299, "end": 4.879, "text": "Tay con dau khong?"},
+        ]
+        aligned = host._check_and_prompt_subtitle_video_alignment(raw_cues)
+        self.assertAlmostEqual(aligned[0]["start"], 3.129)
+        self.assertAlmostEqual(aligned[0]["end"], 3.905)
+        self.assertAlmostEqual(aligned[1]["start"], 5.299)
+        self.assertAlmostEqual(aligned[1]["end"], 6.879)
+
+    def test_regenerate_translated_srt_never_overwrites_external_file(self):
+        from ui.features.pipeline_lifecycle import PipelineLifecycleMixin
+        import tempfile
+
+        class LifecycleHost(PipelineLifecycleMixin):
+            def __init__(self, proj_root, ext_file):
+                self.current_project_state = MagicMock()
+                self.current_project_state.project_root = proj_root
+                self.last_translated_srt_path = ext_file
+                self.processed_artifacts = {}
+                self.current_translated_segments = [{"start": 10.0, "end": 12.0, "text": "Modified cue"}]
+                self.persist_translation_project_data = MagicMock()
+
+            def get_project_temp_path(self, folder, filename, create_parent=True):
+                target = os.path.join(self.current_project_state.project_root, folder, filename)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                return target
+
+        with tempfile.TemporaryDirectory() as proj_dir, tempfile.TemporaryDirectory() as ext_dir:
+            ext_srt = os.path.join(ext_dir, "my_downloads_sub.srt")
+            with open(ext_srt, "w", encoding="utf-8") as f:
+                f.write("1\n00:00:01,129 --> 00:00:01,905\nOriginal cue\n")
+
+            host = LifecycleHost(proj_dir, ext_srt)
+            host._regenerate_translated_srt_from_segments()
+
+            # The external file in Downloads MUST remain untouched!
+            with open(ext_srt, "r", encoding="utf-8") as f:
+                ext_content = f.read()
+            self.assertIn("Original cue", ext_content)
+            self.assertNotIn("Modified cue", ext_content)
+
+            # The regenerated file must be inside proj_dir
+            self.assertTrue(os.path.abspath(host.last_translated_srt_path).startswith(os.path.abspath(proj_dir)))
+            with open(host.last_translated_srt_path, "r", encoding="utf-8") as f:
+                internal_content = f.read()
+            self.assertIn("Modified cue", internal_content)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

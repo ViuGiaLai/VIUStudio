@@ -459,20 +459,27 @@ class TimelineWaveformWorker(QThread):
                     ffmpeg = os.path.join(bin_path("ffmpeg"), "ffmpeg.exe")
                     if self.timeline_clips:
                         from audio_mixer import _build_atempo_filter
+                        from app.services.timeline_video_sequence import is_image_file, clip_is_image
 
                         command = [ffmpeg, "-y", "-loglevel", "error"]
                         filters, labels = [], []
                         for index, clip in enumerate(self.timeline_clips):
                             command += ["-i", str(clip["source"])]
-                            start = max(0.0, float(clip.get("source_start", 0.0) or 0.0))
                             duration = max(0.001, float(clip.get("source_duration", 0.0) or 0.0))
-                            speed = max(0.01, float(clip.get("speed", 1.0) or 1.0))
                             label = f"wa{index}"
-                            filters.append(
-                                f"[{index}:a]atrim=start={start:.6f}:duration={duration:.6f},"
-                                f"asetpts=PTS-STARTPTS,{_build_atempo_filter(speed)},aresample=16000,"
-                                f"aformat=sample_fmts=s16:channel_layouts=mono[{label}]"
-                            )
+                            is_img = clip_is_image(clip) or is_image_file(str(clip.get("source", "")))
+                            if is_img:
+                                filters.append(
+                                    f"anullsrc=r=16000:cl=mono,atrim=duration={duration:.6f}[{label}]"
+                                )
+                            else:
+                                start = max(0.0, float(clip.get("source_start", 0.0) or 0.0))
+                                speed = max(0.01, float(clip.get("speed", 1.0) or 1.0))
+                                filters.append(
+                                    f"[{index}:a]atrim=start={start:.6f}:duration={duration:.6f},"
+                                    f"asetpts=PTS-STARTPTS,{_build_atempo_filter(speed)},aresample=16000,"
+                                    f"aformat=sample_fmts=s16:channel_layouts=mono[{label}]"
+                                )
                             labels.append(f"[{label}]")
                         filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[wave]")
                         command += ["-filter_complex", ";".join(filters), "-map", "[wave]", "-c:a", "pcm_s16le", temp_audio]
@@ -1041,7 +1048,7 @@ class FinalExportWorker(QThread):
     finished = Signal(str, str)
     progress = Signal(int, str)
 
-    def __init__(self, workspace_root, video_path, output_path, mode, srt_path="", ass_path="", audio_path="", subtitle_style=None, output_quality="source", output_fps="source", output_ratio="source", output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, project_state_path="", project_temp_dir="", timeline_clips=None, export_preset="balanced", video_bitrate_kbps=2000, anti_duplicate_enabled=False, anti_duplicate_settings=None):
+    def __init__(self, workspace_root, video_path, output_path, mode, srt_path="", ass_path="", audio_path="", subtitle_style=None, output_quality="source", output_fps="source", output_ratio="source", output_scale_mode="fit", output_fill_focus_x=0.5, output_fill_focus_y=0.5, video_filter_state=None, original_audio_gain_db=0.0, project_state_path="", project_temp_dir="", timeline_clips=None, export_preset="balanced", video_bitrate_kbps=2000, anti_duplicate_enabled=False, anti_duplicate_settings=None, voice_baked_timeline_offset=0.0):
         super().__init__()
         self.workspace_root = workspace_root
         self.video_path = video_path
@@ -1050,6 +1057,7 @@ class FinalExportWorker(QThread):
         self.srt_path = srt_path
         self.ass_path = ass_path
         self.audio_path = audio_path
+        self.voice_baked_timeline_offset = max(0.0, float(voice_baked_timeline_offset or 0.0))
         self.subtitle_style = subtitle_style or {}
         self.output_quality = output_quality
         self.output_fps = output_fps
@@ -1131,6 +1139,7 @@ class FinalExportWorker(QThread):
                     video_bitrate_kbps=self.video_bitrate_kbps,
                     anti_duplicate_enabled=self.anti_duplicate_enabled,
                     anti_duplicate_settings=self.anti_duplicate_settings,
+                    voice_baked_timeline_offset=self.voice_baked_timeline_offset,
                 )
                 self.finished.emit(output_path, "")
         except InterruptedError:

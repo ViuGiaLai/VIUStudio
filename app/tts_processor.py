@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import pathlib
 import re
 import subprocess
 import threading
@@ -20,6 +21,8 @@ _PIPER_VOICE_CACHE = {}
 _PIPER_VOICE_CACHE_LOCK = threading.Lock()
 _ZEROTTS_MODEL = None
 _ZEROTTS_MODEL_LOCK = threading.Lock()
+_UTF8_TEXT_READ_LOCK = threading.Lock()
+_UTF8_TEXT_READ_APPLIED = False
 _KOKORO_PIPELINE = None
 _KOKORO_PIPELINE_LOCK = threading.RLock()
 _VIETNAMESE_NORMALIZER = None
@@ -119,8 +122,41 @@ def _ensure_zerotts_runtime(*, on_progress: callable = None):
         pass
 
 
+def _prefer_utf8_for_implicit_text_reads() -> None:
+    """Read text files as UTF-8 when the caller leaves the encoding unset.
+
+    ZeroTTS ships UTF-8 manifests (``voices/*/meta.json``, ``voices/index.json``,
+    ``config.json``) and its runtime opens them with ``Path.read_text()``.  On
+    Windows that implicit encoding resolves to the ANSI code page (cp1252) and
+    dies on byte 0x81 — the tail of Vietnamese letters such as ``ề`` — so voice
+    loading fails with ``UnicodeDecodeError`` before any audio is produced.
+    Instead of shipping a patched copy of a third-party package, default these
+    reads to UTF-8 and keep the platform default as a fallback for files that
+    really are ANSI encoded.
+    """
+    global _UTF8_TEXT_READ_APPLIED
+    if _UTF8_TEXT_READ_APPLIED:
+        return
+    with _UTF8_TEXT_READ_LOCK:
+        if _UTF8_TEXT_READ_APPLIED:
+            return
+        original_read_text = pathlib.Path.read_text
+
+        def read_text(self, encoding=None, errors=None, *args, **kwargs):
+            if encoding is None:
+                try:
+                    return original_read_text(self, encoding="utf-8", errors=errors, *args, **kwargs)
+                except UnicodeDecodeError:
+                    pass
+            return original_read_text(self, encoding=encoding, errors=errors, *args, **kwargs)
+
+        pathlib.Path.read_text = read_text
+        _UTF8_TEXT_READ_APPLIED = True
+
+
 def _get_cached_zerotts(*, on_progress: callable = None):
     global _ZEROTTS_MODEL
+    _prefer_utf8_for_implicit_text_reads()
     with _ZEROTTS_MODEL_LOCK:
         if _ZEROTTS_MODEL is not None:
             return _ZEROTTS_MODEL
@@ -141,14 +177,25 @@ def _get_cached_zerotts(*, on_progress: callable = None):
             and os.path.isfile(te_path)
             and os.path.getsize(te_path) > 200_000_000
         )
+        try:
+            from zerotts_support import codec_threads, synth_threads
+
+            model_kwargs = {
+                "intra_op_num_threads": synth_threads(),
+                "codec_intra_op_num_threads": codec_threads(),
+            }
+        except ImportError:
+            # A build without the tuning module still has to synthesize; the
+            # library defaults are slower, not broken.
+            model_kwargs = {}
         model_source = local_model_dir if is_valid_local else "zeroweight-ai/ZeroTTS"
         try:
-            _ZEROTTS_MODEL = ZeroTTS.from_pretrained(model_source)
+            _ZEROTTS_MODEL = ZeroTTS.from_pretrained(model_source, **model_kwargs)
         except Exception as exc:
             if model_source != "zeroweight-ai/ZeroTTS" and not isinstance(exc, (ValueError, TypeError)):
                 if on_progress:
                     on_progress("Local ZeroTTS model incomplete, downloading latest model from Hugging Face...")
-                _ZEROTTS_MODEL = ZeroTTS.from_pretrained("zeroweight-ai/ZeroTTS")
+                _ZEROTTS_MODEL = ZeroTTS.from_pretrained("zeroweight-ai/ZeroTTS", **model_kwargs)
             else:
                 raise exc
         return _ZEROTTS_MODEL

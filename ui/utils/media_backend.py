@@ -23,6 +23,112 @@ _REALTIME_COLOR_FIELDS = (
 )
 
 
+def _backend_host(backend):
+    host = getattr(backend, "gui", None)
+    if not host and hasattr(backend, "video_view"):
+        view = backend.video_view
+        host = view.window() if hasattr(view, "window") else None
+    return host
+
+
+def _backend_is_intro_image(backend) -> bool:
+    if getattr(backend, "_is_image", None) is True or getattr(backend, "_is_image_source", None) is True:
+        return True
+    raw_path = getattr(backend, "_source_path", "") or getattr(backend, "_current_path", "") or ""
+    path = str(raw_path) if isinstance(raw_path, (str, os.PathLike)) else ""
+    if not path:
+        return False
+    try:
+        from app.services.timeline_video_sequence import is_image_file
+        return is_image_file(path)
+    except Exception:
+        return False
+
+
+def _backend_baked_offset_ms(backend) -> int:
+    host = _backend_host(backend)
+    getter = getattr(host, "voice_baked_timeline_offset", None) if host is not None else None
+    if not callable(getter):
+        return 0
+    try:
+        return max(0, int(round(float(getter() or 0.0) * 1000.0)))
+    except Exception:
+        return 0
+
+
+def _sync_preview_sidecars(
+    backend, local_ms: int, *, playing: bool | None = None, force_seek: bool = False
+) -> None:
+    """Keep A1/A2 on the source-video clock. Mute both during an intro image."""
+    from app.services.timeline_video_sequence import resolve_source_audio_position_ms
+
+    is_intro = _backend_is_intro_image(backend)
+    original_pos = resolve_source_audio_position_ms(
+        local_ms, baked_offset_ms=0, is_intro_image=is_intro
+    )
+    dubbed_pos = resolve_source_audio_position_ms(
+        local_ms,
+        baked_offset_ms=_backend_baked_offset_ms(backend),
+        is_intro_image=is_intro,
+    )
+
+    def _apply(player, loaded, position):
+        if not loaded or player is None:
+            return
+        if position is None:
+            try:
+                player.pause()
+            except Exception:
+                pass
+            return
+
+        target = int(position)
+        # 1. State changes: play or pause
+        if playing is True:
+            try:
+                from PySide6.QtMultimedia import QMediaPlayer as _QMP
+                if hasattr(player, "playbackState"):
+                    if player.playbackState() != _QMP.PlayingState:
+                        player.play()
+                else:
+                    player.play()
+            except Exception:
+                pass
+        elif playing is False:
+            try:
+                from PySide6.QtMultimedia import QMediaPlayer as _QMP
+                if hasattr(player, "playbackState"):
+                    if player.playbackState() != _QMP.PausedState:
+                        player.pause()
+                else:
+                    player.pause()
+            except Exception:
+                pass
+
+        # 2. Position synchronization:
+        # Crucial: QtMultimedia audio playback stutters heavily if setPosition() is called
+        # continuously while playing. Only call setPosition if:
+        # - Explicit seek requested (force_seek=True)
+        # - Drift between player audio and video target exceeds 200ms
+        try:
+            cur = int(player.position() or 0)
+            if force_seek or abs(cur - target) > 200:
+                player.setPosition(target)
+        except Exception:
+            pass
+
+    _apply(
+        getattr(backend, "_original_player", None),
+        getattr(backend, "_original_loaded_path", ""),
+        original_pos,
+    )
+    _apply(
+        getattr(backend, "_dubbed_player", None),
+        getattr(backend, "_dubbed_loaded_path", ""),
+        dubbed_pos,
+    )
+
+
 # Retain the precise MPV failure even though the application deliberately
 # falls back to Qt preview.  The launcher/UI can show a concise explanation,
 # while the runtime log keeps the technical loader error for support.
@@ -308,16 +414,7 @@ class QtMediaPlayerBackend(QObject):
         if getattr(self, "_is_image", False):
             return
         self.positionChanged.emit(pos)
-        global_pos = self._resolve_global_position_ms(pos)
-        # Resync sidecars if drifting
-        if self._original_loaded_path and self._original_player.playbackState() == QMediaPlayer.PlayingState:
-            diff = abs(self._original_player.position() - global_pos)
-            if diff > 250:
-                self._original_player.setPosition(global_pos)
-        if self._dubbed_loaded_path and self._dubbed_player.playbackState() == QMediaPlayer.PlayingState:
-            diff = abs(self._dubbed_player.position() - global_pos)
-            if diff > 250:
-                self._dubbed_player.setPosition(global_pos)
+        _sync_preview_sidecars(self, int(pos or 0))
 
     def _on_media_status(self, status):
         if getattr(self, "_is_image", False):
@@ -409,12 +506,10 @@ class QtMediaPlayerBackend(QObject):
             if hasattr(self, "_image_timer"):
                 self._image_timer.start()
             self.stateChanged.emit(int(QMediaPlayer.PlayingState.value))
-        else:
-            self._player.play()
-        if self._original_loaded_path:
-            self._original_player.play()
-        if self._dubbed_loaded_path:
-            self._dubbed_player.play()
+            _sync_preview_sidecars(self, int(self.position() or 0), playing=False, force_seek=True)
+            return
+        self._player.play()
+        _sync_preview_sidecars(self, int(self.position() or 0), playing=True, force_seek=True)
 
     def pause(self):
         if getattr(self, "_is_image", False):
@@ -427,6 +522,7 @@ class QtMediaPlayerBackend(QObject):
             self._original_player.pause()
         if self._dubbed_loaded_path:
             self._dubbed_player.pause()
+        _sync_preview_sidecars(self, int(self.position() or 0), playing=False)
 
     def stop(self):
         if getattr(self, "_is_image", False):
@@ -441,6 +537,7 @@ class QtMediaPlayerBackend(QObject):
             self._original_player.stop()
         if self._dubbed_loaded_path:
             self._dubbed_player.stop()
+        _sync_preview_sidecars(self, 0, playing=False, force_seek=True)
 
     def setPosition(self, position, global_position=None):
         if getattr(self, "_is_image", False):
@@ -448,11 +545,7 @@ class QtMediaPlayerBackend(QObject):
             self.positionChanged.emit(self._image_position_ms)
         else:
             self._player.setPosition(position)
-        sidecar_pos = position if global_position is not None else self._resolve_global_position_ms(position)
-        if self._original_loaded_path:
-            self._original_player.setPosition(sidecar_pos)
-        if self._dubbed_loaded_path:
-            self._dubbed_player.setPosition(sidecar_pos)
+        _sync_preview_sidecars(self, int(position or 0), force_seek=True)
 
     def position(self):
         if getattr(self, "_is_image", False):
@@ -989,17 +1082,16 @@ class MpvMediaPlayerBackend(QObject):
         if getattr(self, "_is_image_source", False):
             import time
             self._last_image_tick = time.time()
+            self._player.pause = False
+            _sync_preview_sidecars(self, int(self.position() or 0), playing=False, force_seek=True)
+            self._state = QMediaPlayer.PlayingState
+            try:
+                self.stateChanged.emit(int(self._state.value))
+            except Exception:
+                pass
+            return
         self._player.pause = False
-        if self._original_loaded_path:
-            try:
-                self._original_player.play()
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.play()
-            except Exception:
-                pass
+        _sync_preview_sidecars(self, int(self.position() or 0), playing=True, force_seek=True)
         self._state = QMediaPlayer.PlayingState
         try:
             self.stateChanged.emit(int(self._state.value))
@@ -1018,6 +1110,7 @@ class MpvMediaPlayerBackend(QObject):
                 self._dubbed_player.pause()
             except Exception:
                 pass
+        _sync_preview_sidecars(self, int(self.position() or 0), playing=False)
         self._state = QMediaPlayer.PausedState
         try:
             self.stateChanged.emit(int(self._state.value))
@@ -1042,6 +1135,7 @@ class MpvMediaPlayerBackend(QObject):
             self._player.command("seek", 0, "absolute")
         except Exception:
             pass
+        _sync_preview_sidecars(self, 0, playing=False, force_seek=True)
         self._position_ms = 0
         self._state = QMediaPlayer.StoppedState
         self.positionChanged.emit(0)
@@ -1071,17 +1165,7 @@ class MpvMediaPlayerBackend(QObject):
             self._player.command("seek", seconds, "absolute")
         except Exception:
             pass
-        sidecar_pos = int(position) if global_position is not None else self._resolve_global_position_ms(int(position))
-        if self._original_loaded_path:
-            try:
-                self._original_player.setPosition(sidecar_pos)
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.setPosition(sidecar_pos)
-            except Exception:
-                pass
+        _sync_preview_sidecars(self, int(position or 0), force_seek=True)
         self.positionChanged.emit(self._position_ms)
 
     def position(self):
@@ -1557,17 +1641,7 @@ class MpvMediaPlayerBackend(QObject):
             v_pos_ms = 0
         if v_pos_ms < 0:
             v_pos_ms = 0
-        global_pos_ms = self._resolve_global_position_ms(v_pos_ms)
-        if self._original_loaded_path:
-            try:
-                self._original_player.setPosition(int(global_pos_ms))
-            except Exception:
-                pass
-        if self._dubbed_loaded_path:
-            try:
-                self._dubbed_player.setPosition(int(global_pos_ms))
-            except Exception:
-                pass
+        _sync_preview_sidecars(self, v_pos_ms)
 
     def _sync_audio_to_video(self):
         if not self._source_path:
@@ -1576,57 +1650,16 @@ class MpvMediaPlayerBackend(QObject):
             v_pos_ms = int(float(self._player.time_pos or 0) * 1000)
         except Exception:
             return
+        if v_pos_ms < 0:
+            v_pos_ms = 0
         try:
             v_paused = bool(self._player.pause)
         except Exception:
+            v_paused = True
+        if _backend_is_intro_image(self):
+            _sync_preview_sidecars(self, v_pos_ms, playing=False)
             return
-        if self._original_loaded_path:
-            try:
-                a_state = self._original_player.playbackState()
-                a_paused = a_state == QMediaPlayer.PausedState or a_state == QMediaPlayer.StoppedState
-            except Exception:
-                a_paused = True
-            if v_paused != a_paused:
-                try:
-                    if v_paused:
-                        self._original_player.pause()
-                    else:
-                        self._original_player.play()
-                except Exception:
-                    pass
-            try:
-                a_pos_ms = int(self._original_player.position() or 0)
-            except Exception:
-                a_pos_ms = 0
-            if abs(v_pos_ms - a_pos_ms) > 300:
-                try:
-                    self._original_player.setPosition(int(v_pos_ms))
-                except Exception:
-                    pass
-        if self._dubbed_loaded_path:
-            try:
-                a_state = self._dubbed_player.playbackState()
-                a_paused = a_state == QMediaPlayer.PausedState or a_state == QMediaPlayer.StoppedState
-            except Exception:
-                a_paused = True
-            if v_paused != a_paused:
-                try:
-                    if v_paused:
-                        self._dubbed_player.pause()
-                    else:
-                        self._dubbed_player.play()
-                except Exception:
-                    pass
-            try:
-                a_pos_ms = int(self._dubbed_player.position() or 0)
-            except Exception:
-                a_pos_ms = 0
-            global_pos_ms = self._resolve_global_position_ms(v_pos_ms)
-            if abs(global_pos_ms - a_pos_ms) > 300:
-                try:
-                    self._dubbed_player.setPosition(int(global_pos_ms))
-                except Exception:
-                    pass
+        _sync_preview_sidecars(self, v_pos_ms, playing=not v_paused)
 
     def log(self, text):
         # We can reach out to the gui if needed

@@ -46,17 +46,22 @@ class DummySyncHost(VoiceSubtitlePreviewMixin, MultiVideoTimelineMixin, Timeline
         self._timeline_timing_redo_stack = []
 
     def get_timeline_video_clips(self, existing_only=False):
-        # Timeline with intro image (0.0 to 2.0s), then main video (2.0 to 12.0s)
-        clip_img = MagicMock()
-        clip_img.is_image = True
-        clip_img.timeline_start = 0.0
-        clip_img.timeline_end = 2.0
-
-        clip_vid = MagicMock()
-        clip_vid.is_image = False
-        clip_vid.timeline_start = 2.0
-        clip_vid.timeline_end = 12.0
-        return [clip_img, clip_vid]
+        # Production returns dicts from TimelineVideoClip.to_dict(), not objects.
+        # Intro image 0–2s, then main video 2–12s (after user trimmed 3s → 2s).
+        return [
+            {
+                "source": "intro.png",
+                "timeline_start": 0.0,
+                "timeline_end": 2.0,
+                "is_image": True,
+            },
+            {
+                "source": "main_video.mp4",
+                "timeline_start": 2.0,
+                "timeline_end": 12.0,
+                "is_image": False,
+            },
+        ]
 
     def timeline_position_ms(self):
         return self._timeline_global_position_ms
@@ -126,16 +131,32 @@ class TestSubtitleSyncAndTimingEdit(unittest.TestCase):
         self.assertAlmostEqual(aligned[1]["start"], 4.60)
         self.assertAlmostEqual(aligned[1]["end"], 6.80)
 
-    def test_auto_alignment_already_aligned_remains_intact(self):
+    def test_import_treats_srt_as_source_video_time_even_when_first_cue_is_after_intro(self):
         host = DummySyncHost()
-        # Subtitles already start at 2.5s (>= video_start 2.0s)
+        # First speech is 2.50s into the original video — later than the 2.0s intro.
+        # File import must still add the intro offset (2.50 → 4.50).
         imported = [
             {"start": 2.50, "end": 4.50, "text": "Hello"},
         ]
         aligned = host._check_and_prompt_subtitle_video_alignment(imported)
 
-        # Kept start 2.50 without double shifting
-        self.assertAlmostEqual(aligned[0]["start"], 2.50)
+        self.assertAlmostEqual(aligned[0]["start"], 4.50)
+        self.assertAlmostEqual(aligned[0]["end"], 6.50)
+
+    def test_import_uses_trimmed_intro_duration_not_original_three_seconds(self):
+        host = DummySyncHost()
+        imported = [
+            {"start": 5.00, "end": 7.20, "text": "Late first line"},
+            {"start": 8.00, "end": 10.00, "text": "Second line"},
+        ]
+        aligned = host._check_and_prompt_subtitle_video_alignment(imported)
+
+        # Intro was trimmed 3s → 2s, so offset is +2.0 not +3.0
+        self.assertAlmostEqual(aligned[0]["start"], 7.00)
+        self.assertAlmostEqual(aligned[0]["end"], 9.20)
+        self.assertAlmostEqual(aligned[1]["start"], 10.00)
+        self.assertAlmostEqual(aligned[1]["end"], 12.00)
+        self.assertTrue(aligned[0].get("_timeline_relative"))
 
     def test_subtitle_sync_dialog_presets_and_apply_all(self):
         host = DummySyncHost()

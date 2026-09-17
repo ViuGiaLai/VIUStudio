@@ -1377,12 +1377,15 @@ class EditorTimeline(QGraphicsView):
         wave_h = 10.0 if show_mini_wave else 0.0
         thumb_h = max(0.0, h - header_h - wave_h)
         
-        # 2. Draw Thumbnails Filmstrip in middle
+        # 2. Draw Thumbnails Filmstrip in middle (or image thumbnail for image clips)
         if thumb_h >= 8:
             thumb_y = y + header_h
             painter.save()
             painter.setClipPath(clip_path)
-            self._draw_video_thumbnails(painter, x, thumb_y, w, thumb_h, view_w)
+            if is_img:
+                self._draw_image_clip_thumbnail(painter, layer, x, thumb_y, w, thumb_h, view_w)
+            else:
+                self._draw_video_thumbnails(painter, x, thumb_y, w, thumb_h, view_w)
             painter.restore()
             
         # 3. Draw Mini Waveform Strip at Bottom (videos only)
@@ -1540,6 +1543,50 @@ class EditorTimeline(QGraphicsView):
                 painter.setPen(QPen(QColor(10, 18, 30, 80), 1))
                 painter.drawLine(block_right, int(y), block_right, int(y + target_h))
         painter.restore()
+
+    def _draw_image_clip_thumbnail(self, painter: QPainter, layer, x: int, y: float, w: int,
+                                   h: float, view_w: int) -> None:
+        source = getattr(layer, "source", "")
+        if not source or not os.path.exists(source) or h <= 4 or w <= 4:
+            return
+        left = max(0, x)
+        right = min(view_w, x + w)
+        if right <= left:
+            return
+        if not hasattr(self, "_image_clip_pixmap_cache"):
+            self._image_clip_pixmap_cache = {}
+        target_h = max(8, int(h))
+        cache_key = (source, target_h)
+        pix = self._image_clip_pixmap_cache.get(cache_key)
+        if pix is None:
+            from PySide6.QtGui import QPixmap
+            raw_pix = QPixmap(source)
+            if not raw_pix.isNull():
+                pix = raw_pix.scaledToHeight(target_h, Qt.SmoothTransformation)
+                self._image_clip_pixmap_cache[cache_key] = pix
+            else:
+                return
+        if pix and not pix.isNull():
+            painter.save()
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.setClipRect(QRectF(left, y, right - left, h))
+            pw = pix.width()
+            ph = pix.height()
+            if pw > 0 and ph > 0:
+                tile_w = float(pw)
+                tile_left = float(x)
+                while tile_left < float(x + w):
+                    tile_right = min(float(x + w), tile_left + tile_w)
+                    if tile_right > float(left) and tile_left < float(right):
+                        span_w = tile_right - tile_left
+                        crop_w = float(pw) * (span_w / tile_w)
+                        painter.drawPixmap(
+                            QRectF(tile_left, y, span_w, h),
+                            pix,
+                            QRectF(0.0, 0.0, crop_w, float(ph)),
+                        )
+                    tile_left = tile_right
+            painter.restore()
 
     def _draw_standard_layer_bar(self, painter, layer, x, y, w, h, view_w, is_selected, is_overflow_row: bool = False, force_subtitle_color: bool = False, force_subtitle_track: bool = False, hide_label: bool = False):
         # Every subtitle bar (DubSubtitleLayer, SubtitleLayer, or any

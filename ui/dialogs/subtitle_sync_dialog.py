@@ -52,15 +52,15 @@ class SubtitleSyncDialog(QDialog):
             except Exception:
                 self.video_clips = []
         if self.video_clips:
-            # Find first real video clip, or fallback to first clip
-            first_vid = next((c for c in self.video_clips if not getattr(c, "is_image", False)), None)
-            if first_vid is None:
-                first_vid = self.video_clips[0]
-            self.first_video_start = float(
-                first_vid.timeline_start if hasattr(first_vid, "timeline_start") else (
-                    first_vid.get("timeline_start", 0.0) if isinstance(first_vid, dict) else 0.0
+            from app.services.timeline_video_sequence import resolve_timeline_content_offset
+            self.first_video_start = resolve_timeline_content_offset(self.video_clips)
+            if self.first_video_start <= 0.0:
+                first_clip = self.video_clips[0]
+                self.first_video_start = float(
+                    first_clip.timeline_start if hasattr(first_clip, "timeline_start") else (
+                        first_clip.get("timeline_start", 0.0) if isinstance(first_clip, dict) else 0.0
+                    )
                 )
-            )
 
         # Resolve current playhead
         self.playhead_s = 0.0
