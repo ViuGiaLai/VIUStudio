@@ -1,4 +1,4 @@
-﻿name: Build and Release VIUStudio
+name: Build and Release VIUStudio
 
 on:
   push:
@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   build-windows:
@@ -85,26 +88,80 @@ jobs:
       - name: Build Windows Installer (Setup.exe)
         shell: pwsh
         run: |
-          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "1.0.0" }
+          $ver = (Get-Content app/version.py | Where-Object { $_ -match 'APP_VERSION\s*=\s*["'']([^"'']+)["'']' } | ForEach-Object { $matches[1] })
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v$ver" }
           $cleanVersion = $tag.TrimStart("v")
           $env:APP_VERSION = $cleanVersion
+          Write-Host "Building Inno Setup for version: $cleanVersion"
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\VIUStudio_setup.iss
 
       - name: Create Release Zip Archive (Portable)
         shell: pwsh
         run: |
-          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "latest" }
+          $ver = (Get-Content app/version.py | Where-Object { $_ -match 'APP_VERSION\s*=\s*["'']([^"'']+)["'']' } | ForEach-Object { $matches[1] })
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v$ver" }
           $zipName = "dist\VIUStudio-$tag-Windows-Portable.zip"
-          Compress-Archive -Path "dist\VIUStudio\*" -DestinationPath $zipName -Force
+          if (Get-Command 7z -ErrorAction SilentlyContinue) {
+            Write-Host "Using 7-Zip for fast multi-threaded compression..."
+            7z a -tzip -mx=4 "$zipName" ".\dist\VIUStudio\*"
+          } else {
+            Write-Host "7-Zip not found, falling back to Compress-Archive..."
+            Compress-Archive -Path "dist\VIUStudio\*" -DestinationPath "$zipName" -Force
+          }
           Write-Host "Created portable archive: $zipName"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            dist/*.exe
-            dist/*.zip
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = (Get-Content app/version.py | Where-Object { $_ -match 'APP_VERSION\s*=\s*["'']([^"'']+)["'']' } | ForEach-Object { $matches[1] })
+          $tag = if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v$ver" }
+          Write-Host "Publishing GitHub Release for tag: $tag"
+
+          # Check if release exists; if not, create it
+          $releaseView = & gh release view $tag 2>&1
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "Release $tag does not exist. Creating..."
+              & gh release create $tag --title "$tag" --generate-notes
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Warning "Initial creation returned code $LASTEXITCODE. Re-checking..."
+                  $null = & gh release view $tag 2>&1
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "Could not create or locate release for $tag"
+                  }
+              }
+          } else {
+              Write-Host "Release $tag already exists. Proceeding to asset upload."
+          }
+
+          # Locate assets
+          $assets = Get-ChildItem -Path "dist\*.exe", "dist\*.zip"
+          if (-not $assets -or $assets.Count -eq 0) {
+              throw "No release assets found in dist/ (*.exe or *.zip)"
+          }
+
+          # Upload assets sequentially with retry logic to avoid socket reset
+          foreach ($asset in $assets) {
+              $sizeMB = [math]::Round($asset.Length / 1MB, 2)
+              Write-Host "=========================================="
+              Write-Host "Uploading $($asset.Name) ($sizeMB MB)..."
+              Write-Host "=========================================="
+              $uploaded = $false
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                  Write-Host "Attempt $attempt of 3..."
+                  & gh release upload $tag $asset.FullName --clobber
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host "Successfully uploaded $($asset.Name)"
+                      $uploaded = $true
+                      break
+                  }
+                  Write-Warning "Attempt $attempt failed for $($asset.Name). Retrying in 15 seconds..."
+                  Start-Sleep -Seconds 15
+              }
+              if (-not $uploaded) {
+                  throw "Failed to upload $($asset.Name) after 3 attempts."
+              }
+          }
+          Write-Host "All assets uploaded successfully to release $tag!"
