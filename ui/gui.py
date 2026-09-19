@@ -61,6 +61,15 @@ def _hide_console_window_if_present() -> None:
         pass
 
 
+# The console guard patches ``subprocess.Popen`` process-wide and caches the
+# ``platform`` version probe (which otherwise starts a visible ``cmd /c ver``
+# whenever a lazily imported library asks for the OS version).  It must run
+# before Qt and before any other third-party import, otherwise a library can
+# capture the original ``Popen`` or warm ``platform`` first.
+from console_guard import apply_console_guard
+
+apply_console_guard()
+
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication
 

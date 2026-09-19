@@ -51,6 +51,13 @@ def _configure_worker_text_streams() -> None:
 
 _configure_worker_text_streams()
 
+# The worker owns no console (it is started with CREATE_NO_WINDOW) and runs the
+# heavy pipelines, so it must guard its own child processes as well: any
+# console-mode child it starts would otherwise get a brand new visible window.
+from console_guard import apply_console_guard
+
+apply_console_guard()
+
 _QUIET = os.getenv("VIUSTUDIO_QUIET", "").strip().lower() in ("1", "true", "yes")
 _GPU_LOCK = threading.Lock()
 _MAX_REQUEST_BYTES = 128 * 1024 * 1024
